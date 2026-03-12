@@ -1,0 +1,253 @@
+syntax = "proto3";
+
+package rick.handler.v1;
+
+option go_package = "github.com/marconn/rick-event-driven-development/internal/grpchandler/proto;handlerpb";
+
+// PersonaService allows external systems to register as event handlers
+// in Rick's choreography chain. The bidirectional stream serves as both
+// the registration mechanism and the dispatch channel.
+//
+// Lifecycle:
+//   1. Client opens stream, sends HandlerRegistration as first message
+//   2. Server responds with RegistrationAck
+//   3. Server sends DispatchRequest when trigger conditions are met
+//   4. Client processes and sends HandlerResult back
+//   5. Stream close = handler deregistration (automatic cleanup)
+service PersonaService {
+  rpc HandleStream(stream HandlerMessage) returns (stream DispatchMessage);
+}
+
+// === Client → Server messages ===
+
+message HandlerMessage {
+  oneof msg {
+    HandlerRegistration      registration      = 1;
+    HandlerResult            result             = 2;
+    Heartbeat                heartbeat          = 3;
+    InjectEventRequest       inject             = 4;
+    WatchRequest             watch              = 5;
+    UnwatchRequest           unwatch            = 6;
+    RegisterWorkflowRequest  register_workflow  = 7;
+  }
+}
+
+// HandlerRegistration is the first message a client sends to register
+// itself as a handler in Rick's choreography chain.
+message HandlerRegistration {
+  // Unique handler name (e.g., "frontend-enricher", "security-scanner").
+  string name = 1;
+
+  // Event types this handler subscribes to (e.g., "persona.completed").
+  repeated string event_types = 2;
+
+  // Join condition: handler fires only after all listed personas have
+  // completed for the same correlation. Empty = no join condition.
+  repeated string after_personas = 3;
+
+  // Before-hook targets: personas that should wait for this handler
+  // before dispatching. E.g., ["developer"] means developer won't fire
+  // until this handler completes.
+  repeated string before_hook_targets = 4;
+
+  // If true, this handler supports two-phase hint/execute dispatch.
+  // The server will register a gRPCHinter proxy so PersonaRunner sends
+  // a hint_only=true DispatchRequest before the full Handle() dispatch.
+  bool supports_hints = 5;
+}
+
+// HandlerResult is the client's response to a DispatchRequest.
+message HandlerResult {
+  // Matches DispatchRequest.dispatch_id for correlation.
+  string dispatch_id = 1;
+
+  // Result events to emit (enrichment context, AI responses, etc.).
+  repeated EventEnvelope events = 2;
+
+  // Non-empty = handler failed. PersonaRunner emits PersonaFailed.
+  string error = 3;
+
+  // When true, handler ran successfully but has more work to do.
+  // PersonaRunner persists result events but skips PersonaCompleted.
+  bool incomplete = 4;
+}
+
+// Heartbeat keeps the stream alive during long idle periods.
+message Heartbeat {
+  int64 timestamp_ms = 1;
+}
+
+// === Server → Client messages ===
+
+message DispatchMessage {
+  oneof msg {
+    RegistrationAck        ack              = 1;
+    DispatchRequest        dispatch         = 2;
+    InjectEventResult      inject_result    = 3;
+    WorkflowNotification   notification     = 4;
+    RegisterWorkflowResult workflow_result  = 5;
+    DisplacedNotification  displaced        = 6;
+  }
+}
+
+// DisplacedNotification is sent by the server when a new client registers
+// with the same handler name, displacing this client's stream. The client
+// should treat this as a terminal error and reconnect after backoff.
+message DisplacedNotification {
+  string handler = 1;  // the handler name that was displaced
+  string reason  = 2;  // human-readable reason
+}
+
+// RegistrationAck confirms successful handler registration.
+message RegistrationAck {
+  string name = 1;
+  string status = 2;  // "ok" or error description
+}
+
+// DispatchRequest sends an event to the external handler for processing.
+message DispatchRequest {
+  // Unique dispatch ID for correlating the result.
+  string dispatch_id = 1;
+
+  // The triggering event.
+  EventEnvelope event = 2;
+
+  // If true, handler should return a HintEmitted event (lightweight pre-check)
+  // instead of full execution results. Backwards compatible: handlers that
+  // don't understand this flag run fully (PersonaRunner treats result as hint).
+  bool hint_only = 3;
+}
+
+// InjectEventRequest allows an external system to push an event into a
+// Rick workflow through the existing bidirectional stream.
+message InjectEventRequest {
+  // Client-generated ID to correlate the response.
+  string request_id = 1;
+
+  // The event to inject. Required fields: type, correlation_id, payload.
+  // Server assigns: id, aggregate_id, version, timestamp, source.
+  EventEnvelope event = 2;
+}
+
+// InjectEventResult is the server's response to an InjectEventRequest.
+message InjectEventResult {
+  // Matches InjectEventRequest.request_id.
+  string request_id = 1;
+
+  bool   success  = 2;
+  string error    = 3;  // non-empty on failure
+  string event_id = 4;  // server-assigned event ID on success
+}
+
+// RegisterWorkflowRequest registers a custom workflow definition. The workflow
+// is a completion manifest — it declares which handlers must emit
+// PersonaCompleted for the workflow to succeed. Ordering emerges from handler
+// trigger declarations, not from this definition.
+message RegisterWorkflowRequest {
+  // Client-generated ID to correlate the response.
+  string request_id = 1;
+
+  // Unique workflow identifier (e.g., "my-review", "ci-pipeline").
+  string workflow_id = 2;
+
+  // Handler names that must all emit PersonaCompleted.
+  // Can reference local handlers, other gRPC handlers, or the registering
+  // handler itself — any handler currently subscribed is eligible.
+  repeated string required = 3;
+
+  // Max feedback loop iterations (0 = use server default of 3).
+  int32 max_iterations = 4;
+
+  // If true, pause instead of fail when max iterations reached.
+  bool escalate_on_max_iter = 5;
+}
+
+// RegisterWorkflowResult is the server's response to a RegisterWorkflowRequest.
+message RegisterWorkflowResult {
+  // Matches RegisterWorkflowRequest.request_id.
+  string request_id = 1;
+
+  bool   success = 2;
+  string error   = 3;  // non-empty on failure
+
+  // Handler names from the required list that are currently registered
+  // (local or gRPC-connected). Handlers not in this list may connect later.
+  repeated string available_handlers = 4;
+
+  // Handler names from the required list that are NOT currently registered.
+  repeated string missing_handlers = 5;
+}
+
+// WatchRequest subscribes to workflow lifecycle notifications for the given
+// correlation IDs. An empty list means watch all workflows.
+message WatchRequest {
+  repeated string correlation_ids = 1;
+}
+
+// UnwatchRequest unsubscribes from workflow lifecycle notifications for the
+// given correlation IDs. An empty list means unwatch all.
+message UnwatchRequest {
+  repeated string correlation_ids = 1;
+}
+
+// WorkflowNotification is a push notification sent when a workflow reaches a
+// terminal state (completed, failed, cancelled).
+message WorkflowNotification {
+  string correlation_id  = 1;
+  string status          = 2;   // "completed", "failed", "cancelled"
+  string result          = 3;   // completion result or fail/cancel reason
+  string failed_phase    = 4;   // phase that caused failure (empty if completed)
+  int64  started_at_ms   = 5;
+  int64  completed_at_ms = 6;
+  int64  duration_ms     = 7;
+
+  int32  total_tokens              = 8;
+  map<string, int32> tokens_by_phase   = 9;
+  map<string, int32> tokens_by_backend = 10;
+
+  repeated PhaseSummary phases = 11;
+
+  repeated VerdictDetail verdicts = 12;
+}
+
+// PhaseSummary provides per-phase timing and status in a WorkflowNotification.
+message PhaseSummary {
+  string phase       = 1;
+  string status      = 2;   // "done", "failed"
+  int32  iterations  = 3;
+  int64  duration_ms = 4;
+}
+
+// VerdictDetail provides per-phase review verdict data in a WorkflowNotification.
+message VerdictDetail {
+  string phase        = 1;  // target phase ("develop")
+  string source_phase = 2;  // who rendered it ("review", "qa")
+  string outcome      = 3;  // "pass", "fail", "unknown"
+  string summary      = 4;
+  repeated IssueSummary issues = 5;
+}
+
+// IssueSummary is a single review finding in a VerdictDetail.
+message IssueSummary {
+  string severity    = 1;
+  string category    = 2;
+  string description = 3;
+  string file        = 4;
+  int32  line        = 5;
+}
+
+// === Shared types ===
+
+// EventEnvelope mirrors event.Envelope for wire transport.
+message EventEnvelope {
+  string id             = 1;
+  string type           = 2;
+  string aggregate_id   = 3;
+  int32  version        = 4;
+  int32  schema_version = 5;
+  int64  timestamp_ms   = 6;
+  string causation_id   = 7;
+  string correlation_id = 8;
+  string source         = 9;
+  bytes  payload        = 10;
+}

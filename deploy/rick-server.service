@@ -1,0 +1,15 @@
+[Unit]
+Description=Rick Event-Driven AI Workflow Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rick serve --db /var/lib/rick/rick.db --addr :8077
+Restart=on-failure
+RestartSec=5
+User=rick
+Group=rick
+WorkingDirectory=/var/lib/rick
+
+[Install]
+WantedBy=multi-user.target

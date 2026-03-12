@@ -1,0 +1,26 @@
+# Claude Code worktrees
+.claude/worktrees/**/*
+
+# Workflow output (generated artifacts)
+.workflow/
+
+# Compiled binaries
+rick
+agent/rick-agent
+*.test
+
+# Build output
+agent/build/
+agent/frontend/dist/
+
+# Dependencies
+agent/frontend/node_modules/
+
+# Packages
+deploy/*.deb
+
+# Temp / generated
+log.txt
+*.out
+*.db
+github.com/

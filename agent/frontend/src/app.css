@@ -1,0 +1,266 @@
+@import "tailwindcss";
+
+/* Typora-inspired light theme — clean, minimal, typography-first */
+:root {
+  font-size: 18px;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar — thin, nearly invisible */
+.chat-scroll::-webkit-scrollbar,
+.dashboard-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+.chat-scroll::-webkit-scrollbar-track,
+.dashboard-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chat-scroll::-webkit-scrollbar-thumb,
+.dashboard-scroll::-webkit-scrollbar-thumb {
+  background: #d4d4d8;
+  border-radius: 3px;
+}
+.chat-scroll::-webkit-scrollbar-thumb:hover,
+.dashboard-scroll::-webkit-scrollbar-thumb:hover {
+  background: #a1a1aa;
+}
+
+/* Markdown content — Typora-style prose */
+.markdown-content {
+  line-height: 1.75;
+  letter-spacing: 0.005em;
+  color: #374151;
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3 {
+  font-weight: 600;
+  color: #111827;
+  margin-top: 1.25rem;
+  margin-bottom: 0.375rem;
+  letter-spacing: -0.01em;
+}
+.markdown-content h1 { font-size: 1.625rem; }
+.markdown-content h2 { font-size: 1.375rem; }
+.markdown-content h3 { font-size: 1.125rem; }
+
+.markdown-content p {
+  margin-bottom: 0.75rem;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  padding-left: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+.markdown-content ul { list-style-type: disc; }
+.markdown-content ol { list-style-type: decimal; }
+
+.markdown-content li {
+  margin-bottom: 0.25rem;
+}
+
+.markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 0.75rem;
+  font-size: 0.9375rem;
+}
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid #e5e7eb;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.markdown-content th {
+  background: #f9fafb;
+  font-weight: 600;
+  color: #374151;
+}
+
+.markdown-content pre {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 0.875rem 1rem;
+  overflow-x: auto;
+  margin-bottom: 0.75rem;
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+.markdown-content code {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.9em;
+}
+.markdown-content :not(pre) > code {
+  background: #f3f4f6;
+  padding: 0.125rem 0.375rem;
+  border-radius: 4px;
+  font-size: 0.875em;
+  color: #374151;
+}
+
+.markdown-content .mermaid {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+  overflow-x: auto;
+  text-align: center;
+}
+.markdown-content .mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.markdown-content blockquote {
+  border-left: 3px solid #d1d5db;
+  padding-left: 1rem;
+  margin-bottom: 0.75rem;
+  color: #6b7280;
+  font-style: italic;
+}
+
+.markdown-content a {
+  color: #4183c4;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.markdown-content a:hover {
+  color: #2563eb;
+}
+
+.markdown-content hr {
+  border: none;
+  border-top: 1px solid #e5e7eb;
+  margin: 1.25rem 0;
+}
+
+/* Typing indicator animation */
+@keyframes blink {
+  0%, 80%, 100% { opacity: 0; }
+  40% { opacity: 1; }
+}
+.typing-dot {
+  animation: blink 1.4s infinite both;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* Status dot pulse for running workflows */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.status-dot-running {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* Phase timeline bar styles */
+.phase-bar {
+  height: 5px;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.phase-bar-running {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+.phase-bar-hint {
+  animation: pulse-teal 1.5s ease-in-out infinite;
+}
+@keyframes pulse-teal {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Event row hover */
+.event-row:hover {
+  background: #f9fafb;
+}
+
+/* Accordion transition */
+.accordion-content {
+  overflow: hidden;
+  transition: max-height 0.2s ease-out;
+}
+
+/* Slash command autocomplete popup */
+.cmd-autocomplete {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  padding: 0.25rem 0;
+  z-index: 50;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
+}
+.cmd-autocomplete::-webkit-scrollbar {
+  width: 4px;
+}
+.cmd-autocomplete::-webkit-scrollbar-track {
+  background: transparent;
+}
+.cmd-autocomplete::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 2px;
+}
+.cmd-autocomplete-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.5rem 1rem;
+  text-align: left;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: #374151;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  transition: background 0.1s;
+}
+.cmd-autocomplete-item.selected,
+.cmd-autocomplete-item:hover {
+  background: #f3f4f6;
+}
+.cmd-name {
+  font-weight: 600;
+  color: #4183c4;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+.cmd-usage {
+  color: #9ca3af;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.8125rem;
+}
+.cmd-desc {
+  color: #6b7280;
+  margin-left: auto;
+  white-space: nowrap;
+  font-size: 0.8125rem;
+}
+
+/* Proportion bar for token breakdowns */
+.proportion-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: #f3f4f6;
+  overflow: hidden;
+}
+.proportion-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}

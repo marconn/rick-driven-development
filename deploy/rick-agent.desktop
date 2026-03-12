@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Rick Operator
+Comment=Desktop AI Workflow Dashboard
+Exec=/usr/bin/rick-agent
+Icon=rick-agent
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+Keywords=ai;workflow;operator;rick;
+StartupWMClass=rick-agent
