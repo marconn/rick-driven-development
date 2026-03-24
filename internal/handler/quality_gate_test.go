@@ -359,6 +359,263 @@ func TestStackRunResultIsStackError(t *testing.T) {
 	}
 }
 
+// TestQualityGateStackCrashesNonJSON verifies the fallback path when the stack
+// binary crashes or returns non-JSON output (e.g., segfault, stderr-only).
+// The runCheck JSON parse fails → parse_error code → NOT a stack error → VerdictFail.
+func TestQualityGateStackCrashesNonJSON(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake stack that prints non-JSON garbage and exits non-zero.
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+echo "Segmentation fault (core dumped)" >&2
+exit 139
+`)
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-crash"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-crash"),
+	}
+
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 300}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-crash")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 verdict event, got %d", len(got))
+	}
+	// parse_error is NOT a stack infrastructure error → should be VerdictFail, not skip.
+	assertVerdictOutcome(t, got[0], event.VerdictFail)
+
+	var vp event.VerdictPayload
+	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(vp.Summary, "lint failed") {
+		t.Errorf("summary should report lint failure, got: %s", vp.Summary)
+	}
+}
+
+// TestQualityGateStackRepoNotFound verifies that repo_not_found stack errors
+// are treated as infrastructure skip (pass), just like no_compose_file.
+func TestQualityGateStackRepoNotFound(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+cat <<'EOF'
+{"status":"error","code":"repo_not_found","message":"repository path does not exist"}
+EOF
+exit 31
+`)
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-norepo"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-norepo"),
+	}
+
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 300}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-norepo")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertVerdictOutcome(t, got[0], event.VerdictPass)
+
+	var vp event.VerdictPayload
+	_ = json.Unmarshal(got[0].Payload, &vp)
+	if !strings.Contains(vp.Summary, "repo_not_found") {
+		t.Errorf("summary should mention repo_not_found, got: %s", vp.Summary)
+	}
+}
+
+// TestQualityGateStackMultipassNotInstalled verifies that
+// multipass_not_installed stack errors are treated as infrastructure skip.
+func TestQualityGateStackMultipassNotInstalled(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+cat <<'EOF'
+{"status":"error","code":"multipass_not_installed","message":"multipass: command not found"}
+EOF
+exit 31
+`)
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-nomp"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-nomp"),
+	}
+
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 300}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-nomp")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertVerdictOutcome(t, got[0], event.VerdictPass)
+
+	var vp event.VerdictPayload
+	_ = json.Unmarshal(got[0].Payload, &vp)
+	if !strings.Contains(vp.Summary, "multipass_not_installed") {
+		t.Errorf("summary should mention multipass_not_installed, got: %s", vp.Summary)
+	}
+}
+
+// TestQualityGateRunCheckPassesCorrectArgs verifies that runCheck invokes
+// the stack binary with the expected argument format:
+// stack run <wsPath> ./run.sh <check> --json --timeout <n>
+func TestQualityGateRunCheckPassesCorrectArgs(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake stack that captures its own args into a file, then returns success.
+	argsFile := filepath.Join(t.TempDir(), "captured-args")
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+printf '%s\n' "$@" > `+argsFile+`
+cat <<'EOF'
+{"status":"success","action":"run","exit_code":0,"stack":"tmp-test","kept":false,"output":"ok"}
+EOF
+exit 0
+`)
+
+	h := &QualityGateHandler{store: newMockStore(), name: "quality-gate", stackBin: fakeStack, timeout: 42}
+	_, err := h.runCheck(context.Background(), "/ws/my-repo", "lint")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	argsRaw, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	args := strings.Split(strings.TrimSpace(string(argsRaw)), "\n")
+
+	want := []string{"run", "/ws/my-repo", "./run.sh", "lint", "--json", "--timeout", "42"}
+	if len(args) != len(want) {
+		t.Fatalf("expected %d args, got %d: %v", len(want), len(args), args)
+	}
+	for i, w := range want {
+		if args[i] != w {
+			t.Errorf("arg[%d]: want %q, got %q", i, w, args[i])
+		}
+	}
+}
+
+// TestQualityGateContextCancellation verifies that a cancelled context
+// propagates through to the stack binary execution.
+func TestQualityGateContextCancellation(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake stack that sleeps forever (should be killed by context cancel).
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+sleep 60
+`)
+
+	h := &QualityGateHandler{store: newMockStore(), name: "quality-gate", stackBin: fakeStack, timeout: 300}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	_, err := h.runCheck(ctx, tmp, "lint")
+	if err == nil {
+		t.Fatal("expected error from cancelled context, got nil")
+	}
+}
+
+// TestQualityGateFailVerdictTruncatesLargeOutput verifies that when a check
+// fails with very large output, the issue description is truncated to avoid
+// bloating event payloads.
+func TestQualityGateFailVerdictTruncatesLargeOutput(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Generate 5000 chars of output — well above the 2000 char truncation limit.
+	bigOutput := strings.Repeat("X", 5000)
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+cat <<'EOF'
+{"status":"success","action":"run","exit_code":1,"stack":"tmp-test","kept":false,"output":"`+bigOutput+`"}
+EOF
+exit 1
+`)
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-big"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-big"),
+	}
+
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 300}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-big")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertVerdictOutcome(t, got[0], event.VerdictFail)
+
+	var vp event.VerdictPayload
+	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
+		t.Fatal(err)
+	}
+	if len(vp.Issues) == 0 {
+		t.Fatal("expected at least one issue")
+	}
+	// The issue description should be truncated (2000 chars + prefix + suffix).
+	if len(vp.Issues[0].Description) > 2200 {
+		t.Errorf("issue description should be truncated, got length %d", len(vp.Issues[0].Description))
+	}
+	if !strings.Contains(vp.Issues[0].Description, "(truncated)") {
+		t.Error("truncated output should contain truncation marker")
+	}
+}
+
+// TestQualityGateStackBinaryMissing verifies behavior when the stack binary
+// path does not exist at all.
+func TestQualityGateStackBinaryMissing(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-nobin"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-nobin"),
+	}
+
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: "/nonexistent/stack-binary", timeout: 300}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-nobin")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Missing binary → exec fails → parse_error → NOT a stack error → VerdictFail.
+	assertVerdictOutcome(t, got[0], event.VerdictFail)
+}
+
 // assertVerdictOutcome checks that an envelope is a VerdictRendered with the expected outcome.
 func assertVerdictOutcome(t *testing.T, env event.Envelope, want event.VerdictOutcome) {
 	t.Helper()
