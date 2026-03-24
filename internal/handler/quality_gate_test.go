@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/marconn/rick-event-driven-development/internal/event"
@@ -93,12 +94,12 @@ func TestQualityGateNoWorkspace(t *testing.T) {
 	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: "stack", timeout: 300}
 	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-1")
 
-	got, err := h.Handle(context.Background(), triggerEvt)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := h.Handle(context.Background(), triggerEvt)
+	if err == nil {
+		t.Fatal("expected error when no workspace found, got nil")
 	}
-	if got != nil {
-		t.Errorf("expected nil result when no workspace, got %d events", len(got))
+	if !strings.Contains(err.Error(), "no workspace found") {
+		t.Errorf("error should mention missing workspace, got: %v", err)
 	}
 }
 
@@ -314,12 +315,12 @@ func TestQualityGateEmptyCorrelation(t *testing.T) {
 	h := NewQualityGate(testDeps())
 	env := event.New(event.PersonaCompleted, 1, nil)
 
-	got, err := h.Handle(context.Background(), env)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, err := h.Handle(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected error when no workspace found (empty correlation), got nil")
 	}
-	if got != nil {
-		t.Errorf("expected nil for empty correlation, got %v", got)
+	if !strings.Contains(err.Error(), "no workspace found") {
+		t.Errorf("error should mention missing workspace, got: %v", err)
 	}
 }
 

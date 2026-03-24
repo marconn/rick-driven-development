@@ -50,7 +50,7 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 		return nil, fmt.Errorf("quality-gate: resolve workspace: %w", err)
 	}
 	if wsPath == "" {
-		return nil, nil
+		return nil, fmt.Errorf("quality-gate: no workspace found in correlation chain — workflow requires a provisioned workspace")
 	}
 
 	runScript := filepath.Join(wsPath, "run.sh")
@@ -168,28 +168,9 @@ func (h *QualityGateHandler) failVerdict(summary string, issues []event.Issue) [
 	}
 }
 
-// resolveWorkspacePath finds the workspace path from WorkspaceReady events
-// in the correlation chain.
+// resolveWorkspacePath delegates to the shared helper in committer.go.
 func (h *QualityGateHandler) resolveWorkspacePath(ctx context.Context, correlationID string) (string, error) {
-	if correlationID == "" {
-		return "", nil
-	}
-
-	events, err := h.store.LoadByCorrelation(ctx, correlationID)
-	if err != nil {
-		return "", fmt.Errorf("load correlation chain: %w", err)
-	}
-
-	for _, e := range events {
-		if e.Type == event.WorkspaceReady {
-			var p event.WorkspaceReadyPayload
-			if err := json.Unmarshal(e.Payload, &p); err != nil {
-				continue
-			}
-			return p.Path, nil
-		}
-	}
-	return "", nil
+	return resolveWorkspacePath(ctx, h.store, correlationID)
 }
 
 // truncateOutput caps command output to avoid bloating event payloads.

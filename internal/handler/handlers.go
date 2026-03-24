@@ -105,7 +105,7 @@ func RegisterAll(reg *Registry, d Deps) error {
 			},
 			TargetPhase: "develop",
 		}),
-		NewAIHandler(AIHandlerConfig{
+		NewCommitterHandler(AIHandlerConfig{
 			Name:     "committer",
 			Phase:    "commit",
 			Persona:  persona.Committer,
