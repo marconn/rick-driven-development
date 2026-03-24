@@ -281,6 +281,23 @@ func TestToolRunWorkflow(t *testing.T) {
 	if run.DAG != "workspace-dev" {
 		t.Errorf("expected dag workspace-dev, got %s", run.DAG)
 	}
+
+	// Verify the stored WorkflowRequested event has Isolate=true for code-producing DAGs.
+	evts, err := deps.Store.Load(context.Background(), run.WorkflowID)
+	if err != nil {
+		t.Fatalf("load events: %v", err)
+	}
+	for _, e := range evts {
+		if e.Type == event.WorkflowRequested {
+			var payload event.WorkflowRequestedPayload
+			if err := json.Unmarshal(e.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if !payload.Isolate {
+				t.Error("workspace-dev DAG must set Isolate=true in WorkflowRequestedPayload")
+			}
+		}
+	}
 }
 
 func TestToolRunWorkflowMissingPrompt(t *testing.T) {

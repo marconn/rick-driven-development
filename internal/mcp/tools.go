@@ -508,6 +508,18 @@ func isWorkflowRegistered(eng *engine.Engine, id string) bool {
 	return false
 }
 
+// isCodeProducingDAG returns true if the workflow DAG includes a workspace
+// handler, meaning it produces code and must use an isolated workspace.
+func isCodeProducingDAG(eng *engine.Engine, id string) bool {
+	for _, def := range eng.RegisteredWorkflows() {
+		if def.ID == id {
+			_, hasWorkspace := def.Graph["workspace"]
+			return hasWorkspace
+		}
+	}
+	return false
+}
+
 func (s *Server) toolRunWorkflow(ctx context.Context, raw json.RawMessage) (any, error) {
 	var args runWorkflowArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
@@ -567,6 +579,10 @@ func (s *Server) toolRunWorkflow(ctx context.Context, raw json.RawMessage) (any,
 	// This ensures ci-fix and other PR-scoped workflows check out the correct branch.
 	repoBranch := resolvePRBranch(ctx, source)
 
+	// Code-producing workflows (any DAG with a workspace handler) must use
+	// isolated workspaces to avoid mutating the user's main repo checkout.
+	isolate := isCodeProducingDAG(s.deps.Engine, args.DAG)
+
 	reqEvt := event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
 		Prompt:     args.Prompt,
 		WorkflowID: args.DAG,
@@ -574,6 +590,7 @@ func (s *Server) toolRunWorkflow(ctx context.Context, raw json.RawMessage) (any,
 		Repo:       args.Repo,
 		Ticket:     args.Ticket,
 		RepoBranch: repoBranch,
+		Isolate:    isolate,
 	})).
 		WithAggregate(aggregateID, 1).
 		WithCorrelation(correlationID).
