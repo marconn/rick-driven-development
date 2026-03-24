@@ -54,7 +54,6 @@ func showStatus(ctx context.Context, dbPath, aggregateID string) error {
 	_, _ = fmt.Fprintf(os.Stdout, "Workflow:    %s\n", aggregateID)
 	_, _ = fmt.Fprintf(os.Stdout, "Status:      %s\n", agg.Status)
 	_, _ = fmt.Fprintf(os.Stdout, "Version:     %d\n", agg.Version)
-	_, _ = fmt.Fprintf(os.Stdout, "Tokens Used: %d\n", agg.TokensUsed)
 
 	if agg.Prompt != "" {
 		_, _ = fmt.Fprintf(os.Stdout, "Prompt:      %s\n", truncate(agg.Prompt, 80))
