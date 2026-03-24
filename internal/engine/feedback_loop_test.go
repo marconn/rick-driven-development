@@ -839,6 +839,64 @@ func TestE2ECancelStopsWorkflow(t *testing.T) {
 	}
 }
 
+// TestE2ECancelKillsInFlightHandler verifies that cancelling a workflow
+// propagates to the handler's context, terminating long-running operations
+// (e.g., AI backend subprocesses).
+func TestE2ECancelKillsInFlightHandler(t *testing.T) {
+	def := WorkflowDef{
+		ID: "e2e-cancel-ctx", Required: []string{"alpha"}, MaxIterations: 1,
+		Graph: map[string][]string{"alpha": {}},
+	}
+	env := newE2EEnv(t, def)
+
+	handlerCtx := make(chan context.Context, 1)
+	alphaStarted := make(chan struct{})
+
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "alpha",
+			handle: func(ctx context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				handlerCtx <- ctx
+				close(alphaStarted)
+				// Block until context is cancelled (simulating long AI call)
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		},
+		trigger: handler.Trigger{Events: []event.Type{event.WorkflowStartedFor("e2e-cancel-ctx")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	env.start(ctx)
+	env.fireWorkflow(ctx, t, "wf-cancel-ctx", "e2e-cancel-ctx")
+
+	<-alphaStarted
+
+	// Cancel the workflow
+	cancelEvt := event.New(event.WorkflowCancelled, 1, event.MustMarshal(event.WorkflowCancelledPayload{
+		Reason: "test cancel propagation",
+		Source: "test",
+	})).WithAggregate("wf-cancel-ctx", 3).WithCorrelation("wf-cancel-ctx").WithSource("test")
+
+	if err := env.store.Append(ctx, "wf-cancel-ctx", 2, []event.Envelope{cancelEvt}); err != nil {
+		t.Fatalf("append cancel: %v", err)
+	}
+	if err := env.bus.Publish(ctx, cancelEvt); err != nil {
+		t.Fatalf("publish cancel: %v", err)
+	}
+
+	// The handler's context should be cancelled within a short window.
+	hCtx := <-handlerCtx
+	select {
+	case <-hCtx.Done():
+		// Context was cancelled — cancellation propagated correctly.
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler context was not cancelled after workflow cancellation")
+	}
+}
+
 // =============================================================================
 // Aggregate Pause/Resume Unit Tests
 // =============================================================================

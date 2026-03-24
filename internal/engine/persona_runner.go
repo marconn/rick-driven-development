@@ -84,6 +84,11 @@ type PersonaRunner struct {
 	paused   map[string]bool             // correlationID → paused
 	blocked  map[string][]blockedDispatch // correlationID → pending dispatches
 
+	// Per-correlation contexts for cancellation propagation.
+	// Created on first dispatch for a correlation, cancelled on WorkflowCancelled.
+	corrCtxsMu sync.Mutex
+	corrCtxs   map[string]corrCtxEntry // correlationID → context + cancel
+
 	// Before-hooks: persona name → additional personas that must complete first.
 	// Injected at runtime via WithBeforeHook — no handler code changes needed.
 	hooksMu sync.RWMutex
@@ -191,6 +196,7 @@ func NewPersonaRunner(store eventstore.Store, bus eventbus.Bus, dispatcher Dispa
 		dynamicGen:   make(map[string]uint64),
 		workflows:    make(map[string]WorkflowDef),
 		corrMap:      make(map[string]string),
+		corrCtxs:     make(map[string]corrCtxEntry),
 	}
 	r.maxChain.Store(int32(defaultMaxChain))
 	for _, opt := range opts {
@@ -213,6 +219,33 @@ func (r *PersonaRunner) resolveWorkflowID(correlationID string) (string, bool) {
 	wfID, ok := r.corrMap[correlationID]
 	r.corrMapMu.RUnlock()
 	return wfID, ok
+}
+
+// correlationCtx returns a per-correlation context, creating one if needed.
+// The context is a child of r.ctx and is cancelled on WorkflowCancelled.
+func (r *PersonaRunner) correlationCtx(correlationID string) context.Context {
+	r.corrCtxsMu.Lock()
+	defer r.corrCtxsMu.Unlock()
+	if entry, ok := r.corrCtxs[correlationID]; ok {
+		return entry.ctx
+	}
+	ctx, cancel := context.WithCancel(r.ctx)
+	r.corrCtxs[correlationID] = corrCtxEntry{ctx: ctx, cancel: cancel}
+	return ctx
+}
+
+// cancelCorrelation cancels the per-correlation context, terminating in-flight
+// dispatches (AI backend subprocesses) for that workflow.
+func (r *PersonaRunner) cancelCorrelation(correlationID string) {
+	r.corrCtxsMu.Lock()
+	entry, ok := r.corrCtxs[correlationID]
+	if ok {
+		delete(r.corrCtxs, correlationID)
+	}
+	r.corrCtxsMu.Unlock()
+	if ok {
+		entry.cancel()
+	}
 }
 
 // cacheWorkflowID stores a correlationID → workflowID mapping.
@@ -506,6 +539,7 @@ func (r *PersonaRunner) subscribeTerminalEvents() {
 			}
 			if corrID != "" {
 				r.evictCorrelation(corrID)
+				r.cancelCorrelation(corrID)
 			}
 			return nil
 		}, eventbus.WithName("persona-runner:evict:"+string(et)))
@@ -519,6 +553,14 @@ func (r *PersonaRunner) Close() error {
 		unsub()
 	}
 	r.unsubs = nil
+
+	// Cancel all per-correlation contexts first so in-flight handlers unblock.
+	r.corrCtxsMu.Lock()
+	for corrID, entry := range r.corrCtxs {
+		entry.cancel()
+		delete(r.corrCtxs, corrID)
+	}
+	r.corrCtxsMu.Unlock()
 
 	if r.cancel != nil {
 		r.cancel()
@@ -856,9 +898,23 @@ func (r *PersonaRunner) executeDispatch(h handler.Handler, env event.Envelope, c
 		return
 	}
 
+	dispatchCtx := r.correlationCtx(env.CorrelationID)
+
 	start := time.Now()
-	result, dispatchErr := r.dispatcher.Dispatch(r.ctx, h.Name(), env)
+	result, dispatchErr := r.dispatcher.Dispatch(dispatchCtx, h.Name(), env)
 	durationMS := time.Since(start).Milliseconds()
+
+	// Workflow was cancelled while handler was running — drop the result
+	// silently. The workflow is already terminal; emitting PersonaCompleted/Failed
+	// would be orphaned noise.
+	if dispatchCtx.Err() != nil && r.isPaused(env.CorrelationID) {
+		r.logger.Info("persona runner: handler cancelled by workflow",
+			slog.String("handler", h.Name()),
+			slog.String("correlation", env.CorrelationID),
+			slog.Int64("duration_ms", durationMS),
+		)
+		return
+	}
 
 	// Incomplete: handler ran successfully but has more work to do.
 	if errors.Is(dispatchErr, handler.ErrIncomplete) {
@@ -1113,6 +1169,7 @@ func (r *PersonaRunner) subscribePauseResume() {
 		r.paused[corrID] = true // treat cancelled as permanently paused
 		delete(r.blocked, corrID)
 		r.pausedMu.Unlock()
+		r.cancelCorrelation(corrID)
 		r.logger.Info("persona runner: workflow cancelled", slog.String("correlation", corrID))
 		return nil
 	}, eventbus.WithName("persona-runner:cancel"))
@@ -1212,8 +1269,10 @@ func (r *PersonaRunner) subscribeHintApproved() {
 
 // executeHint runs the hint phase for a Hinter handler.
 func (r *PersonaRunner) executeHint(hinter handler.Hinter, h handler.Handler, env event.Envelope, chainDepth int) {
+	hintCtx := r.correlationCtx(env.CorrelationID)
+
 	start := time.Now()
-	hintEvents, err := hinter.Hint(r.ctx, env)
+	hintEvents, err := hinter.Hint(hintCtx, env)
 	durationMS := time.Since(start).Milliseconds()
 
 	aggregateID := env.CorrelationID + ":persona:" + h.Name()
@@ -1274,9 +1333,20 @@ func (r *PersonaRunner) executeHintApprovedDispatch(handlerName string, env even
 	r.active.Add(1)
 	defer r.active.Add(-1)
 
+	dispatchCtx := r.correlationCtx(env.CorrelationID)
+
 	start := time.Now()
-	result, dispatchErr := r.dispatcher.Dispatch(r.ctx, handlerName, env)
+	result, dispatchErr := r.dispatcher.Dispatch(dispatchCtx, handlerName, env)
 	durationMS := time.Since(start).Milliseconds()
+
+	if dispatchCtx.Err() != nil && r.isPaused(env.CorrelationID) {
+		r.logger.Info("persona runner: handler cancelled by workflow",
+			slog.String("handler", handlerName),
+			slog.String("correlation", env.CorrelationID),
+			slog.Int64("duration_ms", durationMS),
+		)
+		return
+	}
 
 	if errors.Is(dispatchErr, handler.ErrIncomplete) {
 		r.persistAndPublishResultOnly(handlerName, env, result)
@@ -1496,6 +1566,13 @@ func (c *idempotencyCache) Add(handlerName, eventID string) bool {
 	c.entries[key] = struct{}{}
 	c.order = append(c.order, key)
 	return true
+}
+
+// corrCtxEntry holds a per-correlation context and its cancel function.
+// Used to propagate workflow cancellation to in-flight handler dispatches.
+type corrCtxEntry struct {
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // blockedDispatch records a handler dispatch that was blocked due to pause.

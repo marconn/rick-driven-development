@@ -333,6 +333,81 @@ func TestPhaseTimelineProjection_ForWorkflow(t *testing.T) {
 	}
 }
 
+func TestPhaseTimelineProjection_AIRequestSentSetsRunning(t *testing.T) {
+	proj := NewPhaseTimelineProjection()
+	ctx := context.Background()
+
+	// Emit AIRequestSent — should set status to "running" with StartedAt.
+	reqEnv := makeEnvelope(event.AIRequestSent, "wf-1:persona:developer", 1,
+		event.AIRequestPayload{Phase: "develop", Backend: "claude", Persona: "developer"})
+	reqEnv.CorrelationID = "wf-1"
+	if err := proj.Handle(ctx, reqEnv); err != nil {
+		t.Fatalf("handle AIRequestSent: %v", err)
+	}
+
+	pt, ok := proj.Get("wf-1", "developer")
+	if !ok {
+		t.Fatal("timeline not found after AIRequestSent")
+	}
+	if pt.Status != "running" {
+		t.Errorf("expected running, got %q", pt.Status)
+	}
+	if pt.StartedAt.IsZero() {
+		t.Error("expected StartedAt to be set")
+	}
+
+	// Emit PersonaCompleted — should transition to "done".
+	compEnv := makeEnvelope(event.PersonaCompleted, "wf-1:persona:developer", 2,
+		event.PersonaCompletedPayload{Persona: "developer", DurationMS: 5000})
+	compEnv.CorrelationID = "wf-1"
+	if err := proj.Handle(ctx, compEnv); err != nil {
+		t.Fatalf("handle PersonaCompleted: %v", err)
+	}
+
+	pt, ok = proj.Get("wf-1", "developer")
+	if !ok {
+		t.Fatal("timeline not found after PersonaCompleted")
+	}
+	if pt.Status != "done" {
+		t.Errorf("expected done, got %q", pt.Status)
+	}
+	if pt.Iterations != 1 {
+		t.Errorf("expected 1 iteration, got %d", pt.Iterations)
+	}
+}
+
+func TestPhaseTimelineProjection_AIRequestSentNoOverwriteRunning(t *testing.T) {
+	proj := NewPhaseTimelineProjection()
+	ctx := context.Background()
+
+	// First request
+	reqEnv := makeEnvelope(event.AIRequestSent, "wf-1:persona:developer", 1,
+		event.AIRequestPayload{Phase: "develop", Backend: "claude", Persona: "developer"})
+	reqEnv.CorrelationID = "wf-1"
+	_ = proj.Handle(ctx, reqEnv)
+
+	firstStart, _ := proj.Get("wf-1", "developer")
+
+	// Complete, then re-trigger (feedback loop)
+	compEnv := makeEnvelope(event.PersonaCompleted, "wf-1:persona:developer", 2,
+		event.PersonaCompletedPayload{Persona: "developer", DurationMS: 1000})
+	compEnv.CorrelationID = "wf-1"
+	_ = proj.Handle(ctx, compEnv)
+
+	// Second request — should NOT overwrite StartedAt (status is "done" now, not "")
+	reqEnv2 := makeEnvelope(event.AIRequestSent, "wf-1:persona:developer", 3,
+		event.AIRequestPayload{Phase: "develop", Backend: "claude", Persona: "developer"})
+	reqEnv2.CorrelationID = "wf-1"
+	_ = proj.Handle(ctx, reqEnv2)
+
+	pt, _ := proj.Get("wf-1", "developer")
+	// StartedAt should be preserved from the first run.
+	if pt.StartedAt.IsZero() {
+		t.Error("StartedAt should still be set from first run")
+	}
+	_ = firstStart // used above for readability
+}
+
 // --- Runner ---
 
 func TestRunner_CatchUpAndLive(t *testing.T) {

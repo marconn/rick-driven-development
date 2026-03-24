@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -606,6 +607,11 @@ type pendingHintSummary struct {
 	EventID       string   `json:"event_id"`
 }
 
+type runningPhaseSummary struct {
+	Phase     string `json:"phase"`
+	ElapsedMS int64  `json:"elapsed_ms"`
+}
+
 type workflowStatusResult struct {
 	ID                string               `json:"id"`
 	Status            string               `json:"status"`
@@ -615,6 +621,7 @@ type workflowStatusResult struct {
 	CompletedPersonas map[string]bool      `json:"completed_personas"`
 	FeedbackCount     map[string]int       `json:"feedback_count"`
 	PendingHints      []pendingHintSummary `json:"pending_hints,omitempty"`
+	RunningPhases     []runningPhaseSummary `json:"running_phases,omitempty"`
 }
 
 func (s *Server) toolWorkflowStatus(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -652,6 +659,18 @@ func (s *Server) toolWorkflowStatus(ctx context.Context, raw json.RawMessage) (a
 	// Scan for pending hints when paused (low-cost: only on paused workflows).
 	if agg.Status == engine.StatusPaused {
 		result.PendingHints = s.findPendingHints(ctx, args.WorkflowID)
+	}
+
+	// Show in-progress phases for running workflows.
+	if agg.Status == engine.StatusRunning && s.deps.Timelines != nil {
+		for _, pt := range s.deps.Timelines.ForWorkflow(args.WorkflowID) {
+			if pt.Status == "running" && !pt.StartedAt.IsZero() {
+				result.RunningPhases = append(result.RunningPhases, runningPhaseSummary{
+					Phase:     pt.Phase,
+					ElapsedMS: time.Since(pt.StartedAt).Milliseconds(),
+				})
+			}
+		}
 	}
 
 	return result, nil
@@ -893,6 +912,7 @@ type phaseTimelineEntry struct {
 	StartedAt   string `json:"started_at,omitempty"`
 	CompletedAt string `json:"completed_at,omitempty"`
 	DurationMS  int64  `json:"duration_ms,omitempty"`
+	ElapsedMS   int64  `json:"elapsed_ms,omitempty"` // for running phases: wall-clock since start
 }
 
 type phaseTimelineResult struct {
@@ -926,6 +946,9 @@ func (s *Server) toolPhaseTimeline(_ context.Context, raw json.RawMessage) (any,
 		}
 		if !pt.CompletedAt.IsZero() {
 			entry.CompletedAt = pt.CompletedAt.UTC().Format("2006-01-02T15:04:05Z")
+		}
+		if pt.Status == "running" && !pt.StartedAt.IsZero() {
+			entry.ElapsedMS = time.Since(pt.StartedAt).Milliseconds()
 		}
 		entries = append(entries, entry)
 	}

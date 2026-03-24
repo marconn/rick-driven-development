@@ -3,6 +3,7 @@ package projection
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +36,24 @@ func (p *PhaseTimelineProjection) Handle(_ context.Context, env event.Envelope) 
 	defer p.mu.Unlock()
 
 	switch env.Type {
+	case event.AIRequestSent:
+		// Track that a handler started running (AI backend call in progress).
+		// Extract handler name from aggregate: "{corrID}:persona:{handler}".
+		corrID := env.CorrelationID
+		if corrID == "" {
+			corrID = env.AggregateID
+		}
+		handlerName := personaFromAggregate(env.AggregateID)
+		if handlerName == "" {
+			return nil
+		}
+		key := personaKey{CorrelationID: corrID, Persona: handlerName}
+		pt := p.getOrCreate(key, corrID)
+		if pt.Status == "" {
+			pt.Status = "running"
+			pt.StartedAt = env.Timestamp
+		}
+
 	case event.PersonaCompleted:
 		var payload event.PersonaCompletedPayload
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {
@@ -110,4 +129,15 @@ func (p *PhaseTimelineProjection) ForWorkflow(aggregateID string) []PhaseTimelin
 		}
 	}
 	return result
+}
+
+// personaFromAggregate extracts the handler name from a persona-scoped
+// aggregate ID with format "{correlationID}:persona:{handlerName}".
+func personaFromAggregate(aggregateID string) string {
+	const sep = ":persona:"
+	idx := strings.LastIndex(aggregateID, sep)
+	if idx < 0 {
+		return ""
+	}
+	return aggregateID[idx+len(sep):]
 }
