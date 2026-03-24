@@ -134,6 +134,7 @@ Trigger: MCP `rick_run_workflow` with `dag=jira-qa-steps`, `ticket=PROJ-123`. Op
 Execution topology is defined in `WorkflowDef.Graph` (`internal/engine/workflow_def.go`):
 - `Graph`: `map[string][]string` — handler → predecessors. Empty deps `[]string{}` = root (fires on WorkflowStarted). Handler not in Graph = not in this workflow.
 - `RetriggeredBy`: `map[string][]event.Type` — handlers that re-fire on specific events (e.g., developer → FeedbackGenerated for feedback loops).
+- `PhaseMap`: `map[string]string` — phase verb → handler name (e.g., "develop" → "developer"). Used by verdict resolution to map phase names back to persona handlers.
 
 PersonaRunner computes subscriptions from Graph at startup via `resolveEventsFromDAG()`. On PersonaCompleted, it resolves the workflow via a `correlationID → workflowID` cache, looks up the Graph, and dispatches only handlers whose predecessors include the completing persona. Handlers not in the workflow's Graph are never dispatched for that correlation.
 
@@ -143,7 +144,7 @@ PersonaRunner computes subscriptions from Graph at startup via `resolveEventsFro
 
 ### PersonaRunner
 
-`PersonaRunner` (`internal/engine/persona_runner.go`) is the **sole dispatcher** for all persona handlers. Uses DAG-based dispatch with workflow-scoped handler resolution. Safety guards: self-trigger prevention, chain depth limiting (auto-scaled), width limiting (default: 10 concurrent), event dedup (LRU 10K entries), join-gate dedup (fingerprint-based), graceful drain with timeout. Stores results under persona-scoped aggregates: `{correlationID}:persona:{handlerName}`.
+`PersonaRunner` (`internal/engine/persona_runner.go`) is the **sole dispatcher** for all persona handlers. Uses DAG-based dispatch with workflow-scoped handler resolution. Safety guards: self-trigger prevention, chain depth limiting (auto-scaled), width limiting (default: 10 concurrent), event dedup (10K entry bounded cache), join-gate dedup (fingerprint-based), graceful drain with timeout. Stores results under persona-scoped aggregates: `{correlationID}:persona:{handlerName}`.
 
 **Workflow registration**: `RegisterWorkflow(def)` stores the DAG. Called at startup for built-in workflows and at runtime for gRPC-registered workflows.
 
@@ -161,7 +162,7 @@ Handlers that implement the `Hinter` interface get a two-phase dispatch: `Hint()
 
 ### Sentinel (Unhandled Event Detection)
 
-`Sentinel` (`internal/engine/sentinel.go`) monitors the event bus via `SubscribeAll` for events that no handler is subscribed to process. Skips internal events (lifecycle, AI, feedback, hints, context — 25+ types). When an unhandled event is detected, emits `UnhandledEventDetected` with the original event's type, ID, correlation, and source. Catches misconfigured workflows and orphan events.
+`Sentinel` (`internal/engine/sentinel.go`) monitors the event bus via `SubscribeAll` for events that no handler is subscribed to process. Skips internal events (lifecycle, AI, feedback, hints, context — 30+ types). When an unhandled event is detected, emits `UnhandledEventDetected` with the original event's type, ID, correlation, and source. Catches misconfigured workflows and orphan events.
 
 ### gRPC Service Discovery
 
@@ -197,9 +198,9 @@ The Engine automatically indexes business keys from `WorkflowRequested` as tags:
 
 ### Key Interfaces
 
-- **`handler.Handler`** (`internal/handler/handler.go`): `Name()`, `Subscribes()`, `Handle(ctx, env) → ([]Envelope, error)`. All handlers implement `TriggeredHandler` with `Trigger()` method. Optionally implement `Hinter` for two-phase hint/execute dispatch.
+- **`handler.Handler`** (`internal/handler/handler.go`): `Name()`, `Subscribes()`, `Handle(ctx, env) → ([]Envelope, error)`. Optional interfaces: `Hinter` (two-phase hint/execute dispatch), `Phased` (custom phase name for verdict resolution), `LifecycleHook` (Init/Shutdown for resource management). `TriggeredHandler` (deprecated, `internal/handler/trigger.go`) — only gRPC proxy handlers implement it; PersonaRunner falls back to `Trigger()` for handlers not in any workflow Graph. `ErrIncomplete` sentinel: handler processed event but has more work — PersonaRunner persists result events but skips PersonaCompleted/PersonaFailed; handler re-triggers on future subscribed events.
 - **`eventstore.Store`** (`internal/eventstore/store.go`): 14-method interface. SQLite with WAL, optimistic concurrency. `LoadByCorrelation` queries across all aggregates — critical for join condition checks. `SaveTags`/`LoadByTag` enable business-key lookup against the `event_tags` table.
-- **`eventbus.Bus`** (`internal/eventbus/bus.go`): `Publish`, `Subscribe` (returns unsubscribe func), `SubscribeAll`. ChannelBus and OutboxBus. 8 middleware.
+- **`eventbus.Bus`** (`internal/eventbus/bus.go`): `Publish`, `Subscribe` (returns unsubscribe func), `SubscribeAll`. ChannelBus and OutboxBus. 7 middleware (Logging, Retry, CircuitBreaker, Recovery, Timeout, Metrics, Idempotency).
 - **`engine.Dispatcher`** (`internal/engine/dispatcher.go`): Routes by handler name. `LocalDispatcher` wraps handler.Registry.
 - **`grpchandler.StreamDispatcher`** (`internal/grpchandler/stream_dispatcher.go`): Implements `Dispatcher` for gRPC-connected handlers. `CompositeDispatcher` chains local + stream.
 - **`grpchandler.Server`** (`internal/grpchandler/server.go`): gRPC `PersonaService` implementation. Manages stream lifecycle, proxy handler registration, dynamic hooks, watch/unwatch routing, dynamic workflow registration.
@@ -370,6 +371,7 @@ result, err := client.RegisterWorkflow(ctx, "ci-pipeline",
 - `InjectEventResult` — response to inject request
 - `WorkflowNotification` — workflow terminal state push (status, tokens, phases, duration, verdicts)
 - `RegisterWorkflowResult` — response to workflow registration (available/missing handlers)
+- `DisplacedNotification` — sent when a new client registers with the same handler name, displacing this stream (fields: `handler`, `reason`)
 
 ### Example: Security Scanner
 
@@ -442,6 +444,11 @@ Serve mode defaults to `--yolo=true` (auto-approves AI backend tool permissions)
 | Variable | Effect |
 |----------|--------|
 | `RICK_DISABLE_QUALITY_GATE` | When non-empty, removes quality-gate from all workflow DAGs. Committer depends directly on `[reviewer, qa]`. Use on machines that lack Multipass/VM support. Affects `workspace-dev`, `jira-dev`, `ci-fix`. |
+| `RICK_REPOS_PATH` | Root directory for isolated workspaces and repo clones. Required by workspace/wave tools. |
+| `RICK_CLAUDE_BIN` | Path to claude CLI binary (default: `claude`). |
+| `RICK_GEMINI_BIN` | Path to gemini CLI binary (default: `gemini`). |
+| `RICK_MODEL` | Override default LLM model for AI backends. |
+| `RICK_SERVER_URL` | Agent UI → rick-server connection URL. |
 
 ### Agent UI (rick-agent)
 
@@ -491,7 +498,7 @@ Desktop application built with **Wails v2 + Svelte 5**. Provides a chat interfac
 
 - All code in `internal/` — no public API exports
 - Functional options pattern: `WithName()`, `WithLogger()`, `WithTimeout()`
-- Sentinel errors: `ErrConcurrencyConflict`, `ErrHandlerNotFound`
+- Sentinel errors: `ErrConcurrencyConflict`, `ErrHandlerNotFound`, `ErrIncomplete` (multi-cycle handler)
 - Errors wrapped with context: `fmt.Errorf("engine: load aggregate: %w", err)`
 - Tests use in-memory SQLite (`:memory:`) with `t.Helper()` and `t.Cleanup()`
 - Go 1.24, deps: `google/uuid`, `modernc.org/sqlite` (pure-Go), `spf13/cobra`, `google.golang.org/grpc` + `protobuf` (service discovery)
