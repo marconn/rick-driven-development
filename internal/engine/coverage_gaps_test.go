@@ -938,3 +938,382 @@ func eng_logger(t *testing.T) *slog.Logger {
 	return slog.Default()
 }
 
+// =============================================================================
+// DownstreamOf edge cases
+// =============================================================================
+
+func TestDownstreamOf(t *testing.T) {
+	dag := WorkflowDef{
+		// Diamond: developer → reviewer + qa → quality-gate → committer
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+			"committer":    {"quality-gate"},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		def      WorkflowDef
+		persona  string
+		wantSet  map[string]bool
+	}{
+		{
+			name:    "root node returns full downstream chain",
+			def:     dag,
+			persona: "developer",
+			wantSet: map[string]bool{
+				"developer": true, "reviewer": true, "qa": true,
+				"quality-gate": true, "committer": true,
+			},
+		},
+		{
+			name:    "mid node returns partial chain",
+			def:     dag,
+			persona: "reviewer",
+			wantSet: map[string]bool{
+				"reviewer": true, "quality-gate": true, "committer": true,
+			},
+		},
+		{
+			name:    "leaf node returns only itself",
+			def:     dag,
+			persona: "committer",
+			wantSet: map[string]bool{"committer": true},
+		},
+		{
+			name:    "persona not in graph returns only itself",
+			def:     dag,
+			persona: "unknown-handler",
+			wantSet: map[string]bool{"unknown-handler": true},
+		},
+		{
+			name: "diamond DAG does not duplicate",
+			def: WorkflowDef{
+				Graph: map[string][]string{
+					"a": {},
+					"b": {"a"},
+					"c": {"a"},
+					"d": {"b", "c"},
+				},
+			},
+			persona: "a",
+			wantSet: map[string]bool{"a": true, "b": true, "c": true, "d": true},
+		},
+		{
+			name:    "empty graph returns only itself",
+			def:     WorkflowDef{Graph: map[string][]string{}},
+			persona: "x",
+			wantSet: map[string]bool{"x": true},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.def.DownstreamOf(tc.persona)
+			gotSet := make(map[string]bool, len(got))
+			for _, p := range got {
+				if gotSet[p] {
+					t.Errorf("duplicate entry: %s", p)
+				}
+				gotSet[p] = true
+			}
+			if len(gotSet) != len(tc.wantSet) {
+				t.Errorf("DownstreamOf(%q) = %v, want %v", tc.persona, got, tc.wantSet)
+				return
+			}
+			for want := range tc.wantSet {
+				if !gotSet[want] {
+					t.Errorf("missing %q in DownstreamOf(%q) = %v", want, tc.persona, got)
+				}
+			}
+		})
+	}
+}
+
+// =============================================================================
+// checkJoinCondition FeedbackGenerated invalidation (unit-level)
+// =============================================================================
+
+// TestCheckJoinCondition_FeedbackInvalidatesStale verifies that stale
+// PersonaCompleted events from before a FeedbackGenerated event do NOT
+// satisfy join conditions.
+func TestCheckJoinCondition_FeedbackInvalidatesStale(t *testing.T) {
+	store, err := eventstore.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	resolver := newWorkflowResolver(store, slog.Default())
+	def := WorkflowDef{
+		ID:       "test-fb-stale",
+		Required: []string{"developer", "reviewer", "qa", "quality-gate"},
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+		PhaseMap: corePhaseMap,
+	}
+	resolver.registerWorkflow(def)
+
+	ctx := context.Background()
+	corrID := "corr-fb-stale"
+	resolver.cacheWorkflowID(corrID, "test-fb-stale")
+
+	// Round 1: developer, reviewer, qa all complete.
+	seedPC := func(persona string, aggVersion int) {
+		agg := corrID + ":persona:" + persona
+		evt := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+			Persona: persona,
+		})).WithAggregate(agg, aggVersion).WithCorrelation(corrID)
+		if err := store.Append(ctx, agg, aggVersion-1, []event.Envelope{evt}); err != nil {
+			t.Fatalf("seed %s: %v", persona, err)
+		}
+	}
+	seedPC("developer", 1)
+	seedPC("reviewer", 1)
+	seedPC("qa", 1)
+
+	// FeedbackGenerated targeting developer (e.g., quality-gate failed).
+	fbAgg := corrID
+	fbEvt := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
+		TargetPhase: "developer",
+		SourcePhase: "quality-gate",
+		Iteration:   1,
+	})).WithAggregate(fbAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, fbAgg, 0, []event.Envelope{fbEvt}); err != nil {
+		t.Fatalf("seed feedback: %v", err)
+	}
+
+	// quality-gate joins on [reviewer, qa]. Both completed in round 1 but
+	// FeedbackGenerated invalidated them. Join must NOT be satisfied.
+	satisfied, _ := resolver.checkJoinCondition(ctx, []string{"reviewer", "qa"}, corrID)
+	if satisfied {
+		t.Error("join should NOT be satisfied — reviewer and qa completions are stale (before FeedbackGenerated)")
+	}
+}
+
+// TestCheckJoinCondition_FreshAfterFeedback verifies that PersonaCompleted
+// events AFTER a FeedbackGenerated event DO satisfy join conditions.
+func TestCheckJoinCondition_FreshAfterFeedback(t *testing.T) {
+	store, err := eventstore.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	resolver := newWorkflowResolver(store, slog.Default())
+	def := WorkflowDef{
+		ID:       "test-fb-fresh",
+		Required: []string{"developer", "reviewer", "qa", "quality-gate"},
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+		PhaseMap: corePhaseMap,
+	}
+	resolver.registerWorkflow(def)
+
+	ctx := context.Background()
+	corrID := "corr-fb-fresh"
+	resolver.cacheWorkflowID(corrID, "test-fb-fresh")
+
+	// Helper to seed events with incrementing versions per aggregate.
+	aggVersions := map[string]int{}
+	seedEvent := func(aggSuffix string, env event.Envelope) {
+		agg := corrID
+		if aggSuffix != "" {
+			agg = corrID + ":persona:" + aggSuffix
+		}
+		aggVersions[agg]++
+		v := aggVersions[agg]
+		env = env.WithAggregate(agg, v).WithCorrelation(corrID)
+		if err := store.Append(ctx, agg, v-1, []event.Envelope{env}); err != nil {
+			t.Fatalf("seed event in %s: %v", agg, err)
+		}
+	}
+
+	// Round 1: all complete.
+	seedEvent("developer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "developer"})))
+	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
+	seedEvent("qa", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "qa"})))
+
+	// Feedback: quality-gate failed.
+	seedEvent("", event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
+		TargetPhase: "developer", SourcePhase: "quality-gate", Iteration: 1,
+	})))
+
+	// Round 2: developer, reviewer, qa all re-complete.
+	seedEvent("developer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "developer"})))
+	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
+	seedEvent("qa", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "qa"})))
+
+	// quality-gate joins on [reviewer, qa]. Both re-completed after feedback.
+	satisfied, _ := resolver.checkJoinCondition(ctx, []string{"reviewer", "qa"}, corrID)
+	if !satisfied {
+		t.Error("join should be satisfied — reviewer and qa completed AFTER FeedbackGenerated")
+	}
+}
+
+// TestCheckJoinCondition_MultipleIterations verifies correctness across
+// 3 feedback iterations: fail → retry → fail → retry → pass.
+func TestCheckJoinCondition_MultipleIterations(t *testing.T) {
+	store, err := eventstore.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	resolver := newWorkflowResolver(store, slog.Default())
+	def := WorkflowDef{
+		ID:       "test-fb-multi",
+		Required: []string{"developer", "reviewer", "quality-gate"},
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"quality-gate": {"reviewer"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+		PhaseMap: corePhaseMap,
+	}
+	resolver.registerWorkflow(def)
+
+	ctx := context.Background()
+	corrID := "corr-fb-multi"
+	resolver.cacheWorkflowID(corrID, "test-fb-multi")
+
+	aggVersions := map[string]int{}
+	seedEvent := func(aggSuffix string, env event.Envelope) {
+		agg := corrID
+		if aggSuffix != "" {
+			agg = corrID + ":persona:" + aggSuffix
+		}
+		aggVersions[agg]++
+		v := aggVersions[agg]
+		env = env.WithAggregate(agg, v).WithCorrelation(corrID)
+		if err := store.Append(ctx, agg, v-1, []event.Envelope{env}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	// Round 1.
+	seedEvent("developer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "developer"})))
+	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
+
+	// Feedback #1.
+	seedEvent("", event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
+		TargetPhase: "developer", Iteration: 1,
+	})))
+
+	// After feedback #1, stale reviewer must not satisfy join.
+	sat1, _ := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
+	if sat1 {
+		t.Error("iteration 1: reviewer should be stale after first FeedbackGenerated")
+	}
+
+	// Round 2.
+	seedEvent("developer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "developer"})))
+	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
+
+	// Feedback #2.
+	seedEvent("", event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
+		TargetPhase: "developer", Iteration: 2,
+	})))
+
+	// After feedback #2, round 2 reviewer is stale again.
+	sat2, _ := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
+	if sat2 {
+		t.Error("iteration 2: reviewer should be stale after second FeedbackGenerated")
+	}
+
+	// Round 3: final pass.
+	seedEvent("developer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "developer"})))
+	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
+
+	// No more feedback — join should be satisfied.
+	sat3, _ := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
+	if !sat3 {
+		t.Error("iteration 3: reviewer should be satisfied — no feedback after round 3")
+	}
+}
+
+// TestCheckJoinCondition_PartialRefire verifies that when only one of two
+// parallel handlers re-completes after feedback, the join is NOT satisfied.
+func TestCheckJoinCondition_PartialRefire(t *testing.T) {
+	store, err := eventstore.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	resolver := newWorkflowResolver(store, slog.Default())
+	def := WorkflowDef{
+		ID:       "test-fb-partial",
+		Required: []string{"developer", "reviewer", "qa", "quality-gate"},
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+		PhaseMap: corePhaseMap,
+	}
+	resolver.registerWorkflow(def)
+
+	ctx := context.Background()
+	corrID := "corr-fb-partial"
+	resolver.cacheWorkflowID(corrID, "test-fb-partial")
+
+	aggVersions := map[string]int{}
+	seedEvent := func(aggSuffix string, env event.Envelope) {
+		agg := corrID
+		if aggSuffix != "" {
+			agg = corrID + ":persona:" + aggSuffix
+		}
+		aggVersions[agg]++
+		v := aggVersions[agg]
+		env = env.WithAggregate(agg, v).WithCorrelation(corrID)
+		if err := store.Append(ctx, agg, v-1, []event.Envelope{env}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	// Round 1.
+	seedEvent("developer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "developer"})))
+	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
+	seedEvent("qa", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "qa"})))
+
+	// Feedback.
+	seedEvent("", event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
+		TargetPhase: "developer", Iteration: 1,
+	})))
+
+	// Round 2: only reviewer re-completes, qa hasn't yet.
+	seedEvent("developer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "developer"})))
+	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
+
+	// quality-gate joins on [reviewer, qa]. qa is stale — join must NOT be satisfied.
+	satisfied, _ := resolver.checkJoinCondition(ctx, []string{"reviewer", "qa"}, corrID)
+	if satisfied {
+		t.Error("join should NOT be satisfied — qa has not re-completed after feedback")
+	}
+}
+
