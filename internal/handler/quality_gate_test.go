@@ -325,16 +325,55 @@ func TestQualityGateEmptyCorrelation(t *testing.T) {
 }
 
 func TestTruncateOutput(t *testing.T) {
-	short := "short"
-	if got := truncateOutput(short, 100); got != short {
-		t.Errorf("short string should pass through unchanged, got %q", got)
-	}
+	t.Run("short passthrough", func(t *testing.T) {
+		if got := truncateOutput("short", 100); got != "short" {
+			t.Errorf("short string should pass through unchanged, got %q", got)
+		}
+	})
 
-	long := string(make([]byte, 200))
-	got := truncateOutput(long, 100)
-	if len(got) > 120 { // 100 + truncation message
-		t.Errorf("output should be truncated, got length %d", len(got))
-	}
+	t.Run("head+tail strategy", func(t *testing.T) {
+		// 150 A's (head noise) + 50 B's (tail errors)
+		long := strings.Repeat("A", 150) + strings.Repeat("B", 50)
+		got := truncateOutput(long, 100)
+
+		// Must contain truncation marker
+		if !strings.Contains(got, "(truncated)") {
+			t.Errorf("should contain truncation marker, got %q", got)
+		}
+		// Must start with head (A's) and end with tail (B's)
+		if !strings.HasPrefix(got, "AAA") {
+			t.Errorf("should start with head content, got %q", got)
+		}
+		if !strings.HasSuffix(got, strings.Repeat("B", 50)) {
+			t.Errorf("should end with tail content, got %q", got)
+		}
+	})
+
+	t.Run("strips ANSI codes", func(t *testing.T) {
+		// ANSI-heavy input that fits within budget after stripping
+		ansi := "\x1b[2K\x1b[0A\x1b[0ECreating VM  \b/\b-\b\\\b|\b/actual error here"
+		got := truncateOutput(ansi, 200)
+		if strings.Contains(got, "\x1b[") {
+			t.Error("output should not contain ANSI escape sequences")
+		}
+		if !strings.Contains(got, "actual error here") {
+			t.Errorf("should preserve actual content, got %q", got)
+		}
+	})
+
+	t.Run("ANSI stripping avoids truncation", func(t *testing.T) {
+		// 100 chars of real content + 200 chars of ANSI noise = 300 raw bytes
+		// After stripping ANSI, only 100 chars remain — fits in budget
+		real := strings.Repeat("E", 100)
+		ansiNoise := strings.Repeat("\x1b[2K", 50) // 200 bytes of ANSI
+		got := truncateOutput(ansiNoise+real, 200)
+		if strings.Contains(got, "(truncated)") {
+			t.Error("should not truncate after ANSI stripping brings it under budget")
+		}
+		if got != real {
+			t.Errorf("expected clean content only, got %q", got)
+		}
+	})
 }
 
 func TestStackRunResultIsStackError(t *testing.T) {

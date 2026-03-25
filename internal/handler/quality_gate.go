@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/marconn/rick-event-driven-development/internal/event"
@@ -119,17 +120,20 @@ func (h *QualityGateHandler) runCheck(ctx context.Context, wsPath, check string)
 		"--timeout", fmt.Sprintf("%d", h.timeout),
 	)
 
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
+	// Separate stdout (JSON envelope) from stderr (VM lifecycle noise) so
+	// that Docker image pulls and VM creation messages don't corrupt the
+	// JSON parse or consume the truncation budget.
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	runErr := cmd.Run()
 
 	var result stackRunResult
-	if jsonErr := json.Unmarshal(buf.Bytes(), &result); jsonErr != nil {
-		// JSON parsing failed — fall back to raw output.
+	if jsonErr := json.Unmarshal(stdout.Bytes(), &result); jsonErr != nil {
+		// JSON parsing failed — fall back to raw stdout+stderr.
 		result.Status = "error"
-		result.Output = buf.String()
+		result.Output = stdout.String() + stderr.String()
 		result.Code = "parse_error"
 	}
 
@@ -173,10 +177,19 @@ func (h *QualityGateHandler) resolveWorkspacePath(ctx context.Context, correlati
 	return resolveWorkspacePath(ctx, h.store, correlationID)
 }
 
-// truncateOutput caps command output to avoid bloating event payloads.
+// ansiRe matches ANSI escape sequences and backspace-overwrite pairs (spinner chars).
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]|.\x08`)
+
+// truncateOutput strips ANSI escape codes, then caps command output using a
+// head+tail strategy to preserve both context and actionable errors.
+// Lint errors appear at the tail; Go test failures can appear mid-output with
+// a FAIL summary at the tail — keeping both ends covers both cases.
 func truncateOutput(s string, maxLen int) string {
+	s = ansiRe.ReplaceAllString(s, "")
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "\n... (truncated)"
+	headBudget := maxLen / 4     // 25% for context (what command ran)
+	tailBudget := maxLen * 3 / 4 // 75% for actual errors
+	return s[:headBudget] + "\n\n... (truncated) ...\n\n" + s[len(s)-tailBudget:]
 }
