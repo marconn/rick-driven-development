@@ -1503,3 +1503,439 @@ func TestDAGRelevance_CacheMissBlocksGraphHandler(t *testing.T) {
 		// Expected: Graph-managed handler correctly suppressed on cache miss.
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests for production workflow failures (2026-03-24)
+// ---------------------------------------------------------------------------
+
+// TestThreeWayJoinWithFailVerdict_PRReview reproduces the pr-review failure
+// where pr-consolidator never dispatched because qa's fail verdict blocked
+// the 3-way join. In review-only workflows (no RetriggeredBy), fail verdicts
+// are informational and must NOT block downstream joins.
+func TestThreeWayJoinWithFailVerdict_PRReview(t *testing.T) {
+	runner, store, bus, reg := newTestPersonaRunner(t)
+
+	runner.RegisterWorkflow(WorkflowDef{
+		ID: "pr-review",
+		Required: []string{
+			"pr-workspace", "pr-jira-context",
+			"architect", "reviewer", "qa",
+			"pr-consolidator", "pr-cleanup",
+		},
+		Graph: map[string][]string{
+			"pr-workspace":    {},
+			"pr-jira-context": {"pr-workspace"},
+			"architect":       {"pr-jira-context"},
+			"reviewer":        {"pr-jira-context"},
+			"qa":              {"pr-jira-context"},
+			"pr-consolidator": {"architect", "reviewer", "qa"},
+			"pr-cleanup":      {"pr-consolidator"},
+		},
+		MaxIterations: 1,
+		// No RetriggeredBy — review-only workflow.
+	})
+
+	consolidatorFired := make(chan struct{}, 1)
+	consolidator := &stubHandler{
+		name: "pr-consolidator",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			consolidatorFired <- struct{}{}
+			return nil, nil
+		},
+	}
+	if err := reg.Register(consolidator); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx := context.Background()
+	corrID := "corr-pr-review-3way"
+
+	// Seed workflow.started
+	wsEvt := event.New(event.WorkflowStartedFor("pr-review"), 1, event.MustMarshal(event.WorkflowStartedPayload{
+		WorkflowID: "pr-review",
+	})).WithCorrelation(corrID).WithAggregate(corrID, 1)
+	if err := store.Append(ctx, corrID, 0, []event.Envelope{wsEvt}); err != nil {
+		t.Fatalf("append ws: %v", err)
+	}
+
+	runner.Start(ctx, reg)
+
+	if err := bus.Publish(ctx, wsEvt); err != nil {
+		t.Fatalf("publish ws: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Seed architect: pass (no verdict event).
+	archAgg := corrID + ":persona:architect"
+	archPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "architect", ChainDepth: 2,
+	})).WithAggregate(archAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, archAgg, 0, []event.Envelope{archPC}); err != nil {
+		t.Fatalf("append architect: %v", err)
+	}
+
+	// Seed reviewer: pass verdict + PersonaCompleted.
+	revAgg := corrID + ":persona:reviewer"
+	revVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+		Phase: "develop", SourcePhase: "review", Outcome: event.VerdictPass,
+		Summary: "looks good",
+	})).WithAggregate(revAgg, 1).WithCorrelation(corrID)
+	revPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "reviewer", ChainDepth: 2,
+	})).WithAggregate(revAgg, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, revAgg, 0, []event.Envelope{revVerdict, revPC}); err != nil {
+		t.Fatalf("append reviewer: %v", err)
+	}
+
+	// Seed qa: FAIL verdict + PersonaCompleted — the condition that blocked pr-consolidator.
+	qaAgg := corrID + ":persona:qa"
+	qaVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+		Phase: "develop", SourcePhase: "qa", Outcome: event.VerdictFail,
+		Summary: "missing tests", Issues: []event.Issue{{Severity: "minor", Category: "testing", Description: "no tests"}},
+	})).WithAggregate(qaAgg, 1).WithCorrelation(corrID)
+	qaPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "qa", ChainDepth: 2,
+	})).WithAggregate(qaAgg, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, qaAgg, 0, []event.Envelope{qaVerdict, qaPC}); err != nil {
+		t.Fatalf("append qa: %v", err)
+	}
+
+	// Publish PersonaCompleted{qa} — the last predecessor. pr-consolidator MUST fire.
+	if err := bus.Publish(ctx, qaPC); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case <-consolidatorFired:
+		// Expected: 3-way join satisfied despite qa's fail verdict.
+	case <-time.After(2 * time.Second):
+		t.Error("pr-consolidator must fire in review-only workflow despite qa fail verdict (3-way join)")
+	}
+}
+
+// TestFeedbackLoopParallelRefire verifies that after a feedback loop, BOTH
+// parallel handlers (reviewer AND qa) re-fire when developer re-completes.
+// Reproduces the jira-dev bug where qa was silently dropped after iteration 3.
+func TestFeedbackLoopParallelRefire(t *testing.T) {
+	runner, store, bus, reg := newTestPersonaRunner(t)
+
+	runner.RegisterWorkflow(WorkflowDef{
+		ID:       "ci-fix",
+		Required: []string{"workspace", "developer", "quality-gate", "reviewer", "qa", "committer"},
+		Graph: map[string][]string{
+			"workspace":    {},
+			"developer":    {"workspace"},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+			"committer":    {"quality-gate"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+		MaxIterations:     2,
+		EscalateOnMaxIter: true,
+		PhaseMap:          map[string]string{"develop": "developer"},
+	})
+
+	var mu sync.Mutex
+	firedHandlers := map[string]int{}
+	makeFiringHandler := func(name string) handler.Handler {
+		return &stubHandler{
+			name: name,
+			subs: []event.Type{event.PersonaCompleted},
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				mu.Lock()
+				firedHandlers[name]++
+				mu.Unlock()
+				return nil, nil
+			},
+		}
+	}
+
+	for _, name := range []string{"reviewer", "qa", "committer"} {
+		if err := reg.Register(makeFiringHandler(name)); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+	}
+
+	ctx := context.Background()
+	corrID := "corr-parallel-refire"
+
+	// Seed workflow.started
+	wsEvt := event.New(event.WorkflowStartedFor("ci-fix"), 1, event.MustMarshal(event.WorkflowStartedPayload{
+		WorkflowID: "ci-fix",
+	})).WithCorrelation(corrID).WithAggregate(corrID, 1)
+	if err := store.Append(ctx, corrID, 0, []event.Envelope{wsEvt}); err != nil {
+		t.Fatalf("append ws: %v", err)
+	}
+
+	runner.Start(ctx, reg)
+	if err := bus.Publish(ctx, wsEvt); err != nil {
+		t.Fatalf("publish ws: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// === Iteration 0 ===
+	// Seed developer PersonaCompleted. Don't register developer as a handler —
+	// we only observe reviewer/qa/committer.
+	devAgg := corrID + ":persona:developer"
+	devPC1 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer", ChainDepth: 1,
+	})).WithAggregate(devAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, devAgg, 0, []event.Envelope{devPC1}); err != nil {
+		t.Fatalf("append dev1: %v", err)
+	}
+	if err := bus.Publish(ctx, devPC1); err != nil {
+		t.Fatalf("publish dev1: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Both reviewer and qa should have fired.
+	mu.Lock()
+	if firedHandlers["reviewer"] != 1 {
+		t.Errorf("iteration 0: reviewer should fire once, fired %d", firedHandlers["reviewer"])
+	}
+	if firedHandlers["qa"] != 1 {
+		t.Errorf("iteration 0: qa should fire once, fired %d", firedHandlers["qa"])
+	}
+	mu.Unlock()
+
+	// Wait for PersonaRunner to persist PersonaCompleted for reviewer/qa,
+	// then seed quality-gate fail + FeedbackGenerated.
+	time.Sleep(50 * time.Millisecond)
+
+	qgAgg := corrID + ":persona:quality-gate"
+	qgVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Summary: "lint failed",
+	})).WithAggregate(qgAgg, 1).WithCorrelation(corrID)
+	qgPC1 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "quality-gate", ChainDepth: 3,
+	})).WithAggregate(qgAgg, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, qgAgg, 0, []event.Envelope{qgVerdict, qgPC1}); err != nil {
+		t.Fatalf("append qg1: %v", err)
+	}
+
+	fbEvt := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
+		TargetPhase: "developer", SourcePhase: "quality-gate", Iteration: 1,
+	})).WithAggregate(corrID, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, corrID, 1, []event.Envelope{fbEvt}); err != nil {
+		t.Fatalf("append feedback: %v", err)
+	}
+
+	// === Iteration 1 ===
+	// Reset counters, developer re-completes after feedback.
+	mu.Lock()
+	firedHandlers = map[string]int{}
+	mu.Unlock()
+
+	devPC2 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer", ChainDepth: 0,
+	})).WithAggregate(devAgg, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, devAgg, 1, []event.Envelope{devPC2}); err != nil {
+		t.Fatalf("append dev2: %v", err)
+	}
+	if err := bus.Publish(ctx, devPC2); err != nil {
+		t.Fatalf("publish dev2: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	if firedHandlers["reviewer"] != 1 {
+		t.Errorf("iteration 1: reviewer should re-fire once, fired %d", firedHandlers["reviewer"])
+	}
+	if firedHandlers["qa"] != 1 {
+		t.Errorf("iteration 1: qa should re-fire once, fired %d", firedHandlers["qa"])
+	}
+	if firedHandlers["committer"] != 0 {
+		t.Errorf("iteration 1: committer must NOT fire while quality-gate has fail verdict, fired %d", firedHandlers["committer"])
+	}
+	mu.Unlock()
+}
+
+// TestDuplicateQualityGatePrevention verifies that after FeedbackGenerated,
+// quality-gate does NOT fire a second time from stale reviewer/qa completions.
+// Reproduces the jira-dev/ci-fix bug where duplicate quality-gate executions
+// corrupted iteration counts and orphaned downstream handlers.
+func TestDuplicateQualityGatePrevention(t *testing.T) {
+	runner, store, bus, reg := newTestPersonaRunner(t)
+
+	runner.RegisterWorkflow(WorkflowDef{
+		ID:       "test-dup-qg",
+		Required: []string{"developer", "reviewer", "qa", "quality-gate", "committer"},
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+			"committer":    {"quality-gate"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+		PhaseMap: map[string]string{"develop": "developer"},
+	})
+
+	var mu sync.Mutex
+	qgFires := 0
+	committerFires := 0
+	qg := &stubHandler{
+		name: "quality-gate",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			mu.Lock()
+			qgFires++
+			mu.Unlock()
+			return nil, nil
+		},
+	}
+	committer := &stubHandler{
+		name: "committer",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			mu.Lock()
+			committerFires++
+			mu.Unlock()
+			return nil, nil
+		},
+	}
+	if err := reg.Register(qg); err != nil {
+		t.Fatalf("register qg: %v", err)
+	}
+	if err := reg.Register(committer); err != nil {
+		t.Fatalf("register committer: %v", err)
+	}
+
+	ctx := context.Background()
+	corrID := "corr-dup-qg"
+
+	wsEvt := event.New(event.WorkflowStartedFor("test-dup-qg"), 1, event.MustMarshal(event.WorkflowStartedPayload{
+		WorkflowID: "test-dup-qg",
+	})).WithCorrelation(corrID).WithAggregate(corrID, 1)
+	if err := store.Append(ctx, corrID, 0, []event.Envelope{wsEvt}); err != nil {
+		t.Fatalf("append ws: %v", err)
+	}
+
+	runner.Start(ctx, reg)
+	if err := bus.Publish(ctx, wsEvt); err != nil {
+		t.Fatalf("publish ws: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// === Iteration 0: seed reviewer + qa completions → quality-gate fires ===
+	// quality-gate and committer are registered; reviewer/qa are NOT — we
+	// manually seed their PersonaCompleted events to avoid aggregate conflicts.
+	revAgg := corrID + ":persona:reviewer"
+	qaAgg := corrID + ":persona:qa"
+
+	revPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "reviewer", ChainDepth: 1,
+	})).WithAggregate(revAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, revAgg, 0, []event.Envelope{revPC}); err != nil {
+		t.Fatalf("append rev: %v", err)
+	}
+
+	qaPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "qa", ChainDepth: 1,
+	})).WithAggregate(qaAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, qaAgg, 0, []event.Envelope{qaPC}); err != nil {
+		t.Fatalf("append qa: %v", err)
+	}
+
+	// Publish qa's PersonaCompleted — this triggers quality-gate's join check.
+	if err := bus.Publish(ctx, qaPC); err != nil {
+		t.Fatalf("publish qa: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	if qgFires != 1 {
+		t.Fatalf("iteration 0: quality-gate should fire once, fired %d", qgFires)
+	}
+	mu.Unlock()
+
+	// Wait for PersonaRunner to persist quality-gate's PersonaCompleted, then
+	// read the aggregate version so we can append verdict + feedback on top.
+	time.Sleep(50 * time.Millisecond)
+	qgAgg := corrID + ":persona:quality-gate"
+	qgEvents, loadErr := store.Load(ctx, qgAgg)
+	if loadErr != nil {
+		t.Fatalf("load qg agg: %v", loadErr)
+	}
+	qgVersion := 0
+	if len(qgEvents) > 0 {
+		qgVersion = qgEvents[len(qgEvents)-1].Version
+	}
+
+	// Seed quality-gate's fail verdict on its existing aggregate.
+	qgVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Summary: "lint failed",
+	})).WithAggregate(qgAgg, qgVersion+1).WithCorrelation(corrID)
+	if err := store.Append(ctx, qgAgg, qgVersion, []event.Envelope{qgVerdict}); err != nil {
+		t.Fatalf("append qg verdict: %v", err)
+	}
+
+	fbEvt := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
+		TargetPhase: "developer", SourcePhase: "quality-gate", Iteration: 1,
+	})).WithAggregate(corrID, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, corrID, 1, []event.Envelope{fbEvt}); err != nil {
+		t.Fatalf("append fb: %v", err)
+	}
+
+	// Reset fire counts
+	mu.Lock()
+	qgFires = 0
+	committerFires = 0
+	mu.Unlock()
+
+	// === Publish reviewer's PersonaCompleted again (stale) ===
+	// This simulates a stale event reaching quality-gate's wrap() after
+	// feedback. DownstreamOf invalidation must prevent quality-gate from
+	// re-firing with old reviewer + old qa.
+	if err := bus.Publish(ctx, revPC); err != nil {
+		t.Fatalf("publish stale revPC: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	if qgFires != 0 {
+		t.Errorf("quality-gate must NOT re-fire from stale completions after feedback, fired %d", qgFires)
+	}
+	if committerFires != 0 {
+		t.Errorf("committer must NOT fire when quality-gate has fail verdict, fired %d", committerFires)
+	}
+	mu.Unlock()
+
+	// === Verify: fresh reviewer/qa completions DO trigger quality-gate ===
+	mu.Lock()
+	qgFires = 0
+	mu.Unlock()
+
+	revPC2 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "reviewer", ChainDepth: 1,
+	})).WithAggregate(revAgg, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, revAgg, 1, []event.Envelope{revPC2}); err != nil {
+		t.Fatalf("append rev2: %v", err)
+	}
+
+	qaPC2 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "qa", ChainDepth: 1,
+	})).WithAggregate(qaAgg, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, qaAgg, 1, []event.Envelope{qaPC2}); err != nil {
+		t.Fatalf("append qa2: %v", err)
+	}
+
+	if err := bus.Publish(ctx, qaPC2); err != nil {
+		t.Fatalf("publish qa2: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	if qgFires != 1 {
+		t.Errorf("quality-gate should fire exactly once from fresh completions, fired %d", qgFires)
+	}
+	mu.Unlock()
+}

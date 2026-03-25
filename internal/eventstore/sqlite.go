@@ -188,7 +188,7 @@ func (s *SQLiteStore) LoadFrom(ctx context.Context, aggregateID string, fromVers
 
 func (s *SQLiteStore) LoadByCorrelation(ctx context.Context, correlationID string) ([]event.Envelope, error) {
 	return s.loadEvents(ctx,
-		"SELECT id, type, aggregate_id, version, schema_version, timestamp, causation_id, correlation_id, source, payload FROM events WHERE correlation_id = ? ORDER BY timestamp",
+		"SELECT id, type, aggregate_id, version, schema_version, timestamp, causation_id, correlation_id, source, payload FROM events WHERE correlation_id = ? ORDER BY rowid",
 		correlationID,
 	)
 }
