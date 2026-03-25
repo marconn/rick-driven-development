@@ -1090,8 +1090,10 @@ func (r *PersonaRunner) checkJoinCondition(requiredPersonas []string, correlatio
 		// A predecessor with an active fail verdict has triggered a feedback
 		// loop — its PersonaCompleted is stale and must not satisfy downstream
 		// joins until the loop completes and it re-runs with a passing
-		// (or no) verdict.
-		if vt := verdicts[req]; vt != nil && vt.active {
+		// (or no) verdict. Only applies to workflows with feedback loops
+		// (RetriggeredBy); review-only workflows (e.g., pr-review) use
+		// fail verdicts as informational findings, not join blockers.
+		if vt := verdicts[req]; vt != nil && vt.active && wfDef != nil && len(wfDef.RetriggeredBy) > 0 {
 			return false, ""
 		}
 		ids = append(ids, id)

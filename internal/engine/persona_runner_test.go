@@ -1100,6 +1100,9 @@ func TestJoinConditionBlockedByFailVerdict(t *testing.T) {
 			"quality-gate": {"developer"},
 			"committer":    {"quality-gate"},
 		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
 		PhaseMap: map[string]string{"develop": "developer"},
 	})
 
@@ -1162,6 +1165,92 @@ func TestJoinConditionBlockedByFailVerdict(t *testing.T) {
 		t.Error("committer must NOT fire when quality-gate's latest verdict is fail")
 	case <-time.After(500 * time.Millisecond):
 		// Expected: join blocked by fail verdict.
+	}
+}
+
+// TestJoinConditionNotBlockedWithoutFeedbackLoop verifies that fail verdicts
+// do NOT block joins in workflows without RetriggeredBy (e.g., pr-review).
+// Fail verdicts are informational in review-only workflows.
+func TestJoinConditionNotBlockedWithoutFeedbackLoop(t *testing.T) {
+	runner, store, bus, reg := newTestPersonaRunner(t)
+
+	runner.RegisterWorkflow(WorkflowDef{
+		ID:       "test-review-only",
+		Required: []string{"reviewer", "qa", "consolidator"},
+		Graph: map[string][]string{
+			"reviewer":     {},
+			"qa":           {},
+			"consolidator": {"reviewer", "qa"},
+		},
+		// No RetriggeredBy — no feedback loops.
+	})
+
+	consolidatorFired := make(chan struct{}, 1)
+	consolidator := &stubHandler{
+		name: "consolidator",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			consolidatorFired <- struct{}{}
+			return nil, nil
+		},
+	}
+	if err := reg.Register(consolidator); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx := context.Background()
+	corrID := "corr-review-no-feedback"
+
+	wsEvt := event.New(event.WorkflowStartedFor("test-review-only"), 1, event.MustMarshal(event.WorkflowStartedPayload{
+		WorkflowID: "test-review-only",
+	})).WithCorrelation(corrID).WithAggregate(corrID, 1)
+	if err := store.Append(ctx, corrID, 0, []event.Envelope{wsEvt}); err != nil {
+		t.Fatalf("append workflow started: %v", err)
+	}
+
+	runner.Start(ctx, reg)
+
+	if err := bus.Publish(ctx, wsEvt); err != nil {
+		t.Fatalf("publish ws: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Seed reviewer: pass verdict + PersonaCompleted.
+	revAgg := corrID + ":persona:reviewer"
+	revPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona:    "reviewer",
+		ChainDepth: 0,
+	})).WithAggregate(revAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, revAgg, 0, []event.Envelope{revPC}); err != nil {
+		t.Fatalf("append reviewer: %v", err)
+	}
+
+	// Seed qa: fail verdict + PersonaCompleted.
+	qaAgg := corrID + ":persona:qa"
+	qaVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+		Phase:       "develop",
+		SourcePhase: "qa",
+		Outcome:     event.VerdictFail,
+		Summary:     "missing tests",
+	})).WithAggregate(qaAgg, 1).WithCorrelation(corrID)
+	qaPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona:    "qa",
+		ChainDepth: 0,
+	})).WithAggregate(qaAgg, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, qaAgg, 0, []event.Envelope{qaVerdict, qaPC}); err != nil {
+		t.Fatalf("append qa: %v", err)
+	}
+
+	// Publish PersonaCompleted{qa} — consolidator SHOULD fire despite fail verdict.
+	if err := bus.Publish(ctx, qaPC); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case <-consolidatorFired:
+		// Expected: fail verdict does not block in review-only workflows.
+	case <-time.After(500 * time.Millisecond):
+		t.Error("consolidator must fire in review-only workflow despite fail verdict from qa")
 	}
 }
 
