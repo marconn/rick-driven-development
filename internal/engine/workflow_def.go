@@ -17,6 +17,39 @@ type WorkflowDef struct {
 	RetriggeredBy     map[string][]event.Type       // handler → extra event types that re-trigger it (e.g., developer → [FeedbackGenerated])
 }
 
+// DownstreamOf returns all personas that transitively depend on the given
+// persona in the Graph, including the persona itself. Used to invalidate
+// stale completions after a feedback loop re-triggers a persona.
+func (d *WorkflowDef) DownstreamOf(persona string) []string {
+	// Build reverse adjacency: for each node, who depends on it?
+	dependents := make(map[string][]string)
+	for h, deps := range d.Graph {
+		for _, dep := range deps {
+			dependents[dep] = append(dependents[dep], h)
+		}
+	}
+
+	// BFS from persona.
+	visited := map[string]bool{persona: true}
+	queue := []string{persona}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, dep := range dependents[current] {
+			if !visited[dep] {
+				visited[dep] = true
+				queue = append(queue, dep)
+			}
+		}
+	}
+
+	result := make([]string, 0, len(visited))
+	for p := range visited {
+		result = append(result, p)
+	}
+	return result
+}
+
 // ResolvePhase maps a verdict phase name to the corresponding required persona
 // name. Falls back to the phase name itself if no mapping exists (handles cases
 // where phase == persona, e.g., "qa" → "qa").

@@ -1374,3 +1374,164 @@ func TestAggregateTokenBudgetTerminatesWorkflow(t *testing.T) {
 		t.Errorf("expected token budget reason, got: %s", p.Reason)
 	}
 }
+
+// TestE2EFeedbackLoopParallelReviewersRefire verifies that when a feedback loop
+// re-triggers the developer, ALL parallel downstream handlers (reviewer + qa)
+// re-fire after the developer completes again. Regression test for a bug where
+// only one of two parallel handlers re-fired after a feedback loop, leaving the
+// workflow stuck (quality-gate join never satisfied).
+//
+// DAG: developer → reviewer + qa (parallel) → quality-gate (join) → committer
+// Flow: developer → reviewer(pass) + qa(pass) → quality-gate(FAIL) → feedback
+//       → developer → reviewer + qa must BOTH re-fire → quality-gate(pass) → committer
+func TestE2EFeedbackLoopParallelReviewersRefire(t *testing.T) {
+	def := WorkflowDef{
+		ID:       "e2e-parallel-refire",
+		Required: []string{"developer", "reviewer", "qa", "quality-gate", "committer"},
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+			"committer":    {"quality-gate"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+		MaxIterations:     3,
+		EscalateOnMaxIter: true,
+		PhaseMap:          corePhaseMap,
+	}
+	env := newE2EEnv(t, def)
+
+	var devRuns, reviewerRuns, qaRuns, qgRuns, committerRuns atomic.Int32
+
+	// developer: no-op, just completes.
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "developer",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				devRuns.Add(1)
+				return nil, nil
+			},
+		},
+		trigger: handler.Trigger{
+			Events: []event.Type{event.WorkflowStartedFor("e2e-parallel-refire"), event.FeedbackGenerated},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// reviewer: always passes.
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "reviewer",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				reviewerRuns.Add(1)
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Phase: "develop", SourcePhase: "review", Outcome: event.VerdictPass,
+						Summary: "looks good",
+					})),
+				}, nil
+			},
+		},
+		trigger: handler.Trigger{Events: []event.Type{event.PersonaCompleted}, AfterPersonas: []string{"developer"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// qa: always passes.
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "qa",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				qaRuns.Add(1)
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Phase: "develop", SourcePhase: "qa", Outcome: event.VerdictPass,
+						Summary: "tests pass",
+					})),
+				}, nil
+			},
+		},
+		trigger: handler.Trigger{Events: []event.Type{event.PersonaCompleted}, AfterPersonas: []string{"developer"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// quality-gate: fails on first run, passes on second.
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "quality-gate",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				run := qgRuns.Add(1)
+				if run == 1 {
+					return []event.Envelope{
+						event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+							Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+							Summary: "lint failed",
+							Issues: []event.Issue{{Severity: "major", Category: "correctness", Description: "lint error"}},
+						})),
+					}, nil
+				}
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictPass,
+						Summary: "all checks pass",
+					})),
+				}, nil
+			},
+		},
+		trigger: handler.Trigger{Events: []event.Type{event.PersonaCompleted}, AfterPersonas: []string{"reviewer", "qa"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// committer: no-op, just completes.
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "committer",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				committerRuns.Add(1)
+				return nil, nil
+			},
+		},
+		trigger: handler.Trigger{Events: []event.Type{event.PersonaCompleted}, AfterPersonas: []string{"quality-gate"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	result := awaitWorkflowResult(t, env.bus, "wf-parallel-refire")
+	env.start(ctx)
+	env.fireWorkflow(ctx, t, "wf-parallel-refire", "e2e-parallel-refire")
+
+	select {
+	case got := <-result:
+		if got.Type != event.WorkflowCompleted {
+			var fp event.WorkflowFailedPayload
+			_ = json.Unmarshal(got.Payload, &fp)
+			t.Fatalf("expected WorkflowCompleted, got %s: %s", got.Type, fp.Reason)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("workflow did not complete — likely stuck because parallel handlers did not re-fire after feedback loop")
+	}
+
+	// Verify execution counts.
+	if d := devRuns.Load(); d != 2 {
+		t.Errorf("developer should run exactly 2 times (initial + feedback retry), got %d", d)
+	}
+	if r := reviewerRuns.Load(); r != 2 {
+		t.Errorf("reviewer should run exactly 2 times (initial + after feedback retry), got %d", r)
+	}
+	if q := qaRuns.Load(); q != 2 {
+		t.Errorf("qa should run exactly 2 times (initial + after feedback retry), got %d", q)
+	}
+	if g := qgRuns.Load(); g != 2 {
+		t.Errorf("quality-gate should run exactly 2 times (fail + pass), got %d", g)
+	}
+	if c := committerRuns.Load(); c != 1 {
+		t.Errorf("committer should run exactly 1 time, got %d", c)
+	}
+}

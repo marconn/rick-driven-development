@@ -313,6 +313,21 @@ func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPerso
 					active: v.Outcome == event.VerdictFail,
 				}
 			}
+		case event.FeedbackGenerated:
+			// Feedback invalidates all completions downstream of the
+			// re-triggered persona. Without this, stale PersonaCompleted
+			// events from a previous iteration satisfy join conditions
+			// prematurely (e.g., quality-gate fires with old qa completion
+			// before qa has re-run after the feedback loop).
+			if wfDef != nil {
+				var fb event.FeedbackGeneratedPayload
+				if err := json.Unmarshal(e.Payload, &fb); err == nil {
+					for _, stale := range wfDef.DownstreamOf(fb.TargetPhase) {
+						delete(latestByPersona, stale)
+						delete(verdicts, stale)
+					}
+				}
+			}
 		}
 	}
 
