@@ -137,16 +137,18 @@ func PRReviewWorkflowDef() WorkflowDef {
 }
 
 // PRFeedbackWorkflowDef returns a workflow for addressing external PR review
-// feedback. Provisions workspace first, analyzer triages comments, developer
-// implements fixes, reviewer checks fixes, committer pushes.
+// feedback. Provisions workspace first, analyzer triages comments, context-snapshot
+// captures codebase state for dependency validation, developer implements fixes,
+// reviewer checks fixes, committer pushes.
 func PRFeedbackWorkflowDef() WorkflowDef {
 	return WorkflowDef{
 		ID:       "pr-feedback",
-		Required: []string{"workspace", "feedback-analyzer", "developer", "reviewer", "committer"},
+		Required: []string{"workspace", "feedback-analyzer", "context-snapshot", "developer", "reviewer", "committer"},
 		Graph: map[string][]string{
 			"workspace":         {},
 			"feedback-analyzer": {"workspace"},
-			"developer":         {"feedback-analyzer"},
+			"context-snapshot":  {"feedback-analyzer"},
+			"developer":         {"context-snapshot"},
 			"reviewer":          {"developer"},
 			"committer":         {"reviewer"},
 		},

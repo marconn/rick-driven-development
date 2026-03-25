@@ -362,7 +362,7 @@ stateDiagram-v2
 | `develop-only` | developer, reviewer | 3 | no |
 | `workspace-dev` | workspace, context-snapshot, developer, reviewer, qa, committer | 3 | yes |
 | `pr-review` | pr-workspace, pr-jira-context, pr-architect, pr-reviewer, pr-qa, pr-consolidator, pr-cleanup | 1 | no |
-| `pr-feedback` | feedback-analyzer, feedback-developer, feedback-verifier, feedback-committer | 3 | yes |
+| `pr-feedback` | workspace, feedback-analyzer, context-snapshot, developer, reviewer, committer | 3 | yes |
 | `jira-dev` | jira-context, researcher, architect, developer, reviewer, qa, committer | 3 | yes |
 | `ci-fix` | developer, reviewer, qa, committer | 2 | yes |
 | `plan-btu` | confluence-reader, codebase-researcher, plan-architect, estimator, confluence-writer | 3 | yes |
