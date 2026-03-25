@@ -267,6 +267,37 @@ func TestToolJiraEpicIssues_WithMockServer(t *testing.T) {
 	}
 }
 
+func TestToolJiraCreate_WithMockServer(t *testing.T) {
+	mockSrv, client := newMockJiraServer(t)
+	mockSrv.handleJSON("/rest/api/3/issue", http.StatusCreated,
+		map[string]any{"key": "PROJ-NEW"})
+
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	result, err := callTool(t, s, "rick_jira_create", map[string]any{
+		"summary":    "New feature",
+		"issue_type": "Story",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rm, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected type: %T", result)
+	}
+	if rm["key"] != "PROJ-NEW" {
+		t.Errorf("expected key PROJ-NEW, got %v", rm["key"])
+	}
+	if rm["created"] != true {
+		t.Errorf("expected created=true")
+	}
+}
+
 func TestToolJiraLink_WithMockServer(t *testing.T) {
 	mockSrv, client := newMockJiraServer(t)
 	mockSrv.handleJSON("/rest/api/3/issueLink", http.StatusCreated, nil)

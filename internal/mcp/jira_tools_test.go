@@ -183,6 +183,169 @@ func TestToolJiraRead_LinksFetchError_SilentlyIgnored(t *testing.T) {
 	}
 }
 
+// --- toolJiraCreate ---
+
+func TestToolJiraCreate_InvalidJSON(t *testing.T) {
+	s, cleanup := testServer(t)
+	defer cleanup()
+
+	tool := s.tools["rick_jira_create"]
+	_, err := tool.Handler(t.Context(), json.RawMessage(`{bad`))
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "invalid arguments") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestToolJiraCreate_MissingSummary(t *testing.T) {
+	s, cleanup := testServer(t)
+	defer cleanup()
+
+	_, err := callTool(t, s, "rick_jira_create", map[string]any{
+		"issue_type": "Task",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing summary")
+	}
+	if !strings.Contains(err.Error(), "summary is required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestToolJiraCreate_NoClient(t *testing.T) {
+	s, cleanup := testServer(t)
+	defer cleanup()
+
+	_, err := callTool(t, s, "rick_jira_create", map[string]any{
+		"summary": "Test ticket",
+	})
+	if err == nil {
+		t.Fatal("expected error when Jira not configured")
+	}
+	if !strings.Contains(err.Error(), "Jira client not configured") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestToolJiraCreate_DefaultsToTask(t *testing.T) {
+	var capturedBody []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rest/api/3/issue", func(w http.ResponseWriter, r *http.Request) {
+		var buf [8192]byte
+		n, _ := r.Body.Read(buf[:])
+		capturedBody = buf[:n]
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"key":"PROJ-99"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := jira.NewClient(srv.URL, "test", "tok")
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	result, err := callTool(t, s, "rick_jira_create", map[string]any{
+		"summary": "My new task",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	rm := result.(map[string]any)
+	if rm["key"] != "PROJ-99" {
+		t.Errorf("expected key PROJ-99, got %v", rm["key"])
+	}
+	if rm["created"] != true {
+		t.Errorf("expected created=true")
+	}
+	if !strings.Contains(string(capturedBody), `"Task"`) {
+		t.Errorf("expected default issue type Task in body, got: %s", capturedBody)
+	}
+}
+
+func TestToolJiraCreate_WithAllOptions(t *testing.T) {
+	var capturedBody []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rest/api/3/issue", func(w http.ResponseWriter, r *http.Request) {
+		var buf [8192]byte
+		n, _ := r.Body.Read(buf[:])
+		capturedBody = buf[:n]
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"key":"OTHER-10"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := jira.NewClient(srv.URL, "test", "tok")
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	result, err := callTool(t, s, "rick_jira_create", map[string]any{
+		"summary":      "Bug fix",
+		"issue_type":   "Bug",
+		"project":      "OTHER",
+		"description":  "Steps to reproduce",
+		"epic_key":     "OTHER-EPIC",
+		"story_points": 3,
+		"labels":       []string{"backend"},
+		"components":   []string{"api"},
+		"priority":     "High",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	rm := result.(map[string]any)
+	if rm["key"] != "OTHER-10" {
+		t.Errorf("expected key OTHER-10, got %v", rm["key"])
+	}
+	urlStr, ok := rm["url"].(string)
+	if !ok || !strings.Contains(urlStr, "/browse/OTHER-10") {
+		t.Errorf("expected browse URL, got %v", rm["url"])
+	}
+	body := string(capturedBody)
+	for _, want := range []string{`"Bug"`, `"OTHER"`, `"High"`, `"backend"`, `"api"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body should contain %s, got: %s", want, body)
+		}
+	}
+}
+
+func TestToolJiraCreate_APIError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rest/api/3/issue", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errors":{"summary":"required"}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := jira.NewClient(srv.URL, "test", "tok")
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	_, err := callTool(t, s, "rick_jira_create", map[string]any{
+		"summary": "Will fail",
+	})
+	if err == nil {
+		t.Fatal("expected error for API 400")
+	}
+	if !strings.Contains(err.Error(), "create issue") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 // --- toolJiraWrite ---
 
 func TestToolJiraWrite_InvalidJSON(t *testing.T) {

@@ -219,6 +219,59 @@ func (s *Server) registerJiraTools() {
 		},
 		Handler: s.toolJiraLink,
 	})
+
+	s.register(Tool{
+		Definition: ToolDefinition{
+			Name:        "rick_jira_create",
+			Description: "Create a new Jira issue (Task, Bug, Story, Epic, Sub-task).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"summary": map[string]any{
+						"type":        "string",
+						"description": "Issue summary / title.",
+					},
+					"issue_type": map[string]any{
+						"type":        "string",
+						"description": "Issue type: Task, Bug, Story, Epic, Sub-task.",
+						"default":     "Task",
+					},
+					"project": map[string]any{
+						"type":        "string",
+						"description": "Project key (e.g., PROJ). Defaults to JIRA_PROJECT env.",
+					},
+					"description": map[string]any{
+						"type":        "string",
+						"description": "Issue description (markdown).",
+					},
+					"epic_key": map[string]any{
+						"type":        "string",
+						"description": "Parent epic key (e.g., PROJ-100).",
+					},
+					"story_points": map[string]any{
+						"type":        "number",
+						"description": "Story points (Fibonacci).",
+					},
+					"labels": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Labels to set on the issue.",
+					},
+					"components": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Component names.",
+					},
+					"priority": map[string]any{
+						"type":        "string",
+						"description": "Priority name (e.g., High, Medium, Low).",
+					},
+				},
+				"required": []string{"summary"},
+			},
+		},
+		Handler: s.toolJiraCreate,
+	})
 }
 
 // --- Handlers ---
@@ -594,5 +647,64 @@ func (s *Server) toolJiraPRLinks(ctx context.Context, raw json.RawMessage) (any,
 		"ticket": args.Ticket,
 		"prs":    links,
 		"count":  len(links),
+	}, nil
+}
+
+type jiraCreateArgs struct {
+	Summary     string   `json:"summary"`
+	IssueType   string   `json:"issue_type"`
+	Project     string   `json:"project"`
+	Description string   `json:"description"`
+	EpicKey     string   `json:"epic_key"`
+	StoryPoints float64  `json:"story_points"`
+	Labels      []string `json:"labels"`
+	Components  []string `json:"components"`
+	Priority    string   `json:"priority"`
+}
+
+func (s *Server) toolJiraCreate(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args jiraCreateArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if args.Summary == "" {
+		return nil, fmt.Errorf("summary is required")
+	}
+	if err := s.requireJira(); err != nil {
+		return nil, err
+	}
+	if args.IssueType == "" {
+		args.IssueType = "Task"
+	}
+
+	var opts []jira.CreateOption
+	if args.Project != "" {
+		opts = append(opts, jira.WithProject(args.Project))
+	}
+	if args.EpicKey != "" {
+		opts = append(opts, jira.WithEpicLink(args.EpicKey))
+	}
+	if args.StoryPoints > 0 {
+		opts = append(opts, jira.WithStoryPoints(args.StoryPoints))
+	}
+	if len(args.Labels) > 0 {
+		opts = append(opts, jira.WithLabels(args.Labels))
+	}
+	if len(args.Components) > 0 {
+		opts = append(opts, jira.WithComponents(args.Components))
+	}
+	if args.Priority != "" {
+		opts = append(opts, jira.WithPriority(args.Priority))
+	}
+
+	key, err := s.deps.Jira.CreateIssue(ctx, args.IssueType, args.Summary, args.Description, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("create issue: %w", err)
+	}
+
+	return map[string]any{
+		"key":     key,
+		"url":     s.deps.Jira.BaseURL() + "/browse/" + key,
+		"created": true,
 	}, nil
 }

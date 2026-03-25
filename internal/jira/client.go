@@ -45,6 +45,9 @@ func NewClientFromEnv() *Client {
 	}
 }
 
+// BaseURL returns the configured Jira instance URL.
+func (c *Client) BaseURL() string { return c.baseURL }
+
 // NewClient creates a Client with explicit credentials. Intended for tests.
 func NewClient(baseURL, email, token string) *Client {
 	return &Client{
@@ -261,6 +264,89 @@ func (c *Client) CreateTask(ctx context.Context, epicKey, title, description str
 	}
 	if storyPoints > 0 {
 		fields["customfield_10004"] = storyPoints
+	}
+	return c.createIssue(ctx, fields)
+}
+
+// CreateOption configures optional fields for CreateIssue.
+type CreateOption func(fields map[string]any)
+
+// WithProject overrides the default project key.
+func WithProject(key string) CreateOption {
+	return func(fields map[string]any) {
+		if key != "" {
+			fields["project"] = map[string]any{"key": key}
+		}
+	}
+}
+
+// WithEpicLink sets the parent epic for the issue.
+func WithEpicLink(epicKey string) CreateOption {
+	return func(fields map[string]any) {
+		if epicKey != "" {
+			fields["customfield_10200"] = epicKey
+		}
+	}
+}
+
+// WithStoryPoints sets story points on the issue.
+func WithStoryPoints(points float64) CreateOption {
+	return func(fields map[string]any) {
+		if points > 0 {
+			fields["customfield_10004"] = points
+		}
+	}
+}
+
+// WithLabels sets labels on the issue.
+func WithLabels(labels []string) CreateOption {
+	return func(fields map[string]any) {
+		if len(labels) > 0 {
+			fields["labels"] = labels
+		}
+	}
+}
+
+// WithComponents sets components on the issue.
+func WithComponents(names []string) CreateOption {
+	return func(fields map[string]any) {
+		if len(names) > 0 {
+			comps := make([]map[string]any, len(names))
+			for i, n := range names {
+				comps[i] = map[string]any{"name": n}
+			}
+			fields["components"] = comps
+		}
+	}
+}
+
+// WithPriority sets the issue priority.
+func WithPriority(name string) CreateOption {
+	return func(fields map[string]any) {
+		if name != "" {
+			fields["priority"] = map[string]any{"name": name}
+		}
+	}
+}
+
+// CreateIssue creates a Jira issue of any type and returns its key.
+func (c *Client) CreateIssue(ctx context.Context, issueType, summary, description string, opts ...CreateOption) (string, error) {
+	fields := map[string]any{
+		"project":   map[string]any{"key": c.project},
+		"issuetype": map[string]any{"name": issueType},
+		"summary":   summary,
+	}
+	if description != "" {
+		fields["description"] = MarkdownToADF(description)
+	}
+	if issueType == "Epic" {
+		fields["customfield_10201"] = summary // Epic Name
+	}
+	if c.teamID != "" {
+		fields["customfield_11533"] = map[string]any{"id": c.teamID}
+	}
+	for _, opt := range opts {
+		opt(fields)
 	}
 	return c.createIssue(ctx, fields)
 }

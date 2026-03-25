@@ -119,6 +119,119 @@ func TestADFToPlainTextString(t *testing.T) {
 	}
 }
 
+func TestCreateIssue_Task(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/rest/api/3/issue" {
+			http.Error(w, "unexpected", http.StatusBadRequest)
+			return
+		}
+		buf := make([]byte, 8192)
+		n, _ := r.Body.Read(buf)
+		gotBody = string(buf[:n])
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"key":"TEST-42"}`))
+	}))
+	defer srv.Close()
+
+	cli := NewClient(srv.URL, "a@b.com", "tok")
+	key, err := cli.CreateIssue(context.Background(), "Task", "My task", "Some description")
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if key != "TEST-42" {
+		t.Errorf("want key TEST-42, got %q", key)
+	}
+	if !strings.Contains(gotBody, `"Task"`) {
+		t.Errorf("body should contain issue type Task, got: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"My task"`) {
+		t.Errorf("body should contain summary, got: %s", gotBody)
+	}
+}
+
+func TestCreateIssue_EpicAutoSetsName(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 8192)
+		n, _ := r.Body.Read(buf)
+		gotBody = string(buf[:n])
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"key":"TEST-1"}`))
+	}))
+	defer srv.Close()
+
+	cli := NewClient(srv.URL, "a@b.com", "tok")
+	_, err := cli.CreateIssue(context.Background(), "Epic", "My epic", "")
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	// Epic Name field (customfield_10201) should be set to summary.
+	if !strings.Contains(gotBody, "customfield_10201") {
+		t.Errorf("body should contain Epic Name field, got: %s", gotBody)
+	}
+}
+
+func TestCreateIssue_WithOptions(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 8192)
+		n, _ := r.Body.Read(buf)
+		gotBody = string(buf[:n])
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"key":"OTHER-1"}`))
+	}))
+	defer srv.Close()
+
+	cli := NewClient(srv.URL, "a@b.com", "tok")
+	key, err := cli.CreateIssue(context.Background(), "Bug", "Fix crash", "Details",
+		WithProject("OTHER"),
+		WithEpicLink("OTHER-EPIC"),
+		WithStoryPoints(5),
+		WithLabels([]string{"backend", "urgent"}),
+		WithComponents([]string{"api"}),
+		WithPriority("High"),
+	)
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if key != "OTHER-1" {
+		t.Errorf("want key OTHER-1, got %q", key)
+	}
+	for _, want := range []string{`"OTHER"`, `"OTHER-EPIC"`, `"High"`, `"backend"`, `"api"`} {
+		if !strings.Contains(gotBody, want) {
+			t.Errorf("body should contain %s, got: %s", want, gotBody)
+		}
+	}
+}
+
+func TestCreateIssue_APIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errors":{"summary":"required"}}`))
+	}))
+	defer srv.Close()
+
+	cli := NewClient(srv.URL, "a@b.com", "tok")
+	_, err := cli.CreateIssue(context.Background(), "Task", "test", "")
+	if err == nil {
+		t.Fatal("want error for 400 response")
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("error should mention 400, got: %v", err)
+	}
+}
+
+func TestBaseURL(t *testing.T) {
+	cli := NewClient("https://example.atlassian.net", "a@b.com", "tok")
+	if cli.BaseURL() != "https://example.atlassian.net" {
+		t.Errorf("want baseURL, got %q", cli.BaseURL())
+	}
+}
+
 func TestADFToPlainTextNil(t *testing.T) {
 	if got := ADFToPlainText(nil); got != "" {
 		t.Errorf("want empty, got %q", got)
