@@ -1,5 +1,5 @@
-# Claude Code worktrees
-.claude/worktrees/**/*
+# Claude Code
+.claude/
 
 # Workflow output (generated artifacts)
 .workflow/
