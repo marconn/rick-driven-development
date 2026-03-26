@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,16 +27,22 @@ type QualityGateHandler struct {
 	name     string
 	stackBin string // path to stack binary, defaults to "stack"
 	timeout  int    // stack run --timeout in seconds, defaults to 300
+	debugDir string // directory for full debug output; empty = no debug files
+	logger   *slog.Logger
 }
 
 // NewQualityGate creates a QualityGateHandler with the canonical name "quality-gate".
+// Set RICK_QUALITY_GATE_DEBUG_DIR to persist full untruncated output for inspection.
 func NewQualityGate(d Deps) *QualityGateHandler {
-	return &QualityGateHandler{
+	h := &QualityGateHandler{
 		store:    d.Store,
 		name:     "quality-gate",
 		stackBin: "stack",
 		timeout:  300,
+		debugDir: os.Getenv("RICK_QUALITY_GATE_DEBUG_DIR"),
+		logger:   slog.Default(),
 	}
+	return h
 }
 
 func (h *QualityGateHandler) Name() string             { return h.name }
@@ -71,10 +79,21 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 			if result.isStackError() {
 				return h.passVerdict(fmt.Sprintf("stack unavailable (%s), skipping quality checks", result.Code)), nil
 			}
+
+			// Save full raw output to debug file for operator inspection.
+			debugRef := h.saveDebugOutput(env.CorrelationID, check, result.Output)
+
+			// Filter Docker noise before truncation so actual errors survive.
+			cleaned := filterDockerNoise(result.Output)
+			desc := fmt.Sprintf("./run.sh %s failed:\n%s", check, truncateOutput(cleaned, 2000))
+			if debugRef != "" {
+				desc += "\n\n[full output: " + debugRef + "]"
+			}
+
 			issues = append(issues, event.Issue{
 				Severity:    "major",
 				Category:    "correctness",
-				Description: fmt.Sprintf("./run.sh %s failed:\n%s", check, truncateOutput(result.Output, 2000)),
+				Description: desc,
 			})
 			failSummaries = append(failSummaries, fmt.Sprintf("%s failed", check))
 		}
@@ -120,7 +139,7 @@ func (h *QualityGateHandler) runCheck(ctx context.Context, wsPath, check string)
 		"--timeout", fmt.Sprintf("%d", h.timeout),
 	)
 
-	// Separate stdout (JSON envelope) from stderr (VM lifecycle noise) so
+	// Separate stdout (JSON envelopes) from stderr (VM lifecycle noise) so
 	// that Docker image pulls and VM creation messages don't corrupt the
 	// JSON parse or consume the truncation budget.
 	var stdout, stderr bytes.Buffer
@@ -129,8 +148,11 @@ func (h *QualityGateHandler) runCheck(ctx context.Context, wsPath, check string)
 
 	runErr := cmd.Run()
 
-	var result stackRunResult
-	if jsonErr := json.Unmarshal(stdout.Bytes(), &result); jsonErr != nil {
+	// stack run --json emits NDJSON (one JSON object per line): create, run,
+	// destroy. We need the "run" envelope specifically — it contains the
+	// inner command's exit code and captured output.
+	result, parseOK := parseStackNDJSON(stdout.Bytes())
+	if !parseOK {
 		// JSON parsing failed — fall back to raw stdout+stderr.
 		result.Status = "error"
 		result.Output = stdout.String() + stderr.String()
@@ -147,6 +169,38 @@ func (h *QualityGateHandler) runCheck(ctx context.Context, wsPath, check string)
 	}
 
 	return result, nil
+}
+
+// parseStackNDJSON scans NDJSON lines from stack run --json and returns the
+// "run" action envelope. Falls back to the last parseable envelope if no "run"
+// action is found. Returns false if no JSON could be parsed at all.
+func parseStackNDJSON(data []byte) (stackRunResult, bool) {
+	// Fast path: try single-JSON parse (works for tests and simple output).
+	var single stackRunResult
+	if err := json.Unmarshal(data, &single); err == nil {
+		return single, true
+	}
+
+	// NDJSON: scan line by line, strip ANSI, find the "run" action envelope.
+	var last stackRunResult
+	found := false
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := ansiRe.ReplaceAllString(strings.TrimSpace(scanner.Text()), "")
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var r stackRunResult
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			continue
+		}
+		found = true
+		last = r
+		if r.Action == "run" {
+			return r, true
+		}
+	}
+	return last, found
 }
 
 func (h *QualityGateHandler) passVerdict(summary string) []event.Envelope {
@@ -193,4 +247,63 @@ func truncateOutput(s string, maxLen int) string {
 	headBudget := maxLen / 4     // 25% for context (what command ran)
 	tailBudget := maxLen * 3 / 4 // 75% for actual errors
 	return s[:headBudget] + "\n\n... (truncated) ...\n\n" + s[len(s)-tailBudget:]
+}
+
+// dockerNoiseRe matches lines that are pure Docker Compose / image pull
+// lifecycle noise — container start/stop, network creation, layer
+// download progress. These carry no diagnostic value and drown out the
+// actual lint/test errors.
+var dockerNoiseRe = regexp.MustCompile(
+	`(?i)` +
+		`(^Container \S+ (Creating|Created|Starting|Started|Stopping|Stopped|Removing|Removed|Waiting|Healthy|Running)$)` +
+		`|(^Network \S+ (Creating|Created|Removing|Removed)$)` +
+		`|(: Pulling fs layer$)` +
+		`|(: (Verifying Checksum|Download complete|Pull complete|Extracting|Waiting)$)` +
+		`|(: Pulling from )` +
+		`|(^Digest: sha256:)` +
+		`|(^Status: Downloaded newer image for )` +
+		`|(^Unable to find image .+ locally$)` +
+		`|(^[0-9a-f]{12}: )`,
+)
+
+// filterDockerNoise removes Docker Compose lifecycle and image-pull lines
+// from stack output so that truncation preserves actual error content.
+func filterDockerNoise(s string) string {
+	var kept []string
+	for _, line := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if dockerNoiseRe.MatchString(trimmed) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
+// saveDebugOutput persists the full untruncated output to a file for operator
+// inspection. Returns the file path or empty string if debug is disabled.
+func (h *QualityGateHandler) saveDebugOutput(correlationID, check, output string) string {
+	if h.debugDir == "" {
+		return ""
+	}
+	if err := os.MkdirAll(h.debugDir, 0o755); err != nil {
+		h.logger.Warn("quality-gate: failed to create debug dir", "dir", h.debugDir, "err", err)
+		return ""
+	}
+	// Use short correlation prefix for readability.
+	shortID := correlationID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	name := fmt.Sprintf("qg-%s-%s.log", shortID, check)
+	path := filepath.Join(h.debugDir, name)
+	if err := os.WriteFile(path, []byte(output), 0o644); err != nil {
+		h.logger.Warn("quality-gate: failed to write debug output", "path", path, "err", err)
+		return ""
+	}
+	h.logger.Info("quality-gate: debug output saved", "path", path, "check", check, "bytes", len(output))
+	return path
 }

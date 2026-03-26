@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,18 +24,21 @@ func writeFakeStack(t *testing.T, dir string, script string) string {
 	return bin
 }
 
-// fakeStackSuccess returns a script that emits a stack run success JSON envelope.
+// fakeStackSuccess returns a script that emits NDJSON matching real stack output:
+// create envelope, run envelope, destroy envelope — one per line.
 func fakeStackSuccess() string {
 	return `#!/bin/bash
 cat <<'EOF'
-{"status":"success","action":"run","exit_code":0,"stack":"tmp-test","kept":false,"output":"all good"}
+{"action":"create","code_copy_path":"/tmp/test","compose_file":"deployments/docker-compose.yml","container":"huli-tmp-test","ip":"10.0.0.1","name":"tmp-test","status":"success"}
+{"action":"run","exit_code":0,"kept":false,"output":"all good","stack":"tmp-test","status":"success"}
+{"action":"destroy","code_copy_path":"/tmp/test","name":"tmp-test","purged":true,"status":"success"}
 EOF
 exit 0
 `
 }
 
-// fakeStackCommandFail returns a script that emits a stack run success envelope
-// but with non-zero inner exit_code (command failed inside VM).
+// fakeStackCommandFail returns a script that emits NDJSON with a non-zero
+// inner exit_code for the specified check (command failed inside VM).
 func fakeStackCommandFail(check string) string {
 	return `#!/bin/bash
 # Extract check name: last arg before --json
@@ -46,12 +50,16 @@ for arg in "${args[@]}"; do
 done
 if [ "$check" = "` + check + `" ]; then
     cat <<'EOF'
-{"status":"success","action":"run","exit_code":1,"stack":"tmp-test","kept":false,"output":"FAIL: some test error"}
+{"action":"create","code_copy_path":"/tmp/test","compose_file":"deployments/docker-compose.yml","container":"huli-tmp-test","ip":"10.0.0.1","name":"tmp-test","status":"success"}
+{"action":"run","exit_code":1,"kept":false,"output":"FAIL: some test error","stack":"tmp-test","status":"success"}
+{"action":"destroy","code_copy_path":"/tmp/test","name":"tmp-test","purged":true,"status":"success"}
 EOF
     exit 1
 fi
 cat <<'EOF'
-{"status":"success","action":"run","exit_code":0,"stack":"tmp-test","kept":false,"output":"ok"}
+{"action":"create","code_copy_path":"/tmp/test","compose_file":"deployments/docker-compose.yml","container":"huli-tmp-test","ip":"10.0.0.1","name":"tmp-test","status":"success"}
+{"action":"run","exit_code":0,"kept":false,"output":"ok","stack":"tmp-test","status":"success"}
+{"action":"destroy","code_copy_path":"/tmp/test","name":"tmp-test","purged":true,"status":"success"}
 EOF
 exit 0
 `
@@ -653,6 +661,195 @@ func TestQualityGateStackBinaryMissing(t *testing.T) {
 	}
 	// Missing binary → exec fails → parse_error → NOT a stack error → VerdictFail.
 	assertVerdictOutcome(t, got[0], event.VerdictFail)
+}
+
+func TestParseStackNDJSON(t *testing.T) {
+	t.Run("single json line", func(t *testing.T) {
+		data := []byte(`{"action":"run","exit_code":0,"output":"ok","status":"success"}`)
+		r, ok := parseStackNDJSON(data)
+		if !ok {
+			t.Fatal("expected successful parse")
+		}
+		if r.Action != "run" || r.ExitCode != 0 {
+			t.Errorf("unexpected result: action=%s exit_code=%d", r.Action, r.ExitCode)
+		}
+	})
+
+	t.Run("three line NDJSON", func(t *testing.T) {
+		data := []byte(`{"action":"create","status":"success","name":"tmp-1"}
+{"action":"run","exit_code":1,"output":"lint error: unused var","status":"success"}
+{"action":"destroy","status":"success","name":"tmp-1"}`)
+		r, ok := parseStackNDJSON(data)
+		if !ok {
+			t.Fatal("expected successful parse")
+		}
+		if r.Action != "run" {
+			t.Errorf("should find run envelope, got action=%s", r.Action)
+		}
+		if r.ExitCode != 1 {
+			t.Errorf("want exit_code=1, got %d", r.ExitCode)
+		}
+		if r.Output != "lint error: unused var" {
+			t.Errorf("unexpected output: %s", r.Output)
+		}
+	})
+
+	t.Run("NDJSON with ANSI and non-JSON lines", func(t *testing.T) {
+		data := []byte("\x1b[2K\x1b[0ACreating VM  /\nImage resized.\n" +
+			`{"action":"create","status":"success"}` + "\n" +
+			`{"action":"run","exit_code":0,"output":"pass","status":"success"}` + "\n" +
+			`{"action":"destroy","status":"success"}`)
+		r, ok := parseStackNDJSON(data)
+		if !ok {
+			t.Fatal("expected successful parse")
+		}
+		if r.Action != "run" || r.Output != "pass" {
+			t.Errorf("unexpected result: action=%s output=%s", r.Action, r.Output)
+		}
+	})
+
+	t.Run("no json at all", func(t *testing.T) {
+		data := []byte("some garbage\nmore garbage\n")
+		_, ok := parseStackNDJSON(data)
+		if ok {
+			t.Error("expected parse failure for non-JSON input")
+		}
+	})
+
+	t.Run("no run envelope falls back to last", func(t *testing.T) {
+		data := []byte(`{"action":"create","status":"success"}
+{"action":"destroy","status":"success","code":"no_compose_file"}`)
+		r, ok := parseStackNDJSON(data)
+		if !ok {
+			t.Fatal("expected successful parse")
+		}
+		// Should return last parsed envelope (destroy).
+		if r.Action != "destroy" {
+			t.Errorf("expected fallback to last envelope, got action=%s", r.Action)
+		}
+	})
+}
+
+func TestFilterDockerNoise(t *testing.T) {
+	input := strings.Join([]string{
+		" Container deployments-mysql-1 Creating ",
+		" Container deployments-mysql-1 Created ",
+		" Container deployments-mysql-1 Starting ",
+		" Container deployments-mysql-1 Started ",
+		" Container deployments-redis-1 Started ",
+		" Network deployments_default Creating ",
+		" Network deployments_default Created ",
+		"7ad3271a525f: Pulling fs layer",
+		"7ad3271a525f: Verifying Checksum",
+		"7ad3271a525f: Download complete",
+		"7ad3271a525f: Pull complete",
+		"Digest: sha256:abc123",
+		"Status: Downloaded newer image for golangci/golangci-lint:v1.64.8",
+		"Unable to find image 'golangci/golangci-lint:v1.64.8' locally",
+		"v1.64.8: Pulling from golangci/golangci-lint",
+		"actual lint error: unused variable x",
+		"FAIL: TestSomething",
+		"exit status 1",
+	}, "\n")
+
+	got := filterDockerNoise(input)
+
+	// Should keep actual error lines
+	if !strings.Contains(got, "actual lint error: unused variable x") {
+		t.Error("should keep actual lint errors")
+	}
+	if !strings.Contains(got, "FAIL: TestSomething") {
+		t.Error("should keep test failures")
+	}
+	if !strings.Contains(got, "exit status 1") {
+		t.Error("should keep exit status")
+	}
+
+	// Should remove Docker noise
+	if strings.Contains(got, "Container deployments") {
+		t.Error("should filter Docker container lifecycle lines")
+	}
+	if strings.Contains(got, "Network deployments") {
+		t.Error("should filter Docker network lines")
+	}
+	if strings.Contains(got, "Pulling fs layer") {
+		t.Error("should filter Docker image pull lines")
+	}
+	if strings.Contains(got, "sha256:") {
+		t.Error("should filter Docker digest lines")
+	}
+}
+
+func TestQualityGateDebugOutput(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	debugDir := filepath.Join(t.TempDir(), "debug")
+
+	// Fake stack that returns NDJSON with Docker noise in the output field.
+	dockerNoise := strings.Repeat(" Container deployments-mysql-1 Started \\n", 50) +
+		"actual error: undefined function foo"
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+cat <<'EOF'
+{"action":"create","status":"success"}
+{"action":"run","exit_code":1,"output":"`+dockerNoise+`","status":"success"}
+{"action":"destroy","status":"success"}
+EOF
+exit 1
+`)
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-debug"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-debug"),
+	}
+
+	h := &QualityGateHandler{
+		store:    store,
+		name:     "quality-gate",
+		stackBin: fakeStack,
+		timeout:  300,
+		debugDir: debugDir,
+		logger:   slog.Default(),
+	}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-debug")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertVerdictOutcome(t, got[0], event.VerdictFail)
+
+	// Verify debug file was created.
+	debugFiles, err := os.ReadDir(debugDir)
+	if err != nil {
+		t.Fatalf("debug dir should exist: %v", err)
+	}
+	if len(debugFiles) == 0 {
+		t.Fatal("expected at least one debug file")
+	}
+
+	// Verify verdict references the debug file.
+	var vp event.VerdictPayload
+	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
+		t.Fatal(err)
+	}
+	if len(vp.Issues) == 0 {
+		t.Fatal("expected issues")
+	}
+	if !strings.Contains(vp.Issues[0].Description, "[full output:") {
+		t.Error("verdict should reference debug file path")
+	}
+	// Verify Docker noise is filtered from the verdict description.
+	if strings.Contains(vp.Issues[0].Description, "Container deployments") {
+		t.Error("verdict description should not contain Docker noise")
+	}
+	// Verify actual error survives.
+	if !strings.Contains(vp.Issues[0].Description, "actual error: undefined function foo") {
+		t.Errorf("verdict should contain actual error, got: %s", vp.Issues[0].Description)
+	}
 }
 
 // assertVerdictOutcome checks that an envelope is a VerdictRendered with the expected outcome.
