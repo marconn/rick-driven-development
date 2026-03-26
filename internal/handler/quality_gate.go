@@ -174,7 +174,8 @@ func (h *QualityGateHandler) failVerdict(summary string, issues []event.Issue) [
 
 // resolveWorkspacePath delegates to the shared helper in committer.go.
 func (h *QualityGateHandler) resolveWorkspacePath(ctx context.Context, correlationID string) (string, error) {
-	return resolveWorkspacePath(ctx, h.store, correlationID)
+	ws, err := resolveWorkspace(ctx, h.store, correlationID)
+	return ws.Path, err
 }
 
 // ansiRe matches ANSI escape sequences and backspace-overwrite pairs (spinner chars).

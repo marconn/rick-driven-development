@@ -13,12 +13,19 @@ import (
 
 // CommitterHandler wraps an AIHandler to validate that code changes exist in the
 // workspace before delegating to the AI for commit/push. If no changes are
-// detected (no uncommitted files AND no unpushed commits), it emits a
-// VerdictFail targeting the "develop" phase to trigger the feedback loop —
-// forcing the developer to retry instead of silently completing the workflow.
+// detected (no uncommitted files, no unpushed commits, AND no divergence from
+// the base branch), it emits a VerdictFail targeting the "develop" phase to
+// trigger the feedback loop — forcing the developer to retry instead of
+// silently completing the workflow.
 type CommitterHandler struct {
 	ai    *AIHandler
 	store eventstore.Store
+}
+
+// workspaceInfo holds the resolved workspace path and base branch.
+type workspaceInfo struct {
+	Path string
+	Base string
 }
 
 // NewCommitterHandler creates a handler that validates workspace changes
@@ -37,14 +44,14 @@ func (h *CommitterHandler) Subscribes() []event.Type { return nil }
 // Handle checks workspace for changes, then delegates to the AI handler.
 // Returns VerdictFail if no code changes are detected.
 func (h *CommitterHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Envelope, error) {
-	wsPath, err := resolveWorkspacePath(ctx, h.store, env.CorrelationID)
+	ws, err := resolveWorkspace(ctx, h.store, env.CorrelationID)
 	if err != nil {
 		return nil, fmt.Errorf("committer: resolve workspace: %w", err)
 	}
 
 	// Workspace-less workflows (prompt-only) skip the change check.
-	if wsPath != "" {
-		hasChanges, err := workspaceHasChanges(ctx, wsPath)
+	if ws.Path != "" {
+		hasChanges, err := workspaceHasChanges(ctx, ws.Path, ws.Base)
 		if err != nil {
 			return nil, fmt.Errorf("committer: check workspace changes: %w", err)
 		}
@@ -77,8 +84,12 @@ func (h *CommitterHandler) noChangesVerdict() []event.Envelope {
 }
 
 // workspaceHasChanges returns true if the workspace has uncommitted changes
-// (git status --porcelain) or unpushed commits (git log @{u}..HEAD).
-func workspaceHasChanges(ctx context.Context, wsPath string) (bool, error) {
+// (git status --porcelain), unpushed commits (git log @{u}..HEAD), or
+// divergence from the base branch (git log origin/<base>..HEAD). The base
+// branch check catches the case where the developer committed and pushed
+// autonomously — the feature branch has no local/unpushed changes but has
+// diverged from the base.
+func workspaceHasChanges(ctx context.Context, wsPath, baseBranch string) (bool, error) {
 	// Check for uncommitted changes (staged, unstaged, or untracked).
 	statusCmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
 	statusCmd.Dir = wsPath
@@ -110,21 +121,39 @@ func workspaceHasChanges(ctx context.Context, wsPath string) (bool, error) {
 		if fallbackErr != nil {
 			return false, nil
 		}
-		return len(strings.TrimSpace(string(fallbackOut))) > 0, nil
+		if len(strings.TrimSpace(string(fallbackOut))) > 0 {
+			return true, nil
+		}
+	} else if len(strings.TrimSpace(string(logOut))) > 0 {
+		return true, nil
 	}
-	return len(strings.TrimSpace(string(logOut))) > 0, nil
+
+	// Check for divergence from the base branch. This catches the case where
+	// the developer committed and pushed to the feature branch autonomously —
+	// git status is clean and @{u}..HEAD is empty, but the feature branch has
+	// commits that the base branch doesn't.
+	if baseBranch != "" {
+		divergeCmd := exec.CommandContext(ctx, "git", "log", "origin/"+baseBranch+"..HEAD", "--oneline")
+		divergeCmd.Dir = wsPath
+		divergeOut, divergeErr := divergeCmd.Output()
+		if divergeErr == nil && len(strings.TrimSpace(string(divergeOut))) > 0 {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
-// resolveWorkspacePath finds the workspace path from WorkspaceReady events
-// in the correlation chain.
-func resolveWorkspacePath(ctx context.Context, store eventstore.Store, correlationID string) (string, error) {
+// resolveWorkspace finds the workspace path and base branch from WorkspaceReady
+// events in the correlation chain.
+func resolveWorkspace(ctx context.Context, store eventstore.Store, correlationID string) (workspaceInfo, error) {
 	if correlationID == "" {
-		return "", nil
+		return workspaceInfo{}, nil
 	}
 
 	events, err := store.LoadByCorrelation(ctx, correlationID)
 	if err != nil {
-		return "", fmt.Errorf("load correlation chain: %w", err)
+		return workspaceInfo{}, fmt.Errorf("load correlation chain: %w", err)
 	}
 
 	for _, e := range events {
@@ -133,8 +162,8 @@ func resolveWorkspacePath(ctx context.Context, store eventstore.Store, correlati
 			if err := json.Unmarshal(e.Payload, &p); err != nil {
 				continue
 			}
-			return p.Path, nil
+			return workspaceInfo{Path: p.Path, Base: p.Base}, nil
 		}
 	}
-	return "", nil
+	return workspaceInfo{}, nil
 }

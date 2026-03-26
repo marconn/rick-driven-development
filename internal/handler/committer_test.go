@@ -253,12 +253,86 @@ func TestCommitterNoWorkspaceSkipsCheck(t *testing.T) {
 	}
 }
 
+// TestCommitterAlreadyPushedDelegatesToAI is the regression test for
+// 8a7726f5-d093-4b6c-9d92-2ded5cb74864: the developer committed and pushed
+// during its AI session. Git status is clean and @{u}..HEAD is empty, but
+// the feature branch has diverged from the base branch. The committer must
+// detect this and delegate to the AI handler (not emit VerdictFail).
+func TestCommitterAlreadyPushedDelegatesToAI(t *testing.T) {
+	wsDir := initGitRepoWithRemote(t)
+
+	// Create a feature branch, commit, and push — simulating what the
+	// developer persona does autonomously.
+	for _, args := range [][]string{
+		{"checkout", "-b", "feature-xyz"},
+		{"push", "-u", "origin", "feature-xyz"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = wsDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s (%v)", strings.Join(args, " "), out, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(wsDir, "fix.go"), []byte("package fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"add", "fix.go"},
+		{"commit", "-m", "implement fix"},
+		{"push"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = wsDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s (%v)", strings.Join(args, " "), out, err)
+		}
+	}
+
+	// At this point: git status clean, @{u}..HEAD empty, but
+	// origin/main..HEAD has one commit.
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{
+		Path:   wsDir,
+		Branch: "feature-xyz",
+		Base:   "main",
+	})
+	store.correlationEvents["corr-pushed"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-pushed"),
+	}
+
+	h := committerHandler(t, store)
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-pushed")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should delegate to AI (diverged from base), not emit VerdictFail.
+	if len(got) != 2 {
+		t.Fatalf("expected 2 AI events for already-pushed branch, got %d", len(got))
+	}
+	hasReq := false
+	hasResp := false
+	for _, e := range got {
+		if e.Type == event.AIRequestSent {
+			hasReq = true
+		}
+		if e.Type == event.AIResponseReceived {
+			hasResp = true
+		}
+	}
+	if !hasReq || !hasResp {
+		t.Error("expected AIRequestSent and AIResponseReceived from delegated AI handler")
+	}
+}
+
 // TestWorkspaceHasChangesCleanRepo verifies the helper returns false for
 // a clean repo with no uncommitted changes or unpushed commits.
 func TestWorkspaceHasChangesCleanRepo(t *testing.T) {
 	wsDir := initGitRepoWithRemote(t)
 
-	has, err := workspaceHasChanges(context.Background(), wsDir)
+	has, err := workspaceHasChanges(context.Background(), wsDir, "main")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -275,7 +349,7 @@ func TestWorkspaceHasChangesUntracked(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	has, err := workspaceHasChanges(context.Background(), wsDir)
+	has, err := workspaceHasChanges(context.Background(), wsDir, "main")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -292,7 +366,7 @@ func TestWorkspaceHasChangesLocalNoRemote(t *testing.T) {
 
 	// No remote set — the @{u} check will fail, fallback to origin/<branch>.
 	// Since there's no origin, fallback also fails → returns false.
-	has, err := workspaceHasChanges(context.Background(), dir)
+	has, err := workspaceHasChanges(context.Background(), dir, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -301,36 +375,81 @@ func TestWorkspaceHasChangesLocalNoRemote(t *testing.T) {
 	}
 }
 
-func TestResolveWorkspacePath(t *testing.T) {
+// TestWorkspaceHasChangesPushedButDivergedFromBase verifies the helper detects
+// changes when everything is committed and pushed to the feature branch, but
+// the branch has diverged from the base branch.
+func TestWorkspaceHasChangesPushedButDivergedFromBase(t *testing.T) {
+	wsDir := initGitRepoWithRemote(t)
+
+	// Create feature branch, commit, push — clean status, no unpushed.
+	for _, args := range [][]string{
+		{"checkout", "-b", "feature-diverged"},
+		{"push", "-u", "origin", "feature-diverged"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = wsDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s (%v)", strings.Join(args, " "), out, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(wsDir, "fix.go"), []byte("package fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"add", "fix.go"},
+		{"commit", "-m", "diverge from main"},
+		{"push"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = wsDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s (%v)", strings.Join(args, " "), out, err)
+		}
+	}
+
+	has, err := workspaceHasChanges(context.Background(), wsDir, "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !has {
+		t.Error("expected changes: branch diverged from base even though all pushed")
+	}
+}
+
+func TestResolveWorkspace(t *testing.T) {
 	store := newMockStore()
 	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{
 		Path:   "/tmp/test-workspace",
 		Branch: "feature",
+		Base:   "main",
 	})
 	store.correlationEvents["corr-ws"] = []event.Envelope{
 		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-ws"),
 	}
 
-	path, err := resolveWorkspacePath(context.Background(), store, "corr-ws")
+	ws, err := resolveWorkspace(context.Background(), store, "corr-ws")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if path != "/tmp/test-workspace" {
-		t.Errorf("expected /tmp/test-workspace, got %q", path)
+	if ws.Path != "/tmp/test-workspace" {
+		t.Errorf("expected /tmp/test-workspace, got %q", ws.Path)
+	}
+	if ws.Base != "main" {
+		t.Errorf("expected base 'main', got %q", ws.Base)
 	}
 }
 
-func TestResolveWorkspacePathEmpty(t *testing.T) {
-	path, err := resolveWorkspacePath(context.Background(), newMockStore(), "")
+func TestResolveWorkspaceEmpty(t *testing.T) {
+	ws, err := resolveWorkspace(context.Background(), newMockStore(), "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if path != "" {
-		t.Errorf("expected empty path for empty correlation, got %q", path)
+	if ws.Path != "" {
+		t.Errorf("expected empty path for empty correlation, got %q", ws.Path)
 	}
 }
 
-func TestResolveWorkspacePathNoEvents(t *testing.T) {
+func TestResolveWorkspaceNoEvents(t *testing.T) {
 	store := newMockStore()
 	store.correlationEvents["corr-empty"] = []event.Envelope{
 		event.New(event.WorkflowRequested, 1,
@@ -338,11 +457,11 @@ func TestResolveWorkspacePathNoEvents(t *testing.T) {
 		).WithCorrelation("corr-empty"),
 	}
 
-	path, err := resolveWorkspacePath(context.Background(), store, "corr-empty")
+	ws, err := resolveWorkspace(context.Background(), store, "corr-empty")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if path != "" {
-		t.Errorf("expected empty path when no WorkspaceReady, got %q", path)
+	if ws.Path != "" {
+		t.Errorf("expected empty path when no WorkspaceReady, got %q", ws.Path)
 	}
 }
