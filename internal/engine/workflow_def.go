@@ -143,14 +143,16 @@ func PRReviewWorkflowDef() WorkflowDef {
 func PRFeedbackWorkflowDef() WorkflowDef {
 	return WorkflowDef{
 		ID:       "pr-feedback",
-		Required: []string{"workspace", "feedback-analyzer", "context-snapshot", "developer", "reviewer", "committer"},
+		Required: []string{"workspace", "feedback-analyzer", "context-snapshot", "developer", "reviewer", "qa", "quality-gate", "committer"},
 		Graph: map[string][]string{
 			"workspace":         {},
 			"feedback-analyzer": {"workspace"},
 			"context-snapshot":  {"feedback-analyzer"},
 			"developer":         {"context-snapshot"},
 			"reviewer":          {"developer"},
-			"committer":         {"reviewer"},
+			"qa":                {"developer"},
+			"quality-gate":      {"reviewer", "qa"},
+			"committer":         {"quality-gate"},
 		},
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
