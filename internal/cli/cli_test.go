@@ -165,6 +165,69 @@ func TestSelectWorkflowDef_DisableQualityGate(t *testing.T) {
 	}
 }
 
+func TestPRFeedbackWorkflowDef_IncludesQualityGate(t *testing.T) {
+	def, err := selectWorkflowDef("pr-feedback")
+	if err != nil {
+		t.Fatalf("selectWorkflowDef: %v", err)
+	}
+
+	// qa and quality-gate must be in Required.
+	reqSet := make(map[string]bool, len(def.Required))
+	for _, r := range def.Required {
+		reqSet[r] = true
+	}
+	if !reqSet["qa"] {
+		t.Error("qa missing from Required")
+	}
+	if !reqSet["quality-gate"] {
+		t.Error("quality-gate missing from Required")
+	}
+
+	// quality-gate must depend on reviewer + qa.
+	qgDeps := def.Graph["quality-gate"]
+	depSet := make(map[string]bool, len(qgDeps))
+	for _, d := range qgDeps {
+		depSet[d] = true
+	}
+	if !depSet["reviewer"] || !depSet["qa"] {
+		t.Errorf("quality-gate deps = %v, want [reviewer, qa]", qgDeps)
+	}
+
+	// committer must depend on quality-gate.
+	committerDeps := def.Graph["committer"]
+	if len(committerDeps) != 1 || committerDeps[0] != "quality-gate" {
+		t.Errorf("committer deps = %v, want [quality-gate]", committerDeps)
+	}
+}
+
+func TestPRFeedbackWorkflowDef_DisableQualityGate(t *testing.T) {
+	t.Setenv("RICK_DISABLE_QUALITY_GATE", "1")
+
+	def, err := selectWorkflowDef("pr-feedback")
+	if err != nil {
+		t.Fatalf("selectWorkflowDef: %v", err)
+	}
+
+	for _, r := range def.Required {
+		if r == "quality-gate" {
+			t.Error("quality-gate still in Required with RICK_DISABLE_QUALITY_GATE set")
+		}
+	}
+	if _, exists := def.Graph["quality-gate"]; exists {
+		t.Error("quality-gate still in Graph with RICK_DISABLE_QUALITY_GATE set")
+	}
+
+	// committer should now depend on reviewer + qa directly.
+	deps := def.Graph["committer"]
+	depSet := make(map[string]bool, len(deps))
+	for _, d := range deps {
+		depSet[d] = true
+	}
+	if !depSet["reviewer"] || !depSet["qa"] {
+		t.Errorf("committer deps = %v, want reviewer and qa", deps)
+	}
+}
+
 func TestMCPCommandHelp(t *testing.T) {
 	cmd := New()
 	cmd.SetArgs([]string{"mcp", "--help"})
