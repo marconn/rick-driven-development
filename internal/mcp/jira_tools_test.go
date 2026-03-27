@@ -1070,3 +1070,89 @@ func TestToolJiraLink_APIError(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+func TestToolJiraDeleteLink_Success(t *testing.T) {
+	mock, client := newMockJiraServer(t)
+	mock.mux.HandleFunc("/rest/api/3/issueLink/12345", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("method=%s, want DELETE", r.Method)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	result, err := callTool(t, s, "rick_jira_delete_link", map[string]any{"link_id": "12345"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	m := result.(map[string]any)
+	if m["deleted"] != true {
+		t.Errorf("expected deleted=true, got %v", m["deleted"])
+	}
+	if m["link_id"] != "12345" {
+		t.Errorf("expected link_id=12345, got %v", m["link_id"])
+	}
+}
+
+func TestToolJiraDeleteLink_NoClient(t *testing.T) {
+	s, cleanup := testServer(t)
+	defer cleanup()
+
+	_, err := callTool(t, s, "rick_jira_delete_link", map[string]any{"link_id": "12345"})
+	if err == nil {
+		t.Fatal("expected error when Jira not configured")
+	}
+	if !strings.Contains(err.Error(), "Jira client not configured") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestToolJiraDeleteLink_MissingLinkID(t *testing.T) {
+	mock, client := newMockJiraServer(t)
+	_ = mock
+
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	_, err := callTool(t, s, "rick_jira_delete_link", map[string]any{})
+	if err == nil {
+		t.Fatal("expected error for missing link_id")
+	}
+	if !strings.Contains(err.Error(), "link_id is required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestToolJiraDeleteLink_APIError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rest/api/3/issueLink/99999", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"errorMessages":["Link not found"]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := jira.NewClient(srv.URL, "test", "tok")
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	_, err := callTool(t, s, "rick_jira_delete_link", map[string]any{"link_id": "99999"})
+	if err == nil {
+		t.Fatal("expected error for API 404")
+	}
+	if !strings.Contains(err.Error(), "delete link") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}

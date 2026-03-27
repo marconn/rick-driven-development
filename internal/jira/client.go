@@ -964,6 +964,7 @@ func (c *Client) FetchIssueLinks(ctx context.Context, key string) ([]IssueLink, 
 	var result struct {
 		Fields struct {
 			IssueLinks []struct {
+				ID   string `json:"id"`
 				Type struct {
 					Name    string `json:"name"`
 					Inward  string `json:"inward"`
@@ -981,6 +982,7 @@ func (c *Client) FetchIssueLinks(ctx context.Context, key string) ([]IssueLink, 
 	links := make([]IssueLink, 0, len(result.Fields.IssueLinks))
 	for _, l := range result.Fields.IssueLinks {
 		link := IssueLink{
+			ID:   l.ID,
 			Type: l.Type.Name,
 		}
 		if l.OutwardIssue != nil {
@@ -1000,11 +1002,34 @@ func (c *Client) FetchIssueLinks(ctx context.Context, key string) ([]IssueLink, 
 
 // IssueLink represents a link between two Jira issues.
 type IssueLink struct {
+	ID         string `json:"id"`
 	Type       string `json:"type"`
 	Direction  string `json:"direction"` // "inward" or "outward"
 	Label      string `json:"label"`     // human-readable like "blocks" or "is blocked by"
 	InwardKey  string `json:"inward_key,omitempty"`
 	OutwardKey string `json:"outward_key,omitempty"`
+}
+
+// DeleteIssueLink removes an issue link by its ID.
+func (c *Client) DeleteIssueLink(ctx context.Context, linkID string) error {
+	reqURL := c.baseURL + "/rest/api/3/issueLink/" + linkID
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, reqURL, nil)
+	if err != nil {
+		return fmt.Errorf("jira: build delete link request: %w", err)
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("jira: delete issue link: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("jira: delete issue link HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 // PRLink represents a pull request linked to a Jira issue via the GitHub integration.

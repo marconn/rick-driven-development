@@ -226,7 +226,7 @@ Four read-model projections (`internal/projection/`): workflow status, token usa
 
 
 
-**Jira tools** (9, `tools_jira.go`): `rick_jira_read`, `rick_jira_write`, `rick_jira_transition`, `rick_jira_comment`, `rick_jira_epic_issues`, `rick_jira_search`, `rick_jira_link`, `rick_jira_set_microservice`, `rick_jira_pr_links`. Requires `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN` env vars.
+**Jira tools** (10, `tools_jira.go`): `rick_jira_read`, `rick_jira_write`, `rick_jira_transition`, `rick_jira_comment`, `rick_jira_epic_issues`, `rick_jira_search`, `rick_jira_link`, `rick_jira_delete_link`, `rick_jira_set_microservice`, `rick_jira_pr_links`. Requires `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN` env vars.
 
 **Wave tools** (4, `tools_wave.go`): `rick_wave_plan` (topological sort of epic children into parallel waves), `rick_wave_launch` (batch-start `jira-dev` workflows per wave), `rick_wave_status` (monitor wave progress via tag lookup), `rick_wave_cleanup` (remove wave workspaces).
 

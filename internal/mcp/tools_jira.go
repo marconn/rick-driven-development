@@ -222,6 +222,24 @@ func (s *Server) registerJiraTools() {
 
 	s.register(Tool{
 		Definition: ToolDefinition{
+			Name:        "rick_jira_delete_link",
+			Description: "Delete an issue link between two Jira tickets by link ID. Use rick_jira_read to find link IDs first.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"link_id": map[string]any{
+						"type":        "string",
+						"description": "The issue link ID to delete.",
+					},
+				},
+				"required": []string{"link_id"},
+			},
+		},
+		Handler: s.toolJiraDeleteLink,
+	})
+
+	s.register(Tool{
+		Definition: ToolDefinition{
 			Name:        "rick_jira_create",
 			Description: "Create a new Jira issue (Task, Bug, Story, Epic, Sub-task).",
 			InputSchema: map[string]any{
@@ -619,6 +637,32 @@ func (s *Server) toolJiraLink(ctx context.Context, raw json.RawMessage) (any, er
 		"to":      args.ToTicket,
 		"type":    args.LinkType,
 		"linked":  true,
+	}, nil
+}
+
+type jiraDeleteLinkArgs struct {
+	LinkID string `json:"link_id"`
+}
+
+func (s *Server) toolJiraDeleteLink(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args jiraDeleteLinkArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if args.LinkID == "" {
+		return nil, fmt.Errorf("link_id is required")
+	}
+	if err := s.requireJira(); err != nil {
+		return nil, err
+	}
+
+	if err := s.deps.Jira.DeleteIssueLink(ctx, args.LinkID); err != nil {
+		return nil, fmt.Errorf("delete link: %w", err)
+	}
+
+	return map[string]any{
+		"link_id": args.LinkID,
+		"deleted": true,
 	}, nil
 }
 

@@ -230,6 +230,43 @@ func TestClient_LinkIssues_HTTPError(t *testing.T) {
 	}
 }
 
+// --- DeleteIssueLink ---
+
+func TestClient_DeleteIssueLink_Success(t *testing.T) {
+	var capturedPath string
+
+	_, client := newTestJiraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		if r.Method != http.MethodDelete {
+			t.Errorf("method=%s, want DELETE", r.Method)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	err := client.DeleteIssueLink(context.Background(), "12345")
+	if err != nil {
+		t.Fatalf("DeleteIssueLink: %v", err)
+	}
+	if capturedPath != "/rest/api/3/issueLink/12345" {
+		t.Errorf("path=%s, want /rest/api/3/issueLink/12345", capturedPath)
+	}
+}
+
+func TestClient_DeleteIssueLink_HTTPError(t *testing.T) {
+	_, client := newTestJiraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"errorMessages":["Link not found"]}`)) //nolint:errcheck
+	})
+
+	err := client.DeleteIssueLink(context.Background(), "99999")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error should mention status 404: %v", err)
+	}
+}
+
 // --- MarkdownToADF ---
 
 func TestMarkdownToADF_PlainText(t *testing.T) {
