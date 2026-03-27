@@ -68,11 +68,17 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	}
 
 	// Run lint first, then test. Collect all failures before reporting.
+	// Track kept stacks so we can destroy them at the end — VMs must not
+	// survive across iterations; a failed gate means a fresh VM on retry.
 	var issues []event.Issue
 	var failSummaries []string
+	var keptStacks []string
 
 	for _, check := range []string{"lint", "test"} {
 		result, runErr := h.runCheck(ctx, wsPath, check)
+		if result.Kept && result.Stack != "" {
+			keptStacks = append(keptStacks, result.Stack)
+		}
 		if runErr != nil {
 			// Stack-level errors (no compose file, repo not found, stack binary
 			// missing) — the repo doesn't support stack-based quality checks.
@@ -98,6 +104,9 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 			failSummaries = append(failSummaries, fmt.Sprintf("%s failed", check))
 		}
 	}
+
+	// Always destroy kept VMs so the next iteration starts from a clean slate.
+	h.destroyKeptStacks(ctx, keptStacks)
 
 	if len(issues) > 0 {
 		return h.failVerdict(strings.Join(failSummaries, "; "), issues), nil
@@ -223,6 +232,19 @@ func (h *QualityGateHandler) failVerdict(summary string, issues []event.Issue) [
 			Issues:      issues,
 			Summary:     summary,
 		})).WithSource("handler:" + h.name),
+	}
+}
+
+// destroyKeptStacks runs `stack destroy` for each VM that was kept on failure.
+// Best-effort — errors are logged but don't affect the verdict.
+func (h *QualityGateHandler) destroyKeptStacks(ctx context.Context, stacks []string) {
+	for _, name := range stacks {
+		h.logger.Info("quality-gate: destroying kept VM", "stack", name)
+		cmd := exec.CommandContext(ctx, h.stackBin, "destroy", name, "--force")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			h.logger.Warn("quality-gate: failed to destroy VM",
+				"stack", name, "err", err, "output", string(out))
+		}
 	}
 }
 

@@ -852,6 +852,118 @@ exit 1
 	}
 }
 
+// TestQualityGateDestroysKeptStacks verifies that VMs kept on failure are
+// explicitly destroyed so the next iteration starts from a clean slate.
+func TestQualityGateDestroysKeptStacks(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Track destroy calls: the fake stack logs them to a file.
+	destroyLog := filepath.Join(t.TempDir(), "destroy-calls")
+
+	// Fake stack: `run` subcommand returns kept=true with a stack name;
+	// `destroy` subcommand appends the stack name to destroyLog.
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+if [ "$1" = "destroy" ]; then
+    echo "$2" >> `+destroyLog+`
+    exit 0
+fi
+cat <<'EOF'
+{"action":"run","exit_code":1,"kept":true,"output":"FAIL","stack":"tmp-qg-abc123","status":"success"}
+EOF
+exit 1
+`)
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-kept"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-kept"),
+	}
+
+	h := &QualityGateHandler{
+		store:    store,
+		name:     "quality-gate",
+		stackBin: fakeStack,
+		timeout:  300,
+		logger:   slog.Default(),
+	}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-kept")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertVerdictOutcome(t, got[0], event.VerdictFail)
+
+	// Verify destroy was called for the kept stacks.
+	raw, err := os.ReadFile(destroyLog)
+	if err != nil {
+		t.Fatalf("destroy log should exist: %v", err)
+	}
+	destroyed := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	// Both lint and test runs return kept=true with the same stack name,
+	// so we expect two destroy calls.
+	if len(destroyed) != 2 {
+		t.Fatalf("expected 2 destroy calls, got %d: %v", len(destroyed), destroyed)
+	}
+	for _, name := range destroyed {
+		if name != "tmp-qg-abc123" {
+			t.Errorf("expected destroy of 'tmp-qg-abc123', got %q", name)
+		}
+	}
+}
+
+// TestQualityGateNoDestroyWhenNotKept verifies that destroy is NOT called
+// when the stack was already cleaned up by the run command (kept=false).
+func TestQualityGateNoDestroyWhenNotKept(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	destroyLog := filepath.Join(t.TempDir(), "destroy-calls")
+
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+if [ "$1" = "destroy" ]; then
+    echo "$2" >> `+destroyLog+`
+    exit 0
+fi
+cat <<'EOF'
+{"action":"run","exit_code":0,"kept":false,"output":"ok","stack":"tmp-qg-xyz","status":"success"}
+EOF
+exit 0
+`)
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-notkept"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-notkept"),
+	}
+
+	h := &QualityGateHandler{
+		store:    store,
+		name:     "quality-gate",
+		stackBin: fakeStack,
+		timeout:  300,
+		logger:   slog.Default(),
+	}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-notkept")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertVerdictOutcome(t, got[0], event.VerdictPass)
+
+	// Destroy log should not exist — no kept stacks to clean up.
+	if _, err := os.Stat(destroyLog); err == nil {
+		raw, _ := os.ReadFile(destroyLog)
+		t.Errorf("destroy should not be called when kept=false, but got: %s", string(raw))
+	}
+}
+
 // assertVerdictOutcome checks that an envelope is a VerdictRendered with the expected outcome.
 func assertVerdictOutcome(t *testing.T, env event.Envelope, want event.VerdictOutcome) {
 	t.Helper()
