@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -316,6 +317,41 @@ func TestToolJiraCreate_WithAllOptions(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("body should contain %s, got: %s", want, body)
 		}
+	}
+}
+
+func TestToolJiraCreate_AssignedTeam(t *testing.T) {
+	var capturedBody []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rest/api/3/issue", func(w http.ResponseWriter, r *http.Request) {
+		capturedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"key":"PROJ-99"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := jira.NewClient(srv.URL, "test", "tok")
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	result, err := callTool(t, s, "rick_jira_create", map[string]any{
+		"summary":       "Task with team",
+		"assigned_team": "12345",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	rm := result.(map[string]any)
+	if rm["key"] != "PROJ-99" {
+		t.Errorf("expected key PROJ-99, got %v", rm["key"])
+	}
+	body := string(capturedBody)
+	if !strings.Contains(body, `"customfield_11533"`) || !strings.Contains(body, `"12345"`) {
+		t.Errorf("body should contain team field with ID 12345, got: %s", body)
 	}
 }
 

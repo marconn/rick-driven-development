@@ -284,6 +284,10 @@ func (s *Server) registerJiraTools() {
 						"type":        "string",
 						"description": "Priority name (e.g., High, Medium, Low).",
 					},
+					"assigned_team": map[string]any{
+						"type":        "string",
+						"description": "Team ID to override the default JIRA_TEAM_ID (numeric ID for the Assigned Team field).",
+					},
 				},
 				"required": []string{"summary"},
 			},
@@ -695,15 +699,16 @@ func (s *Server) toolJiraPRLinks(ctx context.Context, raw json.RawMessage) (any,
 }
 
 type jiraCreateArgs struct {
-	Summary     string   `json:"summary"`
-	IssueType   string   `json:"issue_type"`
-	Project     string   `json:"project"`
-	Description string   `json:"description"`
-	EpicKey     string   `json:"epic_key"`
-	StoryPoints float64  `json:"story_points"`
-	Labels      []string `json:"labels"`
-	Components  []string `json:"components"`
-	Priority    string   `json:"priority"`
+	Summary      string   `json:"summary"`
+	IssueType    string   `json:"issue_type"`
+	Project      string   `json:"project"`
+	Description  string   `json:"description"`
+	EpicKey      string   `json:"epic_key"`
+	StoryPoints  float64  `json:"story_points"`
+	Labels       []string `json:"labels"`
+	Components   []string `json:"components"`
+	Priority     string   `json:"priority"`
+	AssignedTeam string   `json:"assigned_team"`
 }
 
 func (s *Server) toolJiraCreate(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -739,6 +744,9 @@ func (s *Server) toolJiraCreate(ctx context.Context, raw json.RawMessage) (any, 
 	}
 	if args.Priority != "" {
 		opts = append(opts, jira.WithPriority(args.Priority))
+	}
+	if args.AssignedTeam != "" {
+		opts = append(opts, jira.WithTeam(args.AssignedTeam))
 	}
 
 	key, err := s.deps.Jira.CreateIssue(ctx, args.IssueType, args.Summary, args.Description, opts...)

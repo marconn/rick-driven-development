@@ -329,6 +329,15 @@ func WithPriority(name string) CreateOption {
 	}
 }
 
+// WithTeam overrides the default team (customfield_11533) for a single issue.
+func WithTeam(teamID string) CreateOption {
+	return func(fields map[string]any) {
+		if teamID != "" {
+			fields["customfield_11533"] = map[string]any{"id": teamID}
+		}
+	}
+}
+
 // CreateIssue creates a Jira issue of any type and returns its key.
 func (c *Client) CreateIssue(ctx context.Context, issueType, summary, description string, opts ...CreateOption) (string, error) {
 	fields := map[string]any{
