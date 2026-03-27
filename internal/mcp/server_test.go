@@ -338,6 +338,74 @@ func TestToolRunWorkflowInvalidDAG(t *testing.T) {
 	}
 }
 
+// TestToolRunWorkflowDerivesRepoFromSource verifies that when source is
+// "gh:owner/repo#N" but repo is not provided, the MCP tool derives repo from
+// source. Regression: without this, the workspace handler sees an empty Repo
+// and skips provisioning — causing duplicate PRs from the wrong branch.
+func TestToolRunWorkflowDerivesRepoFromSource(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+
+	// Register pr-feedback workflow so the DAG is available.
+	deps.Engine.RegisterWorkflow(engine.PRFeedbackWorkflowDef())
+	deps.SelectWorkflow = func(name string) (engine.WorkflowDef, error) {
+		if name == "pr-feedback" {
+			return engine.PRFeedbackWorkflowDef(), nil
+		}
+		return engine.WorkflowDef{}, fmt.Errorf("unknown workflow: %s", name)
+	}
+
+	s := NewServer(deps, testLogger())
+
+	// Source is explicitly provided with gh:owner/repo#N format, but repo is NOT provided.
+	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
+		Name:      "rick_run_workflow",
+		Arguments: json.RawMessage(`{"prompt":"fix PR feedback","dag":"pr-feedback","source":"gh:hulilabs/ehr#830"}`),
+	}))
+
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(lines))
+	}
+	resp := parseResponse(t, lines[0])
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("tool returned error: %s", result.Content[0].Text)
+	}
+
+	var run runWorkflowResult
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &run); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the stored WorkflowRequested event has Repo derived from source.
+	evts, err := deps.Store.Load(context.Background(), run.WorkflowID)
+	if err != nil {
+		t.Fatalf("load events: %v", err)
+	}
+	for _, e := range evts {
+		if e.Type == event.WorkflowRequested {
+			var payload event.WorkflowRequestedPayload
+			if err := json.Unmarshal(e.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if payload.Repo != "hulilabs/ehr" {
+				t.Errorf("expected Repo=hulilabs/ehr derived from source, got %q", payload.Repo)
+			}
+			if !payload.Isolate {
+				t.Error("pr-feedback DAG must set Isolate=true")
+			}
+		}
+	}
+}
+
 func TestToolWorkflowStatus(t *testing.T) {
 	deps, cleanup := testDeps(t)
 	defer cleanup()

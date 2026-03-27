@@ -575,6 +575,16 @@ func (s *Server) toolRunWorkflow(ctx context.Context, raw json.RawMessage) (any,
 		}
 	}
 
+	// Derive repo from source when source is a gh:owner/repo#N reference but
+	// the caller didn't provide repo explicitly. Without this, the workspace
+	// handler sees an empty Repo and skips provisioning — causing downstream
+	// handlers to run in the wrong directory.
+	if args.Repo == "" {
+		if m := prSourceRegexp.FindStringSubmatch(source); m != nil {
+			args.Repo = m[1]
+		}
+	}
+
 	// Resolve PR head branch when source is a PR reference (gh:owner/repo#N).
 	// This ensures ci-fix and other PR-scoped workflows check out the correct branch.
 	repoBranch := resolvePRBranch(ctx, source)
