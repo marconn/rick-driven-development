@@ -210,6 +210,58 @@ func TestWorkspaceHandlerReadsRepoFromEnrichment(t *testing.T) {
 	}
 }
 
+func TestWorkspaceHandlerIsolatedUsesCorrelationSuffix(t *testing.T) {
+	// Isolated workspace should include correlation ID prefix in path to avoid collisions.
+	tmp := t.TempDir()
+	t.Setenv("RICK_REPOS_PATH", tmp)
+	setupTestGitRepo(t, tmp, "myrepo")
+
+	store := newMockStore()
+
+	reqPayload := event.MustMarshal(event.WorkflowRequestedPayload{
+		Prompt:     "implement feature",
+		WorkflowID: "jira-dev",
+		Source:     "mcp",
+		Repo:       "myrepo",
+		Ticket:     "PROJ-2001",
+		Isolate:    true,
+	})
+	reqEvt := event.New(event.WorkflowRequested, 1, reqPayload).
+		WithAggregate("wf-iso", 1).
+		WithCorrelation("abcd1234-5678-90ef-ghij-klmnopqrstuv")
+	store.correlationEvents["abcd1234-5678-90ef-ghij-klmnopqrstuv"] = append(
+		store.correlationEvents["abcd1234-5678-90ef-ghij-klmnopqrstuv"], reqEvt)
+
+	triggerEvt := event.New(event.WorkflowStarted, 1, event.MustMarshal(map[string]any{})).
+		WithAggregate("wf-iso", 2).
+		WithCorrelation("abcd1234-5678-90ef-ghij-klmnopqrstuv")
+
+	h := &WorkspaceHandler{store: store}
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(got))
+	}
+
+	var payload event.WorkspaceReadyPayload
+	if err := json.Unmarshal(got[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if !payload.Isolated {
+		t.Error("expected Isolated=true")
+	}
+
+	// Path should include correlation prefix as suffix: myrepo-PROJ-2001-abcd1234
+	expectedPath := filepath.Join(tmp, "myrepo-PROJ-2001-abcd1234")
+	if payload.Path != expectedPath {
+		t.Errorf("expected path %s, got %s", expectedPath, payload.Path)
+	}
+
+	t.Cleanup(func() { os.RemoveAll(expectedPath) })
+}
+
 // ---------------------------------------------------------------------------
 // WorkspaceHandler error paths
 // ---------------------------------------------------------------------------

@@ -53,12 +53,19 @@ func (h *WorkspaceHandler) Handle(ctx context.Context, env event.Envelope) ([]ev
 		return nil, fmt.Errorf("workspace handler: ticket %q provided but repo is missing — use dag=jira-dev or pass repo explicitly", params.Ticket)
 	}
 
+	// Use first 8 chars of correlation as suffix to avoid workspace collisions
+	// when multiple workflows run for the same repo/ticket.
+	suffix := env.CorrelationID
+	if len(suffix) > 8 {
+		suffix = suffix[:8]
+	}
+
 	result, err := workspace.SetupWorkspace(
 		params.Repo,
 		params.Ticket,
 		params.RepoBranch,
 		params.BaseBranch,
-		"", // no suffix for event-driven mode
+		suffix,
 		params.Isolate,
 	)
 	if err != nil {
