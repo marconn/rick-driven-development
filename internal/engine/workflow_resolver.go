@@ -288,11 +288,42 @@ func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPerso
 	}
 	latestByPersona := make(map[string]string)
 	verdicts := make(map[string]*verdictTracker)
+	// pendingStale tracks personas that have been invalidated by a
+	// feedback.generated event but whose retrigger target has not yet
+	// re-completed. PersonaCompleted events for these personas are skipped
+	// because they represent in-flight work from the prior iteration that
+	// finished after feedback was generated (late-arriving stale completions).
+	// Entries are cleared when the retriggerTarget persona (e.g., "developer")
+	// emits its next PersonaCompleted — marking the start of a fresh iteration.
+	//
+	// Without this guard, an in-flight qa from iteration N whose PC lands in
+	// the store AFTER the feedback event would be re-added to latestByPersona
+	// on the next checkJoinCondition pass, satisfying a join alongside a
+	// freshly-completed reviewer from iteration N+1 and triggering downstream
+	// handlers (e.g., quality-gate) twice.
+	pendingStale := make(map[string]bool)
+	var retriggerTarget string
 	for _, e := range events {
 		switch e.Type {
 		case event.PersonaCompleted:
 			var pc event.PersonaCompletedPayload
 			if err := json.Unmarshal(e.Payload, &pc); err == nil {
+				// Retrigger target re-completing marks the start of a fresh
+				// iteration: clear pending flags for its strict downstream so
+				// their real completions below are accepted.
+				if retriggerTarget != "" && pc.Persona == retriggerTarget && wfDef != nil {
+					for _, downstream := range wfDef.DownstreamOf(retriggerTarget) {
+						if downstream != retriggerTarget {
+							delete(pendingStale, downstream)
+						}
+					}
+					retriggerTarget = ""
+				}
+				// Skip stale completions: this PC was in-flight when
+				// feedback fired; it represents prior-iteration work.
+				if pendingStale[pc.Persona] {
+					continue
+				}
 				latestByPersona[pc.Persona] = string(e.ID)
 				if vt := verdicts[pc.Persona]; vt != nil {
 					if vt.sealed {
@@ -315,17 +346,26 @@ func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPerso
 			}
 		case event.FeedbackGenerated:
 			// Feedback invalidates all completions downstream of the
-			// re-triggered persona. Without this, stale PersonaCompleted
-			// events from a previous iteration satisfy join conditions
-			// prematurely (e.g., quality-gate fires with old qa completion
-			// before qa has re-run after the feedback loop).
+			// re-triggered persona. Wiping alone is insufficient because
+			// events that arrive in the store AFTER this feedback would be
+			// re-added to latestByPersona when iterated in order; mark them
+			// as pending until the retrigger target re-completes.
 			if wfDef != nil {
 				var fb event.FeedbackGeneratedPayload
 				if err := json.Unmarshal(e.Payload, &fb); err == nil {
-					for _, stale := range wfDef.DownstreamOf(fb.TargetPhase) {
+					// The aggregate already resolves phase → persona before
+					// emitting, but apply ResolvePhase defensively in case a
+					// producer emits the phase verb form.
+					target := wfDef.ResolvePhase(fb.TargetPhase)
+					for _, stale := range wfDef.DownstreamOf(target) {
+						if stale == target {
+							continue
+						}
 						delete(latestByPersona, stale)
 						delete(verdicts, stale)
+						pendingStale[stale] = true
 					}
+					retriggerTarget = target
 				}
 			}
 		}

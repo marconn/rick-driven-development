@@ -1910,9 +1910,21 @@ func TestDuplicateQualityGatePrevention(t *testing.T) {
 	mu.Unlock()
 
 	// === Verify: fresh reviewer/qa completions DO trigger quality-gate ===
+	// The retrigger target (developer) must complete first — in real workflows
+	// developer is reviewer/qa's predecessor, so its PC always precedes theirs
+	// after a feedback loop. checkJoinCondition relies on the target's
+	// re-completion to clear pending-stale flags for its downstream.
 	mu.Lock()
 	qgFires = 0
 	mu.Unlock()
+
+	devAgg := corrID + ":persona:developer"
+	devPC2 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer", ChainDepth: 0,
+	})).WithAggregate(devAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, devAgg, 0, []event.Envelope{devPC2}); err != nil {
+		t.Fatalf("append dev2: %v", err)
+	}
 
 	revPC2 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
 		Persona: "reviewer", ChainDepth: 1,
@@ -1938,4 +1950,312 @@ func TestDuplicateQualityGatePrevention(t *testing.T) {
 		t.Errorf("quality-gate should fire exactly once from fresh completions, fired %d", qgFires)
 	}
 	mu.Unlock()
+}
+
+// TestLateArrivingStaleCompletionDuplicateQualityGate reproduces the
+// production bug observed in correlation 09908cfe-938f-4de9-b40a-65f0cba2a05d
+// (ci-fix workflow): when reviewer fails mid-iteration and FeedbackGenerated
+// fires BEFORE the concurrent qa run finishes, the qa PersonaCompleted lands
+// in the store AFTER the feedback event. On the next checkJoinCondition pass,
+// iterating events in store order re-adds the stale qa completion to
+// latestByPersona — satisfying quality-gate's join in the next iteration
+// alongside a fresh reviewer completion, and dispatching quality-gate twice:
+// once with stale qa, once with fresh qa. Both runs execute the full VM test
+// suite (~9 min each) wastefully, and the first run's verdict can corrupt
+// iteration accounting.
+//
+// Invariant: across all iterations, quality-gate must be dispatched exactly
+// once per (reviewer, qa) pair from the SAME iteration.
+func TestLateArrivingStaleCompletionDuplicateQualityGate(t *testing.T) {
+	runner, store, bus, reg := newTestPersonaRunner(t)
+
+	runner.RegisterWorkflow(WorkflowDef{
+		ID:       "test-late-stale-qg",
+		Required: []string{"developer", "reviewer", "qa", "quality-gate", "committer"},
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+			"committer":    {"quality-gate"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+		MaxIterations:     3,
+		EscalateOnMaxIter: true,
+		PhaseMap:          map[string]string{"develop": "developer", "review": "reviewer"},
+	})
+
+	var mu sync.Mutex
+	var qgDispatches []string // ordered list of event IDs that triggered quality-gate
+	qg := &stubHandler{
+		name: "quality-gate",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, env event.Envelope) ([]event.Envelope, error) {
+			mu.Lock()
+			qgDispatches = append(qgDispatches, string(env.ID))
+			mu.Unlock()
+			return nil, nil
+		},
+	}
+	if err := reg.Register(qg); err != nil {
+		t.Fatalf("register qg: %v", err)
+	}
+
+	ctx := context.Background()
+	corrID := "corr-late-stale-qg"
+	devAgg := corrID + ":persona:developer"
+	revAgg := corrID + ":persona:reviewer"
+	qaAgg := corrID + ":persona:qa"
+
+	// Seed WorkflowStarted so the correlation→workflow cache is populated.
+	wsEvt := event.New(event.WorkflowStartedFor("test-late-stale-qg"), 1, event.MustMarshal(event.WorkflowStartedPayload{
+		WorkflowID: "test-late-stale-qg",
+	})).WithCorrelation(corrID).WithAggregate(corrID, 1)
+	if err := store.Append(ctx, corrID, 0, []event.Envelope{wsEvt}); err != nil {
+		t.Fatalf("append ws: %v", err)
+	}
+
+	runner.Start(ctx, reg)
+	if err := bus.Publish(ctx, wsEvt); err != nil {
+		t.Fatalf("publish ws: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// === Iteration 1: developer → reviewer(fail) + qa(still running) ===
+	devPC1 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer", ChainDepth: 0,
+	})).WithAggregate(devAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, devAgg, 0, []event.Envelope{devPC1}); err != nil {
+		t.Fatalf("append dev1: %v", err)
+	}
+
+	// Reviewer completes with a fail verdict (rendered on reviewer's aggregate).
+	revVerdict1 := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+		Phase: "develop", SourcePhase: "reviewer", Outcome: event.VerdictFail,
+		Summary: "4 issues", Issues: []event.Issue{{Severity: "major", Description: "x"}},
+	})).WithAggregate(revAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, revAgg, 0, []event.Envelope{revVerdict1}); err != nil {
+		t.Fatalf("append rev verdict1: %v", err)
+	}
+	revPC1 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "reviewer", ChainDepth: 1,
+	})).WithAggregate(revAgg, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, revAgg, 1, []event.Envelope{revPC1}); err != nil {
+		t.Fatalf("append rev1 pc: %v", err)
+	}
+
+	// Aggregate sees the fail verdict and emits FeedbackGenerated targeting
+	// developer. Seeded directly on the workflow aggregate to simulate what
+	// WorkflowAggregate.decideVerdictRendered would produce.
+	fbEvt := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
+		TargetPhase: "developer", SourcePhase: "reviewer", Iteration: 1,
+	})).WithAggregate(corrID, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, corrID, 1, []event.Envelope{fbEvt}); err != nil {
+		t.Fatalf("append feedback: %v", err)
+	}
+
+	// === THE BUG TRIGGER ===
+	// qa was running concurrently with reviewer and finishes AFTER the
+	// feedback event was persisted. This late-arriving qa completion is
+	// stale — it reflects iteration-1 work — but without the pendingStale
+	// guard, it gets re-added to latestByPersona on subsequent join checks.
+	qaPC1Late := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "qa", ChainDepth: 1,
+	})).WithAggregate(qaAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, qaAgg, 0, []event.Envelope{qaPC1Late}); err != nil {
+		t.Fatalf("append qa1 late: %v", err)
+	}
+	// Publishing this event shouldn't trigger quality-gate because it's stale.
+	if err := bus.Publish(ctx, qaPC1Late); err != nil {
+		t.Fatalf("publish qa1 late: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	if len(qgDispatches) != 0 {
+		t.Errorf("quality-gate must NOT fire from stale qa1 PC after feedback, fired %d times", len(qgDispatches))
+	}
+	mu.Unlock()
+
+	// === Iteration 2: developer re-runs → reviewer(pass) + qa(pass) ===
+	devPC2 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer", ChainDepth: 0,
+	})).WithAggregate(devAgg, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, devAgg, 1, []event.Envelope{devPC2}); err != nil {
+		t.Fatalf("append dev2: %v", err)
+	}
+
+	revPC2 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "reviewer", ChainDepth: 1,
+	})).WithAggregate(revAgg, 3).WithCorrelation(corrID)
+	if err := store.Append(ctx, revAgg, 2, []event.Envelope{revPC2}); err != nil {
+		t.Fatalf("append rev2 pc: %v", err)
+	}
+	// Publishing reviewer's fresh PC runs the join check. With the bug,
+	// it sees stale qa1 in latestByPersona and fires quality-gate (wrong!).
+	// With the fix, qa is still pending because developer has re-completed
+	// but qa hasn't, so the join waits.
+	if err := bus.Publish(ctx, revPC2); err != nil {
+		t.Fatalf("publish rev2: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	if len(qgDispatches) != 0 {
+		t.Errorf("quality-gate must NOT fire from reviewer2 + stale qa1: fired %d times", len(qgDispatches))
+	}
+	mu.Unlock()
+
+	// Now qa finishes its iteration-2 run — THIS should trigger quality-gate,
+	// and exactly once with the fresh (reviewer2, qa2) pair.
+	qaPC2 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "qa", ChainDepth: 1,
+	})).WithAggregate(qaAgg, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, qaAgg, 1, []event.Envelope{qaPC2}); err != nil {
+		t.Fatalf("append qa2: %v", err)
+	}
+	if err := bus.Publish(ctx, qaPC2); err != nil {
+		t.Fatalf("publish qa2: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	if len(qgDispatches) != 1 {
+		t.Errorf("quality-gate should fire exactly once from fresh iteration-2 pair, fired %d times", len(qgDispatches))
+	}
+	mu.Unlock()
+}
+
+// TestFeedbackGeneratedRetriggersDeveloper verifies that publishing a
+// FeedbackGenerated event causes the developer handler to re-dispatch.
+// This reproduces the production bug where quality-gate failed, FeedbackGenerated
+// was emitted, but the developer never re-triggered — leaving the workflow stuck.
+func TestFeedbackGeneratedRetriggersDeveloper(t *testing.T) {
+	runner, store, bus, reg := newTestPersonaRunner(t)
+
+	runner.RegisterWorkflow(WorkflowDef{
+		ID:       "jira-dev",
+		Required: []string{"architect", "developer", "reviewer", "qa", "quality-gate", "committer"},
+		Graph: map[string][]string{
+			"architect":    {},
+			"developer":    {"architect"},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+			"committer":    {"quality-gate"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+		MaxIterations:     3,
+		EscalateOnMaxIter: true,
+		PhaseMap:          map[string]string{"develop": "developer", "review": "reviewer"},
+	})
+
+	devFired := make(chan event.Envelope, 5)
+	dev := &stubHandler{
+		name: "developer",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, env event.Envelope) ([]event.Envelope, error) {
+			devFired <- env
+			return nil, nil
+		},
+	}
+	// Only register developer — other handlers are seeded manually.
+	// Don't register architect (root handler) to avoid auto-dispatch conflicts.
+	if err := reg.Register(dev); err != nil {
+		t.Fatalf("register developer: %v", err)
+	}
+
+	ctx := context.Background()
+	corrID := "corr-feedback-retrigger"
+
+	// Seed: workflow started + architect completed (pre-existing state)
+	wsEvt := event.New(event.WorkflowStartedFor("jira-dev"), 1, event.MustMarshal(event.WorkflowStartedPayload{
+		WorkflowID: "jira-dev",
+	})).WithCorrelation(corrID).WithAggregate(corrID, 1)
+	if err := store.Append(ctx, corrID, 0, []event.Envelope{wsEvt}); err != nil {
+		t.Fatalf("append ws: %v", err)
+	}
+
+	archAgg := corrID + ":persona:architect"
+	archPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "architect", ChainDepth: 0,
+	})).WithAggregate(archAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, archAgg, 0, []event.Envelope{archPC}); err != nil {
+		t.Fatalf("append architect: %v", err)
+	}
+
+	// Seed: developer completed (iteration 0)
+	devAgg := corrID + ":persona:developer"
+	devPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer", ChainDepth: 1,
+	})).WithAggregate(devAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, devAgg, 0, []event.Envelope{devPC}); err != nil {
+		t.Fatalf("append dev: %v", err)
+	}
+
+	// Seed: reviewer + qa completed
+	revAgg := corrID + ":persona:reviewer"
+	revPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "reviewer", ChainDepth: 2,
+	})).WithAggregate(revAgg, 1).WithCorrelation(corrID)
+	qaAgg := corrID + ":persona:qa"
+	qaPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "qa", ChainDepth: 2,
+	})).WithAggregate(qaAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, revAgg, 0, []event.Envelope{revPC}); err != nil {
+		t.Fatalf("append rev: %v", err)
+	}
+	if err := store.Append(ctx, qaAgg, 0, []event.Envelope{qaPC}); err != nil {
+		t.Fatalf("append qa: %v", err)
+	}
+
+	// Seed: quality-gate verdict fail + completed
+	qgAgg := corrID + ":persona:quality-gate"
+	qgVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Summary: "test failed",
+	})).WithAggregate(qgAgg, 1).WithCorrelation(corrID)
+	qgPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "quality-gate", ChainDepth: 3,
+	})).WithAggregate(qgAgg, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, qgAgg, 0, []event.Envelope{qgVerdict, qgPC}); err != nil {
+		t.Fatalf("append qg: %v", err)
+	}
+
+	// Seed: FeedbackGenerated on workflow aggregate (as Engine would emit)
+	fbEvt := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
+		TargetPhase: "developer", SourcePhase: "quality-gate", Iteration: 1,
+		Summary: "test failed",
+	})).WithAggregate(corrID, 2).WithCorrelation(corrID)
+	if err := store.Append(ctx, corrID, 1, []event.Envelope{fbEvt}); err != nil {
+		t.Fatalf("append feedback: %v", err)
+	}
+
+	// Start runner AFTER seeding all state.
+	runner.Start(ctx, reg)
+
+	// Publish workflow.started so PersonaRunner caches the correlationID→workflowID mapping.
+	if err := bus.Publish(ctx, wsEvt); err != nil {
+		t.Fatalf("publish ws: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Publish FeedbackGenerated — developer MUST re-trigger
+	if err := bus.Publish(ctx, fbEvt); err != nil {
+		t.Fatalf("publish feedback: %v", err)
+	}
+
+	select {
+	case env := <-devFired:
+		if env.Type != event.FeedbackGenerated {
+			t.Errorf("developer should re-trigger on FeedbackGenerated, got %s", env.Type)
+		}
+		t.Logf("developer re-triggered on FeedbackGenerated")
+	case <-time.After(2 * time.Second):
+		t.Fatal("developer did NOT re-trigger on FeedbackGenerated — workflow would be stuck")
+	}
 }
