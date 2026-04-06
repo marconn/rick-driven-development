@@ -1203,3 +1203,340 @@ func TestErrIncomplete_MultiCycleHandler(t *testing.T) {
 		t.Errorf("expected dispatcher called 2 times, got %d", n)
 	}
 }
+
+// TestE2EFeedbackLoopRetriggersDeveloper verifies the full feedback loop:
+// developer → reviewer + qa → quality-gate (FAIL) → FeedbackGenerated → developer re-fires.
+// This is an E2E test with Engine + PersonaRunner, reproducing the production bug
+// where quality-gate failed but the developer never re-triggered.
+func TestE2EFeedbackLoopRetriggersDeveloper(t *testing.T) {
+	def := WorkflowDef{
+		ID:       "feedback-e2e",
+		Required: []string{"architect", "developer", "reviewer", "qa", "quality-gate", "committer"},
+		Graph: map[string][]string{
+			"architect":    {},
+			"developer":    {"architect"},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+			"committer":    {"quality-gate"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+		MaxIterations:     3,
+		EscalateOnMaxIter: true,
+		PhaseMap:          map[string]string{"develop": "developer", "review": "reviewer"},
+	}
+
+	env := newE2EEnv(t, def)
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	devFires := 0
+	devRetriggerCh := make(chan struct{}, 5)
+
+	// Architect: no-op, passes immediately.
+	_ = env.reg.Register(&stubHandler{
+		name: "architect",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			return nil, nil
+		},
+	})
+
+	// Developer: counts fires, signals on re-trigger (iteration > 0).
+	_ = env.reg.Register(&stubHandler{
+		name: "developer",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, triggerEnv event.Envelope) ([]event.Envelope, error) {
+			mu.Lock()
+			devFires++
+			iteration := devFires
+			mu.Unlock()
+			t.Logf("developer fired (iteration %d, trigger=%s)", iteration, triggerEnv.Type)
+			if iteration > 1 {
+				devRetriggerCh <- struct{}{}
+			}
+			return nil, nil
+		},
+	})
+
+	// Reviewer: passes with a pass verdict.
+	_ = env.reg.Register(&stubHandler{
+		name: "reviewer",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			return []event.Envelope{
+				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+					Phase: "develop", SourcePhase: "review", Outcome: event.VerdictPass,
+					Summary: "looks good",
+				})),
+			}, nil
+		},
+	})
+
+	// QA: passes with a pass verdict.
+	_ = env.reg.Register(&stubHandler{
+		name: "qa",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			return []event.Envelope{
+				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+					Phase: "develop", SourcePhase: "qa", Outcome: event.VerdictPass,
+					Summary: "tests pass",
+				})),
+			}, nil
+		},
+	})
+
+	// Quality-gate: FAILS on first call, PASSES on second.
+	var qgCalls atomic.Int32
+	_ = env.reg.Register(&stubHandler{
+		name: "quality-gate",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			call := qgCalls.Add(1)
+			if call == 1 {
+				t.Logf("quality-gate: FAIL (iteration %d)", call)
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+						Summary: "test failed",
+						Issues: []event.Issue{{
+							Severity: "major", Category: "correctness",
+							Description: "tests failed",
+						}},
+					})),
+				}, nil
+			}
+			t.Logf("quality-gate: PASS (iteration %d)", call)
+			return []event.Envelope{
+				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+					Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictPass,
+					Summary: "lint and test passed",
+				})),
+			}, nil
+		},
+	})
+
+	// Committer: no-op.
+	_ = env.reg.Register(&stubHandler{
+		name: "committer",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			return nil, nil
+		},
+	})
+
+	env.start(ctx)
+	env.fireWorkflow(ctx, t, "wf-fb-e2e", "feedback-e2e")
+
+	// Wait for developer to re-trigger after quality-gate fail.
+	select {
+	case <-devRetriggerCh:
+		t.Logf("developer re-triggered after quality-gate fail")
+	case <-time.After(10 * time.Second):
+		// Dump events for debugging.
+		events, _ := env.store.LoadByCorrelation(ctx, "wf-fb-e2e")
+		t.Logf("=== ALL EVENTS (%d) ===", len(events))
+		for _, e := range events {
+			t.Logf("  %s (agg=%s)", e.Type, e.AggregateID)
+		}
+		t.Fatal("developer did NOT re-trigger after quality-gate fail — feedback loop is broken")
+	}
+
+	// Wait for workflow to complete (second iteration should pass).
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			events, _ := env.store.LoadByCorrelation(ctx, "wf-fb-e2e")
+			t.Logf("=== ALL EVENTS (%d) ===", len(events))
+			for _, e := range events {
+				t.Logf("  %s (agg=%s)", e.Type, e.AggregateID)
+			}
+			t.Fatal("workflow did not complete after feedback loop")
+		case <-time.After(200 * time.Millisecond):
+			events, _ := env.store.LoadByCorrelation(ctx, "wf-fb-e2e")
+			for _, e := range events {
+				if e.Type == event.WorkflowCompleted {
+					t.Logf("workflow completed successfully after feedback loop")
+					mu.Lock()
+					if devFires < 2 {
+						t.Errorf("developer should have fired at least twice, fired %d", devFires)
+					}
+					mu.Unlock()
+					return
+				}
+			}
+		}
+	}
+}
+
+// TestE2EDualFeedbackStuck reproduces the production bug where BOTH reviewer
+// and qa fail in the same iteration, generating TWO FeedbackGenerated events.
+// The developer processes them sequentially (dispatch queue), producing TWO
+// iterations of reviewer+qa. Quality-gate must fire after the FIRST set of
+// reviewer+qa pass — the second developer run's results should not prevent it.
+func TestE2EDualFeedbackStuck(t *testing.T) {
+	def := WorkflowDef{
+		ID:       "dual-fb",
+		Required: []string{"developer", "reviewer", "qa", "quality-gate", "committer"},
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+			"committer":    {"quality-gate"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+		MaxIterations:     3,
+		EscalateOnMaxIter: true,
+		PhaseMap:          map[string]string{"develop": "developer", "review": "reviewer"},
+	}
+
+	env := newE2EEnv(t, def)
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	devFires := 0
+	var qgFires atomic.Int32
+
+	// Developer: passes with delay on iterations 3+ to simulate concurrent runs.
+	_ = env.reg.Register(&stubHandler{
+		name: "developer",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			mu.Lock()
+			devFires++
+			n := devFires
+			mu.Unlock()
+			t.Logf("developer fired (iteration %d)", n)
+			// Simulate slow developer on second feedback: developer iter 3 runs
+			// while reviewer/qa from iter 2 are also running.
+			if n >= 3 {
+				time.Sleep(300 * time.Millisecond)
+			}
+			return nil, nil
+		},
+	})
+
+	// Reviewer: FAILS on call 2 (after quality-gate feedback retriggers dev).
+	var revCalls atomic.Int32
+	_ = env.reg.Register(&stubHandler{
+		name: "reviewer",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			call := revCalls.Add(1)
+			if call == 2 {
+				t.Logf("reviewer: FAIL (call %d)", call)
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Phase: "develop", SourcePhase: "review", Outcome: event.VerdictFail,
+						Summary: "missing auth check",
+						Issues:  []event.Issue{{Severity: "critical", Category: "security", Description: "no auth"}},
+					})),
+				}, nil
+			}
+			t.Logf("reviewer: PASS (call %d)", call)
+			return []event.Envelope{
+				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+					Phase: "develop", SourcePhase: "review", Outcome: event.VerdictPass, Summary: "ok",
+				})),
+			}, nil
+		},
+	})
+
+	// QA: FAILS on call 2 (after quality-gate feedback retriggers dev).
+	var qaCalls atomic.Int32
+	_ = env.reg.Register(&stubHandler{
+		name: "qa",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			call := qaCalls.Add(1)
+			if call == 2 {
+				t.Logf("qa: FAIL (call %d)", call)
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Phase: "develop", SourcePhase: "qa", Outcome: event.VerdictFail,
+						Summary: "no size limit",
+						Issues:  []event.Issue{{Severity: "minor", Category: "correctness", Description: "body size"}},
+					})),
+				}, nil
+			}
+			t.Logf("qa: PASS (call %d)", call)
+			return []event.Envelope{
+				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+					Phase: "develop", SourcePhase: "qa", Outcome: event.VerdictPass, Summary: "ok",
+				})),
+			}, nil
+		},
+	})
+
+	// Quality-gate: FAILS on call 1, PASSES after.
+	_ = env.reg.Register(&stubHandler{
+		name: "quality-gate",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			n := qgFires.Add(1)
+			if n == 1 {
+				t.Logf("quality-gate: FAIL (call %d)", n)
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+						Summary: "test failed",
+						Issues:  []event.Issue{{Severity: "major", Category: "correctness", Description: "tests failed"}},
+					})),
+				}, nil
+			}
+			t.Logf("quality-gate: PASS (call %d)", n)
+			return []event.Envelope{
+				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+					Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictPass,
+					Summary: "all checks passed",
+				})),
+			}, nil
+		},
+	})
+
+	// Committer: no-op.
+	_ = env.reg.Register(&stubHandler{
+		name: "committer",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			t.Logf("committer fired")
+			return nil, nil
+		},
+	})
+
+	env.start(ctx)
+	env.fireWorkflow(ctx, t, "wf-dual-fb", "dual-fb")
+
+	// Wait for workflow to complete.
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			events, _ := env.store.LoadByCorrelation(ctx, "wf-dual-fb")
+			t.Logf("=== ALL EVENTS (%d) ===", len(events))
+			for _, e := range events {
+				payload := string(e.Payload)
+				if len(payload) > 100 {
+					payload = payload[:100]
+				}
+				t.Logf("  %s (agg=%s) %s", e.Type, e.AggregateID, payload)
+			}
+			t.Fatal("workflow did not complete — dual feedback caused stuck state")
+		case <-time.After(200 * time.Millisecond):
+			events, _ := env.store.LoadByCorrelation(ctx, "wf-dual-fb")
+			for _, e := range events {
+				if e.Type == event.WorkflowCompleted {
+					t.Logf("workflow completed after dual feedback")
+					return
+				}
+			}
+		}
+	}
+}

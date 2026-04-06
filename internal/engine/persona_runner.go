@@ -462,7 +462,13 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 
 		// 4. Event dedup
 		if !r.seen.Add(h.Name(), string(env.ID)) {
-			return nil // already dispatched
+			r.logger.Debug("persona runner: dispatch dropped (event dedup)",
+				slog.String("handler", h.Name()),
+				slog.String("event_type", string(env.Type)),
+				slog.String("event_id", string(env.ID)),
+				slog.String("correlation", env.CorrelationID),
+			)
+			return nil
 		}
 
 		// 5. Width limit
@@ -479,12 +485,24 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 		if len(afterPersonas) > 0 && env.CorrelationID != "" {
 			satisfied, fingerprint := r.resolver.checkJoinCondition(r.ctx, afterPersonas, env.CorrelationID)
 			if !satisfied {
+				r.logger.Debug("persona runner: dispatch dropped (join unsatisfied)",
+					slog.String("handler", h.Name()),
+					slog.String("event_type", string(env.Type)),
+					slog.String("event_id", string(env.ID)),
+					slog.String("correlation", env.CorrelationID),
+				)
 				return nil
 			}
 			// Join-gate dedup: when multiple PersonaCompleted events
 			// satisfy the same join, dispatch only once per unique set.
 			if len(afterPersonas) > 1 && env.Type == event.PersonaCompleted {
 				if !r.seen.Add(h.Name()+":join", fingerprint) {
+					r.logger.Debug("persona runner: dispatch dropped (join-gate dedup)",
+						slog.String("handler", h.Name()),
+						slog.String("event_type", string(env.Type)),
+						slog.String("correlation", env.CorrelationID),
+						slog.String("fingerprint", fingerprint),
+					)
 					return nil
 				}
 			}
@@ -498,6 +516,11 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 
 		// 8. Check runner context
 		if r.ctx.Err() != nil {
+			r.logger.Debug("persona runner: dispatch dropped (context cancelled)",
+				slog.String("handler", h.Name()),
+				slog.String("event_type", string(env.Type)),
+				slog.String("correlation", env.CorrelationID),
+			)
 			return nil
 		}
 
