@@ -36,6 +36,12 @@ type Response struct {
 	Output     string        // Full captured text output from the LLM.
 	StopReason string        // "end_turn", "max_tokens", etc. Empty if not captured.
 	Duration   time.Duration // Wall clock execution duration.
+	// TokensUsed is the total token count for the request (input + output +
+	// cache_creation_input + cache_read_input). Sourced from the authoritative
+	// "result" event in the stream-json output; falls back to the last-seen
+	// message_start + message_delta counters if no result arrives. Zero when
+	// the backend does not report usage (e.g., Gemini — handled separately).
+	TokensUsed int
 }
 
 // maxArgSize is the threshold above which prompts are piped via stdin

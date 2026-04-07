@@ -440,6 +440,66 @@ func TestAIHandlerEventSource(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// AIHandler.Handle — token count propagation
+// ---------------------------------------------------------------------------
+
+func TestAIHandlerTokensUsedPropagated(t *testing.T) {
+	// Verify that Response.TokensUsed flows through to AIResponsePayload.TokensUsed.
+	store := newMockStore()
+	corrID := "corr-tokens"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "Write a feature",
+		})).WithCorrelation(corrID),
+	}
+
+	const wantTokens = 12345
+	mb := &mockBackend{
+		name: "claude",
+		response: &backend.Response{
+			Output:     "Implementation complete.",
+			StopReason: "end_turn",
+			Duration:   3 * time.Second,
+			TokensUsed: wantTokens,
+		},
+	}
+
+	h := NewAIHandler(AIHandlerConfig{
+		Name:     "developer",
+		Phase:    "develop",
+		Persona:  persona.Developer,
+		Backend:  mb,
+		Store:    store,
+		Personas: persona.DefaultRegistry(),
+		Builder:  persona.NewPromptBuilder(),
+	})
+
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation(corrID)
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("want 2 events, got %d", len(results))
+	}
+
+	// AIResponseReceived is the second event.
+	if results[1].Type != event.AIResponseReceived {
+		t.Fatalf("event[1]: want AIResponseReceived, got %s", results[1].Type)
+	}
+	var respPayload event.AIResponsePayload
+	if err := json.Unmarshal(results[1].Payload, &respPayload); err != nil {
+		t.Fatalf("unmarshal AIResponsePayload: %v", err)
+	}
+	if respPayload.TokensUsed != wantTokens {
+		t.Errorf("TokensUsed: want %d, got %d", wantTokens, respPayload.TokensUsed)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

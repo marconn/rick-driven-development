@@ -101,7 +101,8 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 		inner = io.MultiWriter(&captured, req.Output)
 	}
 
-	sw := NewStreamWriter(inner, NewClaudePrintExtractor(), WithResultCheck(ClaudeCheckResult))
+	extractor := NewClaudePrintExtractor()
+	sw := NewStreamWriter(inner, extractor.ExtractFn(), WithResultCheck(ClaudeCheckResult))
 	cmd.Stdout = sw
 
 	if stdinPrompt != "" {
@@ -120,5 +121,6 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 		Output:     captured.String(),
 		StopReason: sw.StopReason(),
 		Duration:   time.Since(start),
+		TokensUsed: extractor.TokensUsed(),
 	}, nil
 }

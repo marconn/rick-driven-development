@@ -126,6 +126,7 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 	respEvt := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
 		Phase:      h.phase,
 		Backend:    h.backend.Name(),
+		TokensUsed: resp.TokensUsed,
 		DurationMS: resp.Duration.Milliseconds(),
 		Structured: structured,
 		Output:     output,
