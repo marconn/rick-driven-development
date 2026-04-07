@@ -91,6 +91,139 @@ func TestToolJiraRead_WithMockServer(t *testing.T) {
 	}
 }
 
+func TestToolJiraReadQASteps_WithMockServer(t *testing.T) {
+	mockSrv, client := newMockJiraServer(t)
+
+	// Custom field returns ADF document with QA steps text.
+	mockSrv.mux.HandleFunc("/rest/api/3/issue/PROJ-9", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"key": "PROJ-9",
+			"fields": map[string]any{
+				"customfield_10037": map[string]any{
+					"version": 1,
+					"type":    "doc",
+					"content": []map[string]any{
+						{
+							"type": "paragraph",
+							"content": []map[string]any{
+								{"type": "text", "text": "Step 1: open the page"},
+							},
+						},
+						{
+							"type": "paragraph",
+							"content": []map[string]any{
+								{"type": "text", "text": "Step 2: click submit"},
+							},
+						},
+					},
+				},
+			},
+		})
+	})
+
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	result, err := callTool(t, s, "rick_jira_read_qa_steps", map[string]any{"ticket": "PROJ-9"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rm, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected type: %T", result)
+	}
+	if rm["ticket"] != "PROJ-9" {
+		t.Errorf("expected ticket PROJ-9, got %v", rm["ticket"])
+	}
+	if rm["field_id"] != "customfield_10037" {
+		t.Errorf("expected field_id customfield_10037, got %v", rm["field_id"])
+	}
+	if rm["present"] != true {
+		t.Errorf("expected present=true, got %v", rm["present"])
+	}
+	steps, _ := rm["qa_steps"].(string)
+	if !strings.Contains(steps, "Step 1: open the page") || !strings.Contains(steps, "Step 2: click submit") {
+		t.Errorf("expected qa_steps to contain both steps, got %q", steps)
+	}
+}
+
+func TestToolJiraReadQASteps_FieldMissing(t *testing.T) {
+	mockSrv, client := newMockJiraServer(t)
+
+	// Issue with no QA Steps field set.
+	mockSrv.mux.HandleFunc("/rest/api/3/issue/PROJ-10", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"key":    "PROJ-10",
+			"fields": map[string]any{},
+		})
+	})
+
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	result, err := callTool(t, s, "rick_jira_read_qa_steps", map[string]any{"ticket": "PROJ-10"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	rm, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected type: %T", result)
+	}
+	if rm["present"] != false {
+		t.Errorf("expected present=false, got %v", rm["present"])
+	}
+	if rm["qa_steps"] != "" {
+		t.Errorf("expected empty qa_steps, got %v", rm["qa_steps"])
+	}
+}
+
+func TestToolJiraReadQASteps_CustomFieldID(t *testing.T) {
+	mockSrv, client := newMockJiraServer(t)
+
+	mockSrv.mux.HandleFunc("/rest/api/3/issue/PROJ-11", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"key": "PROJ-11",
+			"fields": map[string]any{
+				"customfield_99999": "plain string steps",
+			},
+		})
+	})
+
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	result, err := callTool(t, s, "rick_jira_read_qa_steps", map[string]any{
+		"ticket":   "PROJ-11",
+		"field_id": "customfield_99999",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	rm, _ := result.(map[string]any)
+	if rm["field_id"] != "customfield_99999" {
+		t.Errorf("expected field_id customfield_99999, got %v", rm["field_id"])
+	}
+	if rm["qa_steps"] != "plain string steps" {
+		t.Errorf("expected plain string steps, got %v", rm["qa_steps"])
+	}
+}
+
 func TestToolJiraWrite_WithMockServer(t *testing.T) {
 	mockSrv, client := newMockJiraServer(t)
 	mockSrv.handleJSON("/rest/api/3/issue/PROJ-1", http.StatusNoContent, nil)

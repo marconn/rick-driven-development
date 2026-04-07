@@ -4,11 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
 	"github.com/marconn/rick-event-driven-development/internal/jira"
 )
+
+// defaultQAStepsField is the Jira custom field ID that stores QA Steps in the
+// Huli/Team Rocket instance. Override with the JIRA_QA_STEPS_FIELD env var.
+const defaultQAStepsField = "customfield_10037"
 
 func (s *Server) registerJiraTools() {
 
@@ -33,6 +38,28 @@ func (s *Server) registerJiraTools() {
 			},
 		},
 		Handler: s.toolJiraRead,
+	})
+
+	s.register(Tool{
+		Definition: ToolDefinition{
+			Name:        "rick_jira_read_qa_steps",
+			Description: "Read the QA Steps custom field from a Jira ticket. Defaults to customfield_10037 (override with JIRA_QA_STEPS_FIELD env or the field_id arg). Use this because rick_jira_read does not return custom fields.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"ticket": map[string]any{
+						"type":        "string",
+						"description": "Jira issue key (e.g., PROJ-12345).",
+					},
+					"field_id": map[string]any{
+						"type":        "string",
+						"description": "Custom field ID for QA Steps. Optional; defaults to JIRA_QA_STEPS_FIELD env or customfield_10037.",
+					},
+				},
+				"required": []string{"ticket"},
+			},
+		},
+		Handler: s.toolJiraReadQASteps,
 	})
 
 	s.register(Tool{
@@ -364,6 +391,52 @@ func (s *Server) toolJiraRead(ctx context.Context, raw json.RawMessage) (any, er
 	// Fetch links separately since FetchIssue doesn't include them.
 	if links, linkErr := s.deps.Jira.FetchIssueLinks(ctx, args.Ticket); linkErr == nil && len(links) > 0 {
 		result["links"] = links
+	}
+
+	return result, nil
+}
+
+type jiraReadQAStepsArgs struct {
+	Ticket  string `json:"ticket"`
+	FieldID string `json:"field_id"`
+}
+
+func (s *Server) toolJiraReadQASteps(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args jiraReadQAStepsArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if args.Ticket == "" {
+		return nil, fmt.Errorf("ticket is required")
+	}
+	if err := s.requireJira(); err != nil {
+		return nil, err
+	}
+
+	fieldID := args.FieldID
+	if fieldID == "" {
+		fieldID = os.Getenv("JIRA_QA_STEPS_FIELD")
+	}
+	if fieldID == "" {
+		fieldID = defaultQAStepsField
+	}
+
+	issue, err := s.deps.Jira.FetchRawIssue(ctx, args.Ticket)
+	if err != nil {
+		return nil, fmt.Errorf("fetch issue: %w", err)
+	}
+
+	rawField, present := issue.Fields[fieldID]
+	result := map[string]any{
+		"ticket":   args.Ticket,
+		"field_id": fieldID,
+		"present":  present && len(rawField) > 0 && string(rawField) != "null",
+	}
+
+	if result["present"].(bool) {
+		result["qa_steps"] = jira.ExtractTextField(rawField)
+	} else {
+		result["qa_steps"] = ""
 	}
 
 	return result, nil
