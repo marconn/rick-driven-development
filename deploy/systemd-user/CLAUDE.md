@@ -3,7 +3,7 @@
 - systemd **user** unit files for running rick-server (and supporting daemons) under the current user account, no root required.
 
 ## Units
-- `rick-server.service` — `Type=simple`, runs `%h/.local/bin/rick serve --db %h/.local/share/rick/rick.db --addr :8077 --grpc-addr :9077 --backend claude`
+- `rick-server.service` — `Type=simple`, runs `%h/.local/bin/rick serve --db %h/.local/share/rick/rick.db --addr :58077 --grpc-addr :59077 --backend claude`
   - `EnvironmentFile=-%h/.config/rick/env` (optional, leading `-` ignores if missing)
   - `WorkingDirectory=%h/go/src/github.com/hulilabs`
   - `Restart=always`, `RestartSec=5`, `StartLimitBurst=5`, `StartLimitIntervalSec=60`

@@ -82,15 +82,15 @@ agent/                Desktop UI (Wails v2 + Svelte 5)
 go build -o rick ./cmd/rick
 
 # Start the server (HTTP + gRPC)
-rick serve --addr :8077 --grpc-addr :9077 --db rick.db --backend claude
+rick serve --addr :58077 --grpc-addr :59077 --db rick.db --backend claude
 
 # Or with Gemini
-rick serve --addr :8077 --grpc-addr :9077 --db rick.db --backend gemini
+rick serve --addr :58077 --grpc-addr :59077 --db rick.db --backend gemini
 ```
 
 ### Run a Workflow
 
-Workflows are triggered via the MCP interface. Connect any MCP-compatible client (Claude Desktop, Cursor, or the agent UI) to `http://localhost:8077` and use tools like:
+Workflows are triggered via the MCP interface. Connect any MCP-compatible client (Claude Desktop, Cursor, or the agent UI) to `http://localhost:58077` and use tools like:
 
 - `rick_run_workflow` — Start a workflow (`dag=workspace-dev`, `dag=jira-dev`, etc.)
 - `rick_workflow_status` — Check progress

@@ -51,7 +51,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&opts.grpcAddr, "grpc-addr", "localhost:9077", "Rick gRPC server address")
+	cmd.Flags().StringVar(&opts.grpcAddr, "grpc-addr", "localhost:59077", "Rick gRPC server address")
 	cmd.Flags().StringVar(&opts.page, "page", "", "Confluence page ID or URL (required)")
 	cmd.Flags().StringVar(&opts.ticket, "ticket", "", "Ticket reference (e.g., BTU-1724)")
 

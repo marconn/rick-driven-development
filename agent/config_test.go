@@ -15,8 +15,8 @@ func TestDefaultConfig(t *testing.T) {
 
 	cfg := DefaultConfig()
 
-	if cfg.ServerURL != "http://localhost:8077/mcp" {
-		t.Errorf("expected default server URL http://localhost:8077/mcp, got %s", cfg.ServerURL)
+	if cfg.ServerURL != "http://localhost:58077/mcp" {
+		t.Errorf("expected default server URL http://localhost:58077/mcp, got %s", cfg.ServerURL)
 	}
 	if cfg.Model != "gemini-2.5-pro" {
 		t.Errorf("expected default model gemini-2.5-pro, got %s", cfg.Model)
@@ -74,7 +74,7 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "valid",
 			cfg: Config{
-				ServerURL: "http://localhost:8077/mcp",
+				ServerURL: "http://localhost:58077/mcp",
 				Model:     "gemini-2.5-pro",
 				APIKey:    "test-key",
 			},
@@ -92,7 +92,7 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "missing API key",
 			cfg: Config{
-				ServerURL: "http://localhost:8077/mcp",
+				ServerURL: "http://localhost:58077/mcp",
 				Model:     "gemini-2.5-pro",
 				APIKey:    "",
 			},
@@ -238,7 +238,7 @@ func TestDefaultConfigReadsEnvFile(t *testing.T) {
 
 	// Write env file with all three config keys.
 	writeEnvFile(t, dir,
-		"RICK_SERVER_URL=http://from-file:8077/mcp\nRICK_MODEL=gemini-from-file\nGOOGLE_API_KEY=key-from-file\n",
+		"RICK_SERVER_URL=http://from-file:58077/mcp\nRICK_MODEL=gemini-from-file\nGOOGLE_API_KEY=key-from-file\n",
 	)
 
 	// Clear the env vars so loadEnvFile can set them.
@@ -249,7 +249,7 @@ func TestDefaultConfigReadsEnvFile(t *testing.T) {
 
 	cfg := DefaultConfig()
 
-	if cfg.ServerURL != "http://from-file:8077/mcp" {
+	if cfg.ServerURL != "http://from-file:58077/mcp" {
 		t.Errorf("expected ServerURL from env file, got %s", cfg.ServerURL)
 	}
 	if cfg.Model != "gemini-from-file" {

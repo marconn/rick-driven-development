@@ -248,7 +248,7 @@ import (
     "google.golang.org/grpc/credentials/insecure"
 )
 
-conn, _ := grpc.NewClient("localhost:9077",
+conn, _ := grpc.NewClient("localhost:59077",
     grpc.WithTransportCredentials(insecure.NewCredentials()))
 defer conn.Close()
 
@@ -434,7 +434,7 @@ client.InjectEvent(ctx, "wf-compliance-1", event.WorkflowRequested,
 The `rick serve` command starts both HTTP (MCP) and gRPC listeners. **This is the primary execution mode** — the CLI `rick run` command is deprecated. All workflow execution goes through serve/MCP and the agent UI.
 
 ```bash
-rick serve --addr :8077 --grpc-addr :9077 --db rick.db --backend claude
+rick serve --addr :58077 --grpc-addr :59077 --db rick.db --backend claude
 ```
 
 Serve mode defaults to `--yolo=true` (auto-approves AI backend tool permissions) since it runs headless.

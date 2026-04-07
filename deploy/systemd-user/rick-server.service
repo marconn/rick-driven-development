@@ -7,7 +7,7 @@ StartLimitIntervalSec=60
 [Service]
 Type=simple
 EnvironmentFile=-%h/.config/rick/env
-ExecStart=%h/.local/bin/rick serve --db %h/.local/share/rick/rick.db --addr :8077 --grpc-addr :9077 --backend claude
+ExecStart=%h/.local/bin/rick serve --db %h/.local/share/rick/rick.db --addr :58077 --grpc-addr :59077 --backend claude
 WorkingDirectory=%h/go/src/github.com/hulilabs
 Environment=PATH=%h/.local/bin:%h/.local/share/mise/installs/node/22.20.0/bin:/home/linuxbrew/.linuxbrew/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin
 Restart=always

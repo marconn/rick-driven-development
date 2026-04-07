@@ -79,7 +79,7 @@ package: build-agent ## Build agent and create .deb package
 	@mkdir -p /tmp/rick-agent-deb/usr/share/applications
 	@mkdir -p /tmp/rick-agent-deb/usr/share/icons/hicolor/scalable/apps
 	@mkdir -p /tmp/rick-agent-deb/DEBIAN
-	@printf 'Package: rick-agent\nVersion: $(AGENT_VERSION)\nSection: devel\nPriority: optional\nArchitecture: amd64\nDepends: libwebkit2gtk-4.1-0, libgtk-3-0\nMaintainer: Team Rocket <team-rocket@hulilabs.com>\nHomepage: https://github.com/marconn/rick-event-driven-development\nDescription: Rick Operator - Desktop AI Workflow Dashboard\n Native desktop application for managing Rick event-driven AI workflows.\n Built with Wails (Go + Svelte). Connects to rick-server via HTTP MCP\n and uses Google Gemini as the operator agent.\n .\n Requires rick-server running at localhost:8077 and GOOGLE_API_KEY set.\n' > /tmp/rick-agent-deb/DEBIAN/control
+	@printf 'Package: rick-agent\nVersion: $(AGENT_VERSION)\nSection: devel\nPriority: optional\nArchitecture: amd64\nDepends: libwebkit2gtk-4.1-0, libgtk-3-0\nMaintainer: Team Rocket <team-rocket@hulilabs.com>\nHomepage: https://github.com/marconn/rick-event-driven-development\nDescription: Rick Operator - Desktop AI Workflow Dashboard\n Native desktop application for managing Rick event-driven AI workflows.\n Built with Wails (Go + Svelte). Connects to rick-server via HTTP MCP\n and uses Google Gemini as the operator agent.\n .\n Requires rick-server running at localhost:58077 and GOOGLE_API_KEY set.\n' > /tmp/rick-agent-deb/DEBIAN/control
 	cp $(AGENT_BIN) /tmp/rick-agent-deb/usr/bin/rick-agent
 	cp deploy/rick-agent.desktop /tmp/rick-agent-deb/usr/share/applications/rick-agent.desktop
 	cp deploy/rick-agent.svg /tmp/rick-agent-deb/usr/share/icons/hicolor/scalable/apps/rick-agent.svg

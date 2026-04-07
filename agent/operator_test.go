@@ -18,7 +18,7 @@ func testLogger(t *testing.T) *slog.Logger {
 
 func TestNewOperator(t *testing.T) {
 	cfg := Config{
-		ServerURL: "http://localhost:8077/mcp",
+		ServerURL: "http://localhost:58077/mcp",
 		Model:     "gemini-2.5-pro",
 		APIKey:    "test-key",
 	}
@@ -69,7 +69,7 @@ func TestOperatorConnectedCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	op := NewOperator(Config{ServerURL: "http://localhost:8077/mcp"}, nil, testLogger(t))
+	op := NewOperator(Config{ServerURL: "http://localhost:58077/mcp"}, nil, testLogger(t))
 	if op.Connected(ctx) {
 		t.Error("expected connected=false with cancelled context")
 	}

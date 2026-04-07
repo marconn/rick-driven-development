@@ -8,7 +8,7 @@ Cobra command tree for the `rick` binary — wires the engine, persona runner, p
 - `serve.go` — Long-running daemon. Boots store, bus, backend, handler registry, engine, PersonaRunner with `CompositeDispatcher` (local + gRPC stream), all four projections, `NotificationBroker`, gRPC `PersonaService`, optional GitHub/Jira pollers, and the MCP HTTP server. Defaults `--yolo=true`. Honors `RICK_LOG_LEVEL=debug`.
 - `mcp.go` — MCP-over-stdio mode for Claude Desktop / Cursor. Subset of serve (no gRPC, no optional services). Logs to stderr at warn level since stdout is reserved for protocol.
 - `deps.go` — Shared dep constructors: `openEstimationStore`, `loadMicroserviceMap`, `newGitHubClient`, `openPluginStore`, `startOptionalServices` (GitHub reporter, CI poller, Jira poller — all gated by env vars).
-- `mcpclient.go` — `mcpCall()` JSON-RPC client used by pause/resume/cancel/guide to route through the running server. `replayAggregate()` shared aggregate replay helper. `defaultMCPURL = http://localhost:8077/mcp`.
+- `mcpclient.go` — `mcpCall()` JSON-RPC client used by pause/resume/cancel/guide to route through the running server. `replayAggregate()` shared aggregate replay helper. `defaultMCPURL = http://localhost:58077/mcp`.
 - `events.go` — `rick events` reader. Per-aggregate or `--correlation` cross-aggregate listing with type-aware `eventSummary()` rendering.
 - `status.go` — `rick status` replays an aggregate and prints status, prompt, completed personas, feedback iteration counts.
 - `find.go` — `rick find <key> <value>` tag-based workflow lookup via `store.LoadByTag` (ticket, repo, repo_branch, source, workflow_id).

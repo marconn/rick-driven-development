@@ -8,7 +8,7 @@ import (
 
 func TestNewApp(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "test-key")
-	t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+	t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 	t.Setenv("RICK_MODEL", "gemini-2.0-flash")
 
 	app := NewApp()
@@ -18,7 +18,7 @@ func TestNewApp(t *testing.T) {
 	if app.operator == nil {
 		t.Fatal("expected non-nil operator")
 	}
-	if app.cfg.ServerURL != "http://test:8077/mcp" {
+	if app.cfg.ServerURL != "http://test:58077/mcp" {
 		t.Errorf("expected server URL from env, got %s", app.cfg.ServerURL)
 	}
 	if app.cfg.Model != "gemini-2.0-flash" {
@@ -28,13 +28,13 @@ func TestNewApp(t *testing.T) {
 
 func TestGetConfig(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "secret-key-should-not-leak")
-	t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+	t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 	t.Setenv("RICK_MODEL", "gemini-2.5-pro")
 
 	app := NewApp()
 	cfg := app.GetConfig()
 
-	if cfg.ServerURL != "http://test:8077/mcp" {
+	if cfg.ServerURL != "http://test:58077/mcp" {
 		t.Errorf("expected server URL, got %s", cfg.ServerURL)
 	}
 	if cfg.Model != "gemini-2.5-pro" {
@@ -80,7 +80,7 @@ func TestReconnectValidation(t *testing.T) {
 	// Deliberately omit GOOGLE_API_KEY so Validate() fails.
 	t.Setenv("GOOGLE_API_KEY", "")
 	t.Setenv("GOOGLE_GENAI_API_KEY", "")
-	t.Setenv("RICK_SERVER_URL", "http://localhost:8077/mcp")
+	t.Setenv("RICK_SERVER_URL", "http://localhost:58077/mcp")
 
 	app := NewApp()
 	errMsg := app.Reconnect()
@@ -96,7 +96,7 @@ func TestReconnectValidation(t *testing.T) {
 // when the operator has not been initialized (sessionService is nil).
 func TestClearContextNotInitialized(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "test-key")
-	t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+	t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 
 	app := NewApp()
 	// app.operator.sessionService is nil because Init was never called.
@@ -113,7 +113,7 @@ func TestClearContextNotInitialized(t *testing.T) {
 // when the memory store is nil (e.g., home dir resolution failed).
 func TestSaveMemoryNilStore(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "test-key")
-	t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+	t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 
 	app := NewApp()
 	app.memoryStore = nil // force nil store
@@ -127,7 +127,7 @@ func TestSaveMemoryNilStore(t *testing.T) {
 // TestSaveMemoryValid verifies SaveMemory returns a non-nil Memory on success.
 func TestSaveMemoryValid(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "test-key")
-	t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+	t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 
 	app := NewApp()
 	dir := t.TempDir()
@@ -148,7 +148,7 @@ func TestSaveMemoryValid(t *testing.T) {
 // TestListMemoriesNilStore verifies ListMemories returns nil when memoryStore is nil.
 func TestListMemoriesNilStore(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "test-key")
-	t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+	t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 
 	app := NewApp()
 	app.memoryStore = nil
@@ -162,7 +162,7 @@ func TestListMemoriesNilStore(t *testing.T) {
 // TestDeleteMemoryNilStore verifies DeleteMemory returns false when memoryStore is nil.
 func TestDeleteMemoryNilStore(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "test-key")
-	t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+	t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 
 	app := NewApp()
 	app.memoryStore = nil
@@ -175,7 +175,7 @@ func TestDeleteMemoryNilStore(t *testing.T) {
 // TestSearchMemoriesNilStore verifies SearchMemories returns nil when memoryStore is nil.
 func TestSearchMemoriesNilStore(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "test-key")
-	t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+	t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 
 	app := NewApp()
 	app.memoryStore = nil

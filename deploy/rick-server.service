@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/rick serve --db /var/lib/rick/rick.db --addr :8077
+ExecStart=/usr/bin/rick serve --db /var/lib/rick/rick.db --addr :58077
 Restart=on-failure
 RestartSec=5
 User=rick

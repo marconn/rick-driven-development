@@ -89,7 +89,7 @@ func fakeMCPDashboard(t *testing.T) http.HandlerFunc {
 func newTestApp(t *testing.T) (*App, func()) {
 	t.Helper()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
-	t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+	t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 
 	srv := newFakeMCP(t, fakeMCPDashboard(t))
 	app := NewApp()
@@ -114,7 +114,7 @@ func newBrokenApp(t *testing.T) *App {
 func newMalformedApp(t *testing.T) *App {
 	t.Helper()
 	t.Setenv("GOOGLE_API_KEY", "test-key")
-	t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+	t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 
 	srv := newFakeMCP(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -543,7 +543,7 @@ func TestApproveHint(t *testing.T) {
 	t.Run("with_guidance", func(t *testing.T) {
 		handler, getLastArgs := fakeMCPWithArgCapture(t)
 		t.Setenv("GOOGLE_API_KEY", "test-key")
-		t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+		t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 		srv := newFakeMCP(t, handler)
 		app := NewApp()
 		app.mcpClient = NewMCPClient(srv.URL)
@@ -581,7 +581,7 @@ func TestApproveHint(t *testing.T) {
 	t.Run("without_guidance", func(t *testing.T) {
 		handler, getLastArgs := fakeMCPWithArgCapture(t)
 		t.Setenv("GOOGLE_API_KEY", "test-key")
-		t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+		t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 		srv := newFakeMCP(t, handler)
 		app := NewApp()
 		app.mcpClient = NewMCPClient(srv.URL)
@@ -617,7 +617,7 @@ func TestRejectHint(t *testing.T) {
 	t.Run("action_skip", func(t *testing.T) {
 		handler, getLastArgs := fakeMCPWithArgCapture(t)
 		t.Setenv("GOOGLE_API_KEY", "test-key")
-		t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+		t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 		srv := newFakeMCP(t, handler)
 		app := NewApp()
 		app.mcpClient = NewMCPClient(srv.URL)
@@ -643,7 +643,7 @@ func TestRejectHint(t *testing.T) {
 	t.Run("action_fail", func(t *testing.T) {
 		handler, getLastArgs := fakeMCPWithArgCapture(t)
 		t.Setenv("GOOGLE_API_KEY", "test-key")
-		t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+		t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 		srv := newFakeMCP(t, handler)
 		app := NewApp()
 		app.mcpClient = NewMCPClient(srv.URL)
@@ -662,7 +662,7 @@ func TestRejectHint(t *testing.T) {
 	t.Run("empty_action", func(t *testing.T) {
 		handler, getLastArgs := fakeMCPWithArgCapture(t)
 		t.Setenv("GOOGLE_API_KEY", "test-key")
-		t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+		t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 		srv := newFakeMCP(t, handler)
 		app := NewApp()
 		app.mcpClient = NewMCPClient(srv.URL)
@@ -681,7 +681,7 @@ func TestRejectHint(t *testing.T) {
 	t.Run("with_reason_no_action", func(t *testing.T) {
 		handler, getLastArgs := fakeMCPWithArgCapture(t)
 		t.Setenv("GOOGLE_API_KEY", "test-key")
-		t.Setenv("RICK_SERVER_URL", "http://test:8077/mcp")
+		t.Setenv("RICK_SERVER_URL", "http://test:58077/mcp")
 		srv := newFakeMCP(t, handler)
 		app := NewApp()
 		app.mcpClient = NewMCPClient(srv.URL)

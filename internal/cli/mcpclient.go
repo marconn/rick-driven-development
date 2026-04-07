@@ -85,7 +85,7 @@ func mcpCall(ctx context.Context, serverURL, toolName string, args map[string]an
 	return text, nil
 }
 
-const defaultMCPURL = "http://localhost:8077/mcp"
+const defaultMCPURL = "http://localhost:58077/mcp"
 
 // replayAggregate loads all events for an aggregate and replays them.
 func replayAggregate(ctx context.Context, store eventstore.Store, aggregateID string) (*engine.WorkflowAggregate, error) {

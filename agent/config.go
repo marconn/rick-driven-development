@@ -21,7 +21,7 @@ type Config struct {
 func DefaultConfig() Config {
 	loadEnvFile()
 	return Config{
-		ServerURL: envOr("RICK_SERVER_URL", "http://localhost:8077/mcp"),
+		ServerURL: envOr("RICK_SERVER_URL", "http://localhost:58077/mcp"),
 		Model:     envOr("RICK_MODEL", "gemini-2.5-pro"),
 		APIKey:    resolveAPIKey(),
 	}

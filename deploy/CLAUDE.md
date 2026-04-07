@@ -5,7 +5,7 @@
 ## Files
 - `rick-agent.desktop` — XDG desktop entry installed by the .deb to `/usr/share/applications/`. `Exec=/usr/bin/rick-agent`, `Icon=rick-agent`, `StartupWMClass=rick-agent`.
 - `rick-agent.svg` — app icon installed by the .deb to `/usr/share/icons/hicolor/scalable/apps/rick-agent.svg`.
-- `rick-server.service` — system-wide systemd unit (`User=rick`, `ExecStart=/usr/bin/rick serve --db /var/lib/rick/rick.db --addr :8077`, `WantedBy=multi-user.target`). Reference for full system-wide deployments — NOT what dev uses.
+- `rick-server.service` — system-wide systemd unit (`User=rick`, `ExecStart=/usr/bin/rick serve --db /var/lib/rick/rick.db --addr :58077`, `WantedBy=multi-user.target`). Reference for full system-wide deployments — NOT what dev uses.
 - `rick-agent_<version>_amd64.deb` — built artifacts (gitignored). Currently `0.1.0` through `0.8.0` present locally.
 - `systemd-user/` → see `systemd-user/CLAUDE.md` for the user-level rick-server unit that dev actually runs.
 
@@ -22,7 +22,7 @@
 
 ## Two service files (intentional duplication)
 - `deploy/rick-server.service` — **system-wide** variant: `User=rick`, `/usr/bin/rick`, `/var/lib/rick/rick.db`, `WantedBy=multi-user.target`. Reference only.
-- `deploy/systemd-user/rick-server.service` — **user-level** variant: `%h/.local/bin/rick`, `%h/.local/share/rick/rick.db`, `--grpc-addr :9077`, `EnvironmentFile=-%h/.config/rick/env`, `WantedBy=default.target`. This is the one the Makefile actually copies and dev runs.
+- `deploy/systemd-user/rick-server.service` — **user-level** variant: `%h/.local/bin/rick`, `%h/.local/share/rick/rick.db`, `--grpc-addr :59077`, `EnvironmentFile=-%h/.config/rick/env`, `WantedBy=default.target`. This is the one the Makefile actually copies and dev runs.
 
 ## Related
 - `../Makefile` — `package`, `install-agent`, `deploy`, `restart` targets.

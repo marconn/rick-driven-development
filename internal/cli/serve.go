@@ -53,8 +53,8 @@ JSON-RPC responses. GET /mcp returns server info and available tools.`,
 	}
 
 	cmd.Flags().StringVar(&opts.dbPath, "db", "rick.db", "SQLite database path")
-	cmd.Flags().StringVar(&opts.addr, "addr", ":8077", "HTTP listen address")
-	cmd.Flags().StringVar(&opts.grpcAddr, "grpc-addr", ":9077", "gRPC listen address for external handlers")
+	cmd.Flags().StringVar(&opts.addr, "addr", ":58077", "HTTP listen address")
+	cmd.Flags().StringVar(&opts.grpcAddr, "grpc-addr", ":59077", "gRPC listen address for external handlers")
 	cmd.Flags().StringVarP(&opts.backendName, "backend", "b", "claude", "AI backend (claude, gemini)")
 	cmd.Flags().StringVarP(&opts.workDir, "workdir", "w", ".", "Working directory for AI backends")
 	cmd.Flags().BoolVar(&opts.yolo, "yolo", true, "Skip AI backend permission checks (default true in serve mode)")

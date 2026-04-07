@@ -42,7 +42,7 @@ Workflow control:
 - `InjectGuidance(id, content, target)` (auto-resumes by default)
 
 ## Architecture
-- Svelte UI → Wails JS bindings → `App` Go methods → either (a) Gemini ADK operator with MCP toolset for chat, or (b) `MCPClient` direct HTTP for dashboard queries → rick-server MCP HTTP at `RICK_SERVER_URL` (default `http://localhost:8077/mcp`).
+- Svelte UI → Wails JS bindings → `App` Go methods → either (a) Gemini ADK operator with MCP toolset for chat, or (b) `MCPClient` direct HTTP for dashboard queries → rick-server MCP HTTP at `RICK_SERVER_URL` (default `http://localhost:58077/mcp`).
 - The agent UI ONLY accesses Rick through MCP — no direct event store or bus access.
 - Operator events stream to the frontend via Wails `runtime.EventsEmit("agent:event", Event{...})`.
 
@@ -54,7 +54,7 @@ Workflow control:
 - IMPORTANT: rick-agent binary should ONLY come from the .deb at `/usr/bin/rick-agent`. Never copy the build artifact to `~/.local/bin/rick-agent` — that path is reserved for `rick` (the server CLI).
 
 ## Env vars (loaded from `~/.config/rick/env`)
-- `RICK_SERVER_URL` — MCP HTTP endpoint (default `http://localhost:8077/mcp`).
+- `RICK_SERVER_URL` — MCP HTTP endpoint (default `http://localhost:58077/mcp`).
 - `RICK_MODEL` — Gemini model name (default `gemini-2.5-pro`). Detection of `flash` shrinks the thinking budget from 10240 to 4096.
 - `GOOGLE_API_KEY` / `GOOGLE_GENAI_API_KEY` — required for the Gemini backend.
 
