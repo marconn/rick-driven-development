@@ -66,7 +66,7 @@ func RegisterAll(reg *Registry, d Deps) error {
 			WorkDir:  d.WorkDir,
 			Yolo:     d.Yolo,
 		}),
-		NewAIHandler(AIHandlerConfig{
+		NewDeveloperHandler(AIHandlerConfig{
 			Name:     "developer",
 			Phase:    "develop",
 			Persona:  persona.Developer,
