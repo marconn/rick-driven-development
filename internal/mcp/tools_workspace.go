@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/marconn/rick-event-driven-development/internal/event"
 	"github.com/marconn/rick-event-driven-development/internal/workspace"
 )
 
@@ -53,16 +54,19 @@ func (s *Server) registerWorkspaceTools() {
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_workspace_cleanup",
-			Description: "Remove an isolated workspace directory. Safety: only deletes paths under $RICK_REPOS_PATH matching the *-rick-ws-* pattern.",
+			Description: "Remove an isolated workspace directory. Accepts either an explicit path OR a correlation_id (workflow ID) — when correlation_id is given, the workspace path is resolved from the workflow's WorkspaceReady event. Safety: only deletes paths under $RICK_REPOS_PATH matching the *-rick-ws-* pattern.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{
 						"type":        "string",
-						"description": "Absolute path to the isolated workspace.",
+						"description": "Absolute path to the isolated workspace. Mutually exclusive with correlation_id.",
+					},
+					"correlation_id": map[string]any{
+						"type":        "string",
+						"description": "Workflow correlation ID. Resolves the workspace path from the WorkspaceReady event for that workflow. Mutually exclusive with path.",
 					},
 				},
-				"required": []string{"path"},
 			},
 		},
 		Handler: s.toolWorkspaceCleanup,
@@ -141,19 +145,32 @@ func (s *Server) toolWorkspaceSetup(_ context.Context, raw json.RawMessage) (any
 }
 
 type workspaceCleanupArgs struct {
-	Path string `json:"path"`
+	Path          string `json:"path"`
+	CorrelationID string `json:"correlation_id"`
 }
 
-func (s *Server) toolWorkspaceCleanup(_ context.Context, raw json.RawMessage) (any, error) {
+func (s *Server) toolWorkspaceCleanup(ctx context.Context, raw json.RawMessage) (any, error) {
 	var args workspaceCleanupArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
-	if args.Path == "" {
-		return nil, fmt.Errorf("path is required")
+	if args.Path == "" && args.CorrelationID == "" {
+		return nil, fmt.Errorf("either path or correlation_id is required")
+	}
+	if args.Path != "" && args.CorrelationID != "" {
+		return nil, fmt.Errorf("path and correlation_id are mutually exclusive")
 	}
 
-	resolvedPath, err := safeWorkspacePath(args.Path)
+	path := args.Path
+	if args.CorrelationID != "" {
+		resolved, err := s.resolveWorkspacePathFromCorrelation(ctx, args.CorrelationID)
+		if err != nil {
+			return nil, err
+		}
+		path = resolved
+	}
+
+	resolvedPath, err := safeWorkspacePath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -162,10 +179,45 @@ func (s *Server) toolWorkspaceCleanup(_ context.Context, raw json.RawMessage) (a
 		return nil, fmt.Errorf("remove workspace: %w", err)
 	}
 
-	return map[string]any{
+	result := map[string]any{
 		"path":    resolvedPath,
 		"deleted": true,
-	}, nil
+	}
+	if args.CorrelationID != "" {
+		result["correlation_id"] = args.CorrelationID
+	}
+	return result, nil
+}
+
+// resolveWorkspacePathFromCorrelation looks up the workspace path emitted by
+// the workspace handler for a given workflow correlation ID. Returns the path
+// from the most recent WorkspaceReady event in the correlation chain.
+func (s *Server) resolveWorkspacePathFromCorrelation(ctx context.Context, correlationID string) (string, error) {
+	if s.deps.Store == nil {
+		return "", fmt.Errorf("event store not available")
+	}
+	events, err := s.deps.Store.LoadByCorrelation(ctx, correlationID)
+	if err != nil {
+		return "", fmt.Errorf("load correlation %q: %w", correlationID, err)
+	}
+
+	path := ""
+	for _, env := range events {
+		if env.Type != event.WorkspaceReady {
+			continue
+		}
+		var p event.WorkspaceReadyPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			continue
+		}
+		if p.Path != "" {
+			path = p.Path
+		}
+	}
+	if path == "" {
+		return "", fmt.Errorf("no workspace found for correlation %q", correlationID)
+	}
+	return path, nil
 }
 
 type workspaceInfo struct {

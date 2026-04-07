@@ -666,7 +666,7 @@ func TestToolWorkspaceCleanup_MissingPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing path")
 	}
-	if !strings.Contains(err.Error(), "path is required") {
+	if !strings.Contains(err.Error(), "path or correlation_id is required") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

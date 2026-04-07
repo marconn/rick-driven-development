@@ -2,10 +2,13 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/marconn/rick-event-driven-development/internal/event"
 )
 
 // --- safeWorkspacePath security tests ---
@@ -159,6 +162,91 @@ func TestToolWorkspaceList_EmptyDirectory(t *testing.T) {
 	}
 	if wlr.Count != 0 {
 		t.Errorf("expected 0 workspaces, got %d", wlr.Count)
+	}
+}
+
+// --- toolWorkspaceCleanup tests ---
+
+func TestToolWorkspaceCleanup_RejectsBothPathAndCorrelation(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	raw, _ := json.Marshal(map[string]any{
+		"path":           "/tmp/foo-rick-ws-1",
+		"correlation_id": "wf-1",
+	})
+	_, err := s.toolWorkspaceCleanup(context.TODO(), raw)
+	if err == nil {
+		t.Fatal("expected error when both path and correlation_id provided")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestToolWorkspaceCleanup_ByCorrelationID(t *testing.T) {
+	dir := t.TempDir()
+	wsDir := filepath.Join(dir, "myapp-rick-ws-abc12345")
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RICK_REPOS_PATH", dir)
+
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	correlationID := "wf-cleanup-test"
+	wsReady := event.New(event.WorkspaceReady, 1, event.MustMarshal(event.WorkspaceReadyPayload{
+		Path:     wsDir,
+		Branch:   "test",
+		Base:     "main",
+		Isolated: true,
+	})).WithCorrelation(correlationID).WithAggregate("agg-1", 1)
+	if err := deps.Store.Append(context.Background(), "agg-1", 0, []event.Envelope{wsReady}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	raw, _ := json.Marshal(map[string]any{"correlation_id": correlationID})
+	res, err := s.toolWorkspaceCleanup(context.TODO(), raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	resMap, ok := res.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", res)
+	}
+	if resMap["deleted"] != true {
+		t.Errorf("expected deleted=true, got %v", resMap["deleted"])
+	}
+	if resMap["correlation_id"] != correlationID {
+		t.Errorf("expected correlation_id=%q, got %v", correlationID, resMap["correlation_id"])
+	}
+	if _, statErr := os.Stat(wsDir); !os.IsNotExist(statErr) {
+		t.Errorf("expected workspace dir to be removed, stat err: %v", statErr)
+	}
+}
+
+func TestToolWorkspaceCleanup_CorrelationNotFound(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RICK_REPOS_PATH", dir)
+
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	raw, _ := json.Marshal(map[string]any{"correlation_id": "wf-does-not-exist"})
+	_, err := s.toolWorkspaceCleanup(context.TODO(), raw)
+	if err == nil {
+		t.Fatal("expected error when no workspace exists for correlation")
+	}
+	if !strings.Contains(err.Error(), "no workspace found") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
