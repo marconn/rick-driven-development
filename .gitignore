@@ -5,7 +5,7 @@
 .workflow/
 
 # Compiled binaries
-rick
+/rick
 agent/rick-agent
 *.test
 
