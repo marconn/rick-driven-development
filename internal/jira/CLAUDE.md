@@ -27,7 +27,7 @@ Thin REST client for the Jira Cloud API v3 with ADF formatting helpers, used by 
 - **PR links**: `FetchPRLinks` calls `/rest/dev-status/latest/issue/detail` (requires GitHub-for-Jira integration); resolves issue numeric ID first
 
 ## Patterns
-- **ADF formatting**: `MarkdownToADF(text)` converts `**bold**`, `- `/`* ` bullets, `## ` headings, paragraph breaks into Atlassian Document Format. `parseInlineMarks` handles inline `**bold**` runs. Used by all create/update paths so descriptions accept Markdown
+- **ADF formatting**: `MarkdownToADF(text)` is a thin wrapper around `internal/adf.FromMarkdown` (goldmark + GFM). Supports headings (h1-h6), paragraphs, ordered/bullet lists, blockquotes, fenced code blocks, tables, links, italics, code spans, strikethrough, and treats CommonMark soft line breaks as ADF `hardBreak` so multi-line markdown keeps its visual line structure in Jira. Used by all create/update paths so descriptions accept full Markdown
 - **ADF parsing**: `ADFToPlainText(any)` and `ExtractTextField(json.RawMessage)` walk ADF nodes recursively, extracting `text` leaves; pass-through for plain strings
 - **Custom field IDs** (Huli/Team Rocket Jira instance, hardcoded):
   - `customfield_10004` — Story Points

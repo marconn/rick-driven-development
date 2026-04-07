@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/marconn/rick-event-driven-development/internal/adf"
 )
 
 // Client wraps an HTTP client configured for Jira basic auth.
@@ -427,114 +429,14 @@ func (c *Client) LinkIssues(ctx context.Context, blockerKey, blockedKey string) 
 	return nil
 }
 
-// MarkdownToADF converts markdown-flavored text to Atlassian Document Format.
-// Supports **bold**, - bullet lists, ## headings, paragraph breaks.
+// MarkdownToADF converts markdown text to Atlassian Document Format.
+// Delegates to internal/adf, which uses goldmark + GFM extensions and supports
+// the full set of nodes Jira accepts (h1-h6, paragraphs, lists, blockquotes,
+// fenced code blocks, tables, links, italics, code spans, strikethrough, hard
+// breaks). Soft line breaks within a paragraph are emitted as ADF hardBreak
+// nodes so multi-line markdown keeps its visual line structure in Jira.
 func MarkdownToADF(text string) map[string]any {
-	lines := strings.Split(text, "\n")
-	var content []any
-	var currentBulletItems []any
-
-	flushBullets := func() {
-		if len(currentBulletItems) > 0 {
-			content = append(content, map[string]any{
-				"type":    "bulletList",
-				"content": currentBulletItems,
-			})
-			currentBulletItems = nil
-		}
-	}
-
-	for i := 0; i < len(lines); i++ {
-		trimmed := strings.TrimSpace(lines[i])
-
-		if trimmed == "" {
-			flushBullets()
-			continue
-		}
-
-		if strings.HasPrefix(trimmed, "## ") {
-			flushBullets()
-			heading := strings.TrimPrefix(trimmed, "## ")
-			content = append(content, map[string]any{
-				"type":    "heading",
-				"attrs":   map[string]any{"level": 2},
-				"content": parseInlineMarks(heading),
-			})
-			continue
-		}
-
-		if (strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ")) && len(trimmed) > 2 {
-			bullet := trimmed[2:]
-			currentBulletItems = append(currentBulletItems, map[string]any{
-				"type": "listItem",
-				"content": []any{
-					map[string]any{"type": "paragraph", "content": parseInlineMarks(bullet)},
-				},
-			})
-			continue
-		}
-
-		flushBullets()
-		var paraLines []string
-		for i < len(lines) {
-			l := strings.TrimSpace(lines[i])
-			if l == "" || strings.HasPrefix(l, "- ") || strings.HasPrefix(l, "* ") || strings.HasPrefix(l, "## ") {
-				break
-			}
-			paraLines = append(paraLines, l)
-			i++
-		}
-		i--
-		content = append(content, map[string]any{
-			"type":    "paragraph",
-			"content": parseInlineMarks(strings.Join(paraLines, " ")),
-		})
-	}
-
-	flushBullets()
-
-	if len(content) == 0 {
-		content = []any{
-			map[string]any{"type": "paragraph", "content": []any{map[string]any{"type": "text", "text": text}}},
-		}
-	}
-
-	return map[string]any{"type": "doc", "version": 1, "content": content}
-}
-
-func parseInlineMarks(text string) []any {
-	var nodes []any
-	for text != "" {
-		idx := strings.Index(text, "**")
-		if idx < 0 {
-			if text != "" {
-				nodes = append(nodes, map[string]any{"type": "text", "text": text})
-			}
-			break
-		}
-		if idx > 0 {
-			nodes = append(nodes, map[string]any{"type": "text", "text": text[:idx]})
-		}
-		rest := text[idx+2:]
-		endIdx := strings.Index(rest, "**")
-		if endIdx < 0 {
-			nodes = append(nodes, map[string]any{"type": "text", "text": text[idx:]})
-			break
-		}
-		boldText := rest[:endIdx]
-		if boldText != "" {
-			nodes = append(nodes, map[string]any{
-				"type":  "text",
-				"text":  boldText,
-				"marks": []any{map[string]any{"type": "strong"}},
-			})
-		}
-		text = rest[endIdx+2:]
-	}
-	if len(nodes) == 0 {
-		nodes = []any{map[string]any{"type": "text", "text": ""}}
-	}
-	return nodes
+	return adf.FromMarkdown(text)
 }
 
 // RawIssue gives full access to all fields including custom ones.

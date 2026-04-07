@@ -167,11 +167,19 @@ func renderInlineNode(source []byte, n ast.Node, marks []any) []any {
 	case *ast.Text:
 		t := string(node.Value(source))
 		if t == "" {
+			if node.HardLineBreak() || node.SoftLineBreak() {
+				return []any{map[string]any{"type": "hardBreak"}}
+			}
 			return nil
 		}
 		result := textNode(t, marks)
 		nodes := []any{result}
-		if node.HardLineBreak() {
+		// Treat soft line breaks (single newline within a paragraph) the same as
+		// hard breaks. CommonMark renders soft breaks as a space, but Jira/ADF
+		// authors — humans and LLMs alike — expect each markdown line to keep
+		// its own visual break (e.g. "**A:** foo\n**B:** bar"). Without this,
+		// inline runs concatenate with no separation. See HULI-33546 QA Steps.
+		if node.HardLineBreak() || node.SoftLineBreak() {
 			nodes = append(nodes, map[string]any{"type": "hardBreak"})
 		}
 		return nodes

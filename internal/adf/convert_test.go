@@ -291,6 +291,50 @@ func TestFromMarkdown_Autolink(t *testing.T) {
 	}
 }
 
+// TestFromMarkdown_SoftLineBreaksBecomeHardBreaks guards the HULI-33546 QA Steps
+// regression: multi-line paragraphs (one strong/text run per line) must not
+// collapse into a single concatenated paragraph. Each newline in source markdown
+// must produce a hardBreak in ADF so the visual line structure is preserved.
+func TestFromMarkdown_SoftLineBreaksBecomeHardBreaks(t *testing.T) {
+	md := "**Producto:** HuliSearch\n**Componente:** SearchCore\n**PR:** hulilabs/web#550"
+	doc := FromMarkdown(md)
+	content := doc["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("expected 1 paragraph, got %d", len(content))
+	}
+	para := content[0].(map[string]any)
+	inline := para["content"].([]any)
+
+	// Count hardBreak nodes — must be exactly 2 (between line 1/2 and 2/3).
+	hardBreaks := 0
+	for _, n := range inline {
+		if m, ok := n.(map[string]any); ok && m["type"] == "hardBreak" {
+			hardBreaks++
+		}
+	}
+	if hardBreaks != 2 {
+		t.Errorf("expected 2 hardBreak nodes between 3 lines, got %d. inline=%+v", hardBreaks, inline)
+	}
+
+	// Sanity: the three strong runs are still present.
+	strongCount := 0
+	for _, n := range inline {
+		m, ok := n.(map[string]any)
+		if !ok {
+			continue
+		}
+		marks, _ := m["marks"].([]any)
+		for _, mark := range marks {
+			if mm, ok := mark.(map[string]any); ok && mm["type"] == "strong" {
+				strongCount++
+			}
+		}
+	}
+	if strongCount < 3 {
+		t.Errorf("expected at least 3 strong-marked runs, got %d", strongCount)
+	}
+}
+
 func TestFromMarkdown_ValidJSON(t *testing.T) {
 	md := `# Title
 
