@@ -112,7 +112,7 @@ func (s *Server) registerJiraTools() {
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_jira_comment",
-			Description: "Add a comment to a Jira ticket.",
+			Description: "Add a comment to a Jira ticket. The body is parsed as Markdown and converted to ADF, so headings, lists, tables, code blocks, links, and emphasis render natively in Jira.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -122,7 +122,7 @@ func (s *Server) registerJiraTools() {
 					},
 					"comment": map[string]any{
 						"type":        "string",
-						"description": "Comment body text.",
+						"description": "Comment body in Markdown (GFM). Supports headings, bullet/ordered lists, tables, fenced code blocks, links, bold/italic, and inline code.",
 					},
 				},
 				"required": []string{"ticket", "comment"},

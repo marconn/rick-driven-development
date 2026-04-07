@@ -22,7 +22,7 @@ Thin REST client for the Jira Cloud API v3 with ADF formatting helpers, used by 
 - **Read**: `FetchIssue` (typed), `FetchRawIssue`/`GetIssue` (raw fields), `Search` (JQL via POST `/rest/api/3/search/jql` — GET endpoint deprecated by Atlassian), `FetchEpicChildren` (JQL `"Epic Link" = KEY`)
 - **Write**: `CreateIssue` (any type, with options), `CreateEpic`, `CreateTask`, `UpdateField` (single field PUT), `AddLabel` (additive update without clobbering), `SetMicroservice` (writes `customfield_11538` with `repo:<name>` label fallback)
 - **Transition**: `TransitionIssue` — looks up transitions, matches target status name case-insensitively, then POSTs the transition ID
-- **Comment**: `AddComment` — wraps body in minimal ADF doc
+- **Comment**: `AddComment` — runs body through `MarkdownToADF` so comments render headings/lists/tables/emphasis instead of raw Markdown
 - **Links**: `LinkIssues` (Blocks shortcut), `LinkIssuesWithType` (any link type), `FetchIssueLinks`, `DeleteIssueLink`
 - **PR links**: `FetchPRLinks` calls `/rest/dev-status/latest/issue/detail` (requires GitHub-for-Jira integration); resolves issue numeric ID first
 

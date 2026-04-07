@@ -542,24 +542,12 @@ func (c *Client) GetIssue(ctx context.Context, key string) (*RawIssue, error) {
 	return c.FetchRawIssue(ctx, key)
 }
 
-// AddComment posts a comment to a Jira issue using ADF format.
+// AddComment posts a comment to a Jira issue. The body is parsed as Markdown
+// and converted to ADF so headings, lists, tables, code spans, and emphasis
+// render properly in the Jira UI instead of leaking raw Markdown characters.
 func (c *Client) AddComment(ctx context.Context, key, body string) error {
 	commentBody := map[string]any{
-		"body": map[string]any{
-			"version": 1,
-			"type":    "doc",
-			"content": []any{
-				map[string]any{
-					"type": "paragraph",
-					"content": []any{
-						map[string]any{
-							"type": "text",
-							"text": body,
-						},
-					},
-				},
-			},
-		},
+		"body": MarkdownToADF(body),
 	}
 	payload, err := json.Marshal(commentBody)
 	if err != nil {
