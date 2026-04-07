@@ -494,6 +494,55 @@ Desktop application built with **Wails v2 + Svelte 5**. Provides a chat interfac
 
 **Design principle**: The agent UI only accesses Rick through MCP tools — no direct event store or bus access. All workflow operations go through the same MCP interface that Claude Desktop/Cursor use.
 
+## Subdirectory Navigation
+
+Every directory has a `CLAUDE.md` with a focused file map and the local rules. When working inside a subtree, **read the closest `CLAUDE.md` first** instead of grepping blind — they exist precisely so you can skip the discovery cost.
+
+```
+.
+├── CLAUDE.md                       ← you are here (architecture overview)
+├── cmd/                            → cmd/CLAUDE.md
+│   └── rick/                       → cmd/rick/CLAUDE.md          (binary entry point)
+├── internal/                       → internal/CLAUDE.md          (index of all packages, grouped by concern)
+│   ├── adf/                        → internal/adf/CLAUDE.md
+│   ├── backend/                    → internal/backend/CLAUDE.md
+│   ├── cli/                        → internal/cli/CLAUDE.md      (run.go DEPRECATED)
+│   ├── confluence/                 → internal/confluence/CLAUDE.md
+│   ├── engine/                     → internal/engine/CLAUDE.md   (aggregate, PersonaRunner, DAG dispatch)
+│   ├── estimation/                 → internal/estimation/CLAUDE.md
+│   ├── event/                      → internal/event/CLAUDE.md    (envelope + event type catalog)
+│   ├── eventbus/                   → internal/eventbus/CLAUDE.md
+│   ├── eventstore/                 → internal/eventstore/CLAUDE.md
+│   ├── github/                     → internal/github/CLAUDE.md
+│   ├── grpchandler/                → internal/grpchandler/CLAUDE.md
+│   │   └── proto/                  → internal/grpchandler/proto/CLAUDE.md
+│   ├── handler/                    → internal/handler/CLAUDE.md  (every concrete persona handler)
+│   ├── jira/                       → internal/jira/CLAUDE.md
+│   ├── jiraplanner/                → internal/jiraplanner/CLAUDE.md
+│   ├── jirapoller/                 → internal/jirapoller/CLAUDE.md
+│   ├── mcp/                        → internal/mcp/CLAUDE.md      (46 tools)
+│   ├── observe/                    → internal/observe/CLAUDE.md  (NB: not yet wired in)
+│   ├── persona/                    → internal/persona/CLAUDE.md
+│   │   ├── phases/                 → internal/persona/phases/CLAUDE.md   (per-phase user prompts)
+│   │   └── prompts/                → internal/persona/prompts/CLAUDE.md  (per-persona system prompts)
+│   ├── planning/                   → internal/planning/CLAUDE.md
+│   ├── pluginstore/                → internal/pluginstore/CLAUDE.md
+│   ├── projection/                 → internal/projection/CLAUDE.md
+│   ├── source/                     → internal/source/CLAUDE.md
+│   └── workspace/                  → internal/workspace/CLAUDE.md
+├── agent/                          → agent/CLAUDE.md             (rick-agent Wails desktop app — separate Go module)
+│   └── frontend/                   → agent/frontend/CLAUDE.md
+│       └── src/                    → agent/frontend/src/CLAUDE.md
+│           ├── lib/                → agent/frontend/src/lib/CLAUDE.md
+│           ├── stores/             → agent/frontend/src/stores/CLAUDE.md
+│           └── utils/              → agent/frontend/src/utils/CLAUDE.md
+├── deploy/                         → deploy/CLAUDE.md
+│   └── systemd-user/               → deploy/systemd-user/CLAUDE.md
+└── docs/                           → docs/CLAUDE.md              (architecture deep-dive + event-bus integration)
+```
+
+**Auto-generated, do NOT edit and do NOT document**: `agent/frontend/wailsjs/`, `agent/frontend/src/wailsjs/`. Both are produced by `wails build` / `wails generate module`.
+
 ## Conventions
 
 - All code in `internal/` — no public API exports
