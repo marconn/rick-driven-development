@@ -161,12 +161,13 @@ func RegisterAll(reg *Registry, d Deps) error {
 		NewQAJiraWriter(d),
 	}
 
-	// GitHub PR fetcher (before-hook for feedback-analyzer in pr-feedback workflow).
-	if d.GitHub != nil {
-		handlers = append(handlers,
-			gh.NewFetcherHandler(d.GitHub, d.Store, d.PluginStore, logger),
-		)
-	}
+	// GitHub PR fetcher — always registered so the pr-feedback DAG can reference
+	// it unconditionally. When d.GitHub is nil (GITHUB_TOKEN unset) the handler
+	// short-circuits inside Handle() with an empty enrichment instead of
+	// silently being absent from the registry.
+	handlers = append(handlers,
+		gh.NewFetcherHandler(d.GitHub, d.Store, d.PluginStore, logger),
+	)
 
 	// plan-btu workflow handlers.
 	planState := planning.NewPlanningState()

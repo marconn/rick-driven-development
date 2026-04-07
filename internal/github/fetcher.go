@@ -35,7 +35,26 @@ func (f *FetcherHandler) Name() string { return "github-pr-fetcher" }
 func (f *FetcherHandler) Subscribes() []event.Type { return nil }
 
 // Handle processes a dispatched event by fetching PR feedback from GitHub.
+//
+// When the GitHub client is nil (GITHUB_TOKEN unset), the handler short-circuits
+// with an empty enrichment so DAGs that include github-pr-fetcher can still
+// complete. Operators see a clear log line and an empty Summary in the event
+// store rather than a silently-skipped step or a hard failure.
 func (f *FetcherHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Envelope, error) {
+	if f.gh == nil {
+		f.logger.Warn("github-pr-fetcher: GITHUB_TOKEN unset, skipping PR fetch — feedback-analyzer will only see operator prompt",
+			slog.String("correlation", env.CorrelationID),
+		)
+		enrichment := event.ContextEnrichmentPayload{
+			Source:  "github-pr-fetcher",
+			Kind:    "pr-reviews",
+			Summary: "(GITHUB_TOKEN not configured — no PR reviews or inline comments fetched)",
+		}
+		return []event.Envelope{
+			event.New(event.ContextEnrichment, 1, event.MustMarshal(enrichment)),
+		}, nil
+	}
+
 	// Load WorkflowRequested (or WorkflowStarted) to get source field.
 	source, err := f.resolveSource(ctx, env)
 	if err != nil {

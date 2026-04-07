@@ -143,16 +143,24 @@ func PRReviewWorkflowDef() WorkflowDef {
 }
 
 // PRFeedbackWorkflowDef returns a workflow for addressing external PR review
-// feedback. Provisions workspace first, analyzer triages comments, context-snapshot
-// captures codebase state for dependency validation, developer implements fixes,
-// reviewer checks fixes, committer pushes.
+// feedback. Workspace provisioning and GitHub PR fetch run in parallel on
+// WorkflowStarted; the analyzer joins on both so it has the workspace ready
+// and the raw review payload (top-level reviews + inline diff comments + diff
+// summary) as ContextEnrichment before triaging. Then context-snapshot
+// captures codebase state, developer implements fixes, reviewer+qa validate,
+// quality-gate lints/tests, committer pushes.
+//
+// github-pr-fetcher is always in the Required set even when GITHUB_TOKEN is
+// unset — the handler itself short-circuits with an empty enrichment in that
+// case (see internal/github/fetcher.go). This keeps the DAG authoritative.
 func PRFeedbackWorkflowDef() WorkflowDef {
 	return WorkflowDef{
 		ID:       "pr-feedback",
-		Required: []string{"workspace", "feedback-analyzer", "context-snapshot", "developer", "reviewer", "qa", "quality-gate", "committer"},
+		Required: []string{"workspace", "github-pr-fetcher", "feedback-analyzer", "context-snapshot", "developer", "reviewer", "qa", "quality-gate", "committer"},
 		Graph: map[string][]string{
 			"workspace":         {},
-			"feedback-analyzer": {"workspace"},
+			"github-pr-fetcher": {},
+			"feedback-analyzer": {"workspace", "github-pr-fetcher"},
 			"context-snapshot":  {"feedback-analyzer"},
 			"developer":         {"context-snapshot"},
 			"reviewer":          {"developer"},
