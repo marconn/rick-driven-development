@@ -66,6 +66,7 @@ func (h *WorkspaceHandler) Handle(ctx context.Context, env event.Envelope) ([]ev
 		params.RepoBranch,
 		params.BaseBranch,
 		suffix,
+		env.CorrelationID,
 		params.Isolate,
 	)
 	if err != nil {

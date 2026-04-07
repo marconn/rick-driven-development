@@ -37,14 +37,14 @@ func setupTestRepo(t *testing.T, basePath, name string) string {
 
 func TestSetupWorkspace(t *testing.T) {
 	t.Run("given empty repo then returns error", func(t *testing.T) {
-		_, err := SetupWorkspace("", "PROJ-123", "", "", "", false)
+		_, err := SetupWorkspace("", "PROJ-123", "", "", "", "", false)
 		if err == nil || !strings.Contains(err.Error(), "repo is required") {
 			t.Fatalf("expected 'repo is required' error, got: %v", err)
 		}
 	})
 
 	t.Run("given empty ticket then returns error", func(t *testing.T) {
-		_, err := SetupWorkspace("myapp", "", "", "", "", false)
+		_, err := SetupWorkspace("myapp", "", "", "", "", "", false)
 		if err == nil || !strings.Contains(err.Error(), "ticket or branch is required") {
 			t.Fatalf("expected 'ticket or branch is required' error, got: %v", err)
 		}
@@ -52,7 +52,7 @@ func TestSetupWorkspace(t *testing.T) {
 
 	t.Run("given unset RICK_REPOS_PATH then returns error", func(t *testing.T) {
 		t.Setenv("RICK_REPOS_PATH", "")
-		_, err := SetupWorkspace("myapp", "PROJ-123", "", "", "", false)
+		_, err := SetupWorkspace("myapp", "PROJ-123", "", "", "", "", false)
 		if err == nil || !strings.Contains(err.Error(), "RICK_REPOS_PATH") {
 			t.Fatalf("expected RICK_REPOS_PATH error, got: %v", err)
 		}
@@ -61,7 +61,7 @@ func TestSetupWorkspace(t *testing.T) {
 	t.Run("given missing repo then returns error", func(t *testing.T) {
 		tmp := t.TempDir()
 		t.Setenv("RICK_REPOS_PATH", tmp)
-		_, err := SetupWorkspace("nonexistent", "PROJ-123", "", "", "", false)
+		_, err := SetupWorkspace("nonexistent", "PROJ-123", "", "", "", "", false)
 		if err == nil || !strings.Contains(err.Error(), "repository not found") {
 			t.Fatalf("expected 'repository not found' error, got: %v", err)
 		}
@@ -72,7 +72,7 @@ func TestSetupWorkspace(t *testing.T) {
 		t.Setenv("RICK_REPOS_PATH", tmp)
 		setupTestRepo(t, tmp, "myapp")
 
-		ws, err := SetupWorkspace("myapp", "PROJ-99999", "", "", "", false)
+		ws, err := SetupWorkspace("myapp", "PROJ-99999", "", "", "", "", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -102,7 +102,7 @@ func TestSetupWorkspace(t *testing.T) {
 		t.Setenv("RICK_REPOS_PATH", tmp)
 		setupTestRepo(t, tmp, "myapp")
 
-		ws, err := SetupWorkspace("myapp", "PROJ-88888", "", "", "", true)
+		ws, err := SetupWorkspace("myapp", "PROJ-88888", "", "", "", "", true)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -139,7 +139,7 @@ func TestSetupWorkspace(t *testing.T) {
 		t.Setenv("RICK_REPOS_PATH", tmp)
 		setupTestRepo(t, tmp, "myapp")
 
-		ws, err := SetupWorkspace("myapp", "PROJ-77777", "", "", "task1", true)
+		ws, err := SetupWorkspace("myapp", "PROJ-77777", "", "", "task1", "", true)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -150,6 +150,56 @@ func TestSetupWorkspace(t *testing.T) {
 		}
 		if _, err := os.Stat(expected); err != nil {
 			t.Fatalf("clone directory with suffix missing: %v", err)
+		}
+	})
+
+	t.Run("given isolated clone then drops .rick/workspace.yaml and excludes from git", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("RICK_REPOS_PATH", tmp)
+		setupTestRepo(t, tmp, "myapp")
+
+		ws, err := SetupWorkspace("myapp", "PROJ-MARKER", "", "", "abcd1234", "corr-xyz-789", true)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// .rick/workspace.yaml exists with the expected metadata.
+		markerPath := filepath.Join(ws.Path, ".rick", "workspace.yaml")
+		data, err := os.ReadFile(markerPath)
+		if err != nil {
+			t.Fatalf("marker missing: %v", err)
+		}
+		marker := string(data)
+		for _, want := range []string{
+			"branch: PROJ-MARKER",
+			"base: main",
+			"isolated: true",
+			"do_not_cd_out: true",
+			"correlation_id: corr-xyz-789",
+			"path: " + ws.Path,
+		} {
+			if !strings.Contains(marker, want) {
+				t.Errorf("marker missing %q\nfull marker:\n%s", want, marker)
+			}
+		}
+
+		// .git/info/exclude must contain .rick/ so the marker stays out of git.
+		excludeData, err := os.ReadFile(filepath.Join(ws.Path, ".git", "info", "exclude"))
+		if err != nil {
+			t.Fatalf("read exclude: %v", err)
+		}
+		if !strings.Contains(string(excludeData), ".rick/") {
+			t.Errorf("expected .rick/ in .git/info/exclude, got:\n%s", excludeData)
+		}
+
+		// git status must report a clean tree — if the marker leaks into the
+		// index, the commit phase will accidentally stage it.
+		status, err := runGit(ws.Path, "status", "--porcelain")
+		if err != nil {
+			t.Fatalf("git status: %v", err)
+		}
+		if status != "" {
+			t.Errorf("expected clean git status, got:\n%s", status)
 		}
 	})
 
@@ -164,7 +214,7 @@ func TestSetupWorkspace(t *testing.T) {
 		_, _ = runGit(repoPath, "checkout", "main")
 		_, _ = runGit(repoPath, "fetch", "origin")
 
-		ws, err := SetupWorkspace("myapp", "PROJ-66666", "", "develop", "", true)
+		ws, err := SetupWorkspace("myapp", "PROJ-66666", "", "develop", "", "", true)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -183,7 +233,7 @@ func TestSetupWorkspace(t *testing.T) {
 		_, _ = runGit(repoPath, "commit", "--allow-empty", "-m", "extra")
 		_, _ = runGit(repoPath, "checkout", "main")
 
-		ws, err := SetupWorkspace("myapp", "PROJ-55555", "", "", "", false)
+		ws, err := SetupWorkspace("myapp", "PROJ-55555", "", "", "", "", false)
 		if err != nil {
 			t.Fatalf("expected success when branch exists, got: %v", err)
 		}
@@ -214,7 +264,7 @@ func TestSetupWorkspace(t *testing.T) {
 		_ = os.MkdirAll(destPath, 0o755)
 		_ = os.WriteFile(filepath.Join(destPath, "stale-marker.txt"), []byte("old"), 0o644)
 
-		ws, err := SetupWorkspace("myapp", "PROJ-44444", "", "", "", true)
+		ws, err := SetupWorkspace("myapp", "PROJ-44444", "", "", "", "", true)
 		if err != nil {
 			t.Fatalf("expected success after cleaning stale destination, got: %v", err)
 		}
@@ -241,7 +291,7 @@ func TestSetupWorkspace(t *testing.T) {
 		_, _ = runGit(repoPath, "checkout", "-b", "PROJ-33333")
 		_, _ = runGit(repoPath, "checkout", "main")
 
-		ws, err := SetupWorkspace("myapp", "PROJ-33333", "", "", "", true)
+		ws, err := SetupWorkspace("myapp", "PROJ-33333", "", "", "", "", true)
 		if err != nil {
 			t.Fatalf("expected success for isolated setup with existing branch, got: %v", err)
 		}
@@ -266,7 +316,7 @@ func TestSetupWorkspace(t *testing.T) {
 		_, _ = runGit(repoPath, "fetch", "origin")
 
 		// Use branch override — ticket is different from the branch name.
-		ws, err := SetupWorkspace("myapp", "PROJ-33398", "PROJ-33393", "", "", false)
+		ws, err := SetupWorkspace("myapp", "PROJ-33398", "PROJ-33393", "", "", "", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -292,7 +342,7 @@ func TestSetupWorkspace(t *testing.T) {
 		_, _ = runGit(repoPath, "checkout", "main")
 		_, _ = runGit(repoPath, "fetch", "origin")
 
-		ws, err := SetupWorkspace("myapp", "", "feature-branch", "", "", false)
+		ws, err := SetupWorkspace("myapp", "", "feature-branch", "", "", "", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -307,7 +357,7 @@ func TestSetupWorkspace(t *testing.T) {
 		setupTestRepo(t, tmp, "myapp")
 
 		// Use a non-existent base branch to trigger a real failure.
-		_, err := SetupWorkspace("myapp", "PROJ-22222", "", "nonexistent-base", "", true)
+		_, err := SetupWorkspace("myapp", "PROJ-22222", "", "nonexistent-base", "", "", true)
 		if err == nil {
 			t.Fatal("expected error for invalid base branch")
 		}

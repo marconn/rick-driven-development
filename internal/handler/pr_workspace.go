@@ -64,7 +64,7 @@ func (h *PRWorkspaceHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	// SetupWorkspace resolves the full path from $RICK_REPOS_PATH/<repo>.
 	repoName := repoNameFromFull(fullRepo)
 
-	result, err := workspace.SetupWorkspace(repoName, headBranch, "", baseBranch, suffix, true)
+	result, err := workspace.SetupWorkspace(repoName, headBranch, "", baseBranch, suffix, env.CorrelationID, true)
 	if err != nil {
 		return nil, fmt.Errorf("pr-workspace: setup workspace: %w", err)
 	}

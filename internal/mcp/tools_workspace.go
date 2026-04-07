@@ -125,7 +125,7 @@ func (s *Server) toolWorkspaceSetup(_ context.Context, raw json.RawMessage) (any
 		base = "main"
 	}
 
-	result, err := workspace.SetupWorkspace(args.Repo, args.Ticket, "", base, args.Suffix, isolate)
+	result, err := workspace.SetupWorkspace(args.Repo, args.Ticket, "", base, args.Suffix, "", isolate)
 	if err != nil {
 		return nil, fmt.Errorf("workspace setup: %w", err)
 	}

@@ -44,6 +44,7 @@ type promptData struct {
 	FeedbackAnalysis string // output from feedback-analyze phase (PR feedback triage)
 	Ticket           string // jira ticket ID
 	BaseBranch       string // git base branch
+	WorkspacePath    string // isolated workspace path (set when running inside a Rick workspace)
 	Codebase         string // codebase context (file tree, key files)
 	Schema           string // schema context (proto, SQL, GraphQL)
 	GitContext       string // git context (log, diff, modified files)
@@ -86,9 +87,10 @@ func (b *PromptBuilder) Build(phase string, ctx PromptContext) (string, error) {
 		FeedbackAnalysis: ctx.Outputs["feedback-analyze"],
 		Ticket:           ctx.Ticket,
 		BaseBranch:       ctx.BaseBranch,
+		WorkspacePath:    ctx.WorkspacePath,
 		Codebase:         ctx.Codebase,
 		Schema:           ctx.Schema,
-		GitContext:        ctx.GitContext,
+		GitContext:       ctx.GitContext,
 		Enrichments:      formatEnrichments(ctx.Enrichments),
 	}
 
