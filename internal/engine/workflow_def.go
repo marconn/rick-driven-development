@@ -73,6 +73,9 @@ var corePhaseMap = map[string]string{
 
 // DevelopOnlyWorkflowDef returns a minimal workflow for quick dev tasks.
 // Provisions a workspace first, then developer → reviewer → committer.
+// RetriggeredBy enables the feedback loop: a VerdictRendered{fail} from the
+// committer (e.g. no changes detected) causes FeedbackGenerated which
+// re-triggers developer rather than deadlocking the workflow.
 func DevelopOnlyWorkflowDef() WorkflowDef {
 	return WorkflowDef{
 		ID:       "develop-only",
@@ -82,6 +85,9 @@ func DevelopOnlyWorkflowDef() WorkflowDef {
 			"developer": {"workspace"},
 			"reviewer":  {"developer"},
 			"committer": {"reviewer"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
 		},
 		MaxIterations: 3,
 		PhaseMap:      corePhaseMap,
