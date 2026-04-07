@@ -198,7 +198,7 @@ func TestGeminiBuildArgs(t *testing.T) {
 
 func TestStreamWriterClaudeEnvelope(t *testing.T) {
 	var buf bytes.Buffer
-	sw := NewStreamWriter(&buf, NewClaudePrintExtractor(), WithResultCheck(ClaudeCheckResult))
+	sw := NewStreamWriter(&buf, NewClaudePrintExtractor().ExtractFn(), WithResultCheck(ClaudeCheckResult))
 
 	events := []string{
 		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello "}}}`,
@@ -222,7 +222,7 @@ func TestStreamWriterClaudeEnvelope(t *testing.T) {
 
 func TestStreamWriterClaudeLegacy(t *testing.T) {
 	var buf bytes.Buffer
-	sw := NewStreamWriter(&buf, NewClaudePrintExtractor(), WithResultCheck(ClaudeCheckResult))
+	sw := NewStreamWriter(&buf, NewClaudePrintExtractor().ExtractFn(), WithResultCheck(ClaudeCheckResult))
 
 	events := []string{
 		`{"type":"assistant","subtype":"text","text":"Legacy output."}`,
@@ -246,7 +246,7 @@ func TestStreamWriterClaudeLegacy(t *testing.T) {
 func TestStreamWriterClaudePrintFallback(t *testing.T) {
 	// When no incremental text events fire, the result event's "result" field is used.
 	var buf bytes.Buffer
-	sw := NewStreamWriter(&buf, NewClaudePrintExtractor())
+	sw := NewStreamWriter(&buf, NewClaudePrintExtractor().ExtractFn())
 
 	events := []string{
 		`{"type":"result","result":"Fallback text."}`,
@@ -265,7 +265,7 @@ func TestStreamWriterClaudePrintFallback(t *testing.T) {
 
 func TestStreamWriterClaudeMaxTokens(t *testing.T) {
 	var buf bytes.Buffer
-	sw := NewStreamWriter(&buf, NewClaudePrintExtractor(), WithResultCheck(ClaudeCheckResult))
+	sw := NewStreamWriter(&buf, NewClaudePrintExtractor().ExtractFn(), WithResultCheck(ClaudeCheckResult))
 
 	events := []string{
 		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Trunc"}}}`,
@@ -280,6 +280,83 @@ func TestStreamWriterClaudeMaxTokens(t *testing.T) {
 
 	if got := sw.StopReason(); got != "max_tokens" {
 		t.Errorf("want stop_reason %q, got %q", "max_tokens", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Claude token extraction
+// ---------------------------------------------------------------------------
+
+func feedExtractor(t *testing.T, ext *ClaudePrintExtractor, lines []string) {
+	t.Helper()
+	var buf bytes.Buffer
+	sw := NewStreamWriter(&buf, ext.ExtractFn(), WithResultCheck(ClaudeCheckResult))
+	for _, line := range lines {
+		if _, err := sw.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	_ = sw.Close()
+}
+
+func TestClaudeTokenExtraction(t *testing.T) {
+	tests := []struct {
+		name       string
+		lines      []string
+		wantTokens int
+	}{
+		{
+			name: "result_event_authoritative",
+			lines: []string{
+				`{"type":"result","subtype":"success","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}}`,
+			},
+			wantTokens: 165, // 100+50+10+5
+		},
+		{
+			name: "message_start_plus_delta_no_result",
+			lines: []string{
+				`{"type":"message_start","message":{"usage":{"input_tokens":200,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}`,
+				`{"type":"message_delta","usage":{"output_tokens":75}}`,
+			},
+			wantTokens: 275, // 200+75
+		},
+		{
+			name: "result_wins_over_deltas",
+			lines: []string{
+				`{"type":"message_start","message":{"usage":{"input_tokens":200,"output_tokens":0}}}`,
+				`{"type":"message_delta","usage":{"output_tokens":30}}`,
+				`{"type":"message_delta","usage":{"output_tokens":75}}`,
+				`{"type":"result","subtype":"success","usage":{"input_tokens":210,"output_tokens":80,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`,
+			},
+			// result wins: 210+80 = 290, not 200+75=275
+			wantTokens: 290,
+		},
+		{
+			name:       "malformed_usage_json_returns_zero_no_panic",
+			lines:      []string{`{"type":"result","usage":{invalid}}`},
+			wantTokens: 0,
+		},
+		{
+			name: "stream_event_wrapped_result",
+			// stream_event envelope form — message_start and message_delta arrive
+			// wrapped; result arrives flat (the CLI always emits result flat).
+			lines: []string{
+				`{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":150,"output_tokens":0,"cache_creation_input_tokens":20,"cache_read_input_tokens":0}}}}`,
+				`{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":60}}}`,
+				`{"type":"result","subtype":"success","usage":{"input_tokens":160,"output_tokens":65,"cache_creation_input_tokens":20,"cache_read_input_tokens":0}}`,
+			},
+			wantTokens: 245, // result wins: 160+65+20+0
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ext := NewClaudePrintExtractor()
+			feedExtractor(t, ext, tt.lines)
+			if got := ext.TokensUsed(); got != tt.wantTokens {
+				t.Errorf("TokensUsed: want %d, got %d", tt.wantTokens, got)
+			}
+		})
 	}
 }
 
