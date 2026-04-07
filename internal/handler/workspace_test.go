@@ -253,8 +253,9 @@ func TestWorkspaceHandlerIsolatedUsesCorrelationSuffix(t *testing.T) {
 		t.Error("expected Isolated=true")
 	}
 
-	// Path should include correlation prefix as suffix: myrepo-PROJ-2001-abcd1234
-	expectedPath := filepath.Join(tmp, "myrepo-PROJ-2001-abcd1234")
+	// New canonical format: <repo>-rick-ws-<id> where id is the 8-char
+	// correlation prefix used as suffix by the workspace handler.
+	expectedPath := filepath.Join(tmp, "myrepo-rick-ws-abcd1234")
 	if payload.Path != expectedPath {
 		t.Errorf("expected path %s, got %s", expectedPath, payload.Path)
 	}

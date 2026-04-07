@@ -82,11 +82,31 @@ found:
 	isolated := false
 
 	if isolate {
-		// Build destination directory name: <repo>-<ticket>[-<suffix>]
-		destName := repo + "-" + ticket
-		if suffix != "" {
-			destName += "-" + suffix
+		// Build destination directory name: <repo>-rick-ws-<id>
+		// The "-rick-ws-" infix is the canonical marker that rick_workspace_list
+		// and rick_workspace_cleanup use to identify Rick-owned directories
+		// (see internal/mcp/tools_workspace.go safeWorkspacePath). Every caller
+		// — workflow-driven or manual MCP — produces the same structure so the
+		// pattern guard works uniformly and operators see a consistent layout.
+		//
+		// <id> resolution order:
+		//   1. `suffix`                — correlation-derived for workflows, or
+		//                                user-provided for manual MCP calls.
+		//   2. `ticket` (slash-sanitized) — fallback for manual MCP calls that
+		//                                omit suffix but pass a ticket.
+		//   3. `branch` (slash-sanitized) — last-resort fallback for branch-only
+		//                                setups with no suffix or ticket.
+		// At least one of suffix/ticket/branch must be non-empty (validated
+		// earlier: the repo+ticket-or-branch guard above covers this).
+		id := suffix
+		if id == "" {
+			fallback := ticket
+			if fallback == "" {
+				fallback = branch
+			}
+			id = strings.ReplaceAll(fallback, "/", "-")
 		}
+		destName := repo + "-rick-ws-" + id
 		destPath := filepath.Join(basePath, destName)
 
 		// Clean up stale isolated copy from a previous run.

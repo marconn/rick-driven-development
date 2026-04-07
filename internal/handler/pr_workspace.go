@@ -64,7 +64,12 @@ func (h *PRWorkspaceHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	// SetupWorkspace resolves the full path from $RICK_REPOS_PATH/<repo>.
 	repoName := repoNameFromFull(fullRepo)
 
-	result, err := workspace.SetupWorkspace(repoName, headBranch, "", baseBranch, suffix, env.CorrelationID, true)
+	// Pass headBranch via the `branch` override (not `ticket`) so naming is
+	// driven solely by the correlation-derived suffix: the resulting dir is
+	// `<repo>-rick-ws-<suffix>`, consistent with every other workflow. Feeding
+	// headBranch into the `ticket` slot used to leak slashes like "feature/xyz"
+	// into the directory name.
+	result, err := workspace.SetupWorkspace(repoName, "", headBranch, baseBranch, suffix, env.CorrelationID, true)
 	if err != nil {
 		return nil, fmt.Errorf("pr-workspace: setup workspace: %w", err)
 	}

@@ -112,7 +112,9 @@ func TestSetupWorkspace(t *testing.T) {
 		}
 
 		// Verify clone exists and is on correct branch.
-		clonePath := filepath.Join(tmp, "myapp-PROJ-88888")
+		// New canonical format: <repo>-rick-ws-<id>; with no suffix, id falls
+		// back to the ticket.
+		clonePath := filepath.Join(tmp, "myapp-rick-ws-PROJ-88888")
 		if ws.Path != clonePath {
 			t.Errorf("expected path %s, got: %s", clonePath, ws.Path)
 		}
@@ -144,7 +146,9 @@ func TestSetupWorkspace(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		expected := filepath.Join(tmp, "myapp-PROJ-77777-task1")
+		// New canonical format: <repo>-rick-ws-<id>; when a suffix is provided
+		// it wins over ticket as the id.
+		expected := filepath.Join(tmp, "myapp-rick-ws-task1")
 		if ws.Path != expected {
 			t.Errorf("expected path %s, got: %s", expected, ws.Path)
 		}
@@ -259,8 +263,10 @@ func TestSetupWorkspace(t *testing.T) {
 		t.Setenv("RICK_REPOS_PATH", tmp)
 		setupTestRepo(t, tmp, "myapp")
 
-		// Pre-create the destination with a marker file.
-		destPath := filepath.Join(tmp, "myapp-PROJ-44444")
+		// Pre-create the destination with a marker file. The destination name
+		// must match the new canonical format (<repo>-rick-ws-<id>) otherwise
+		// the stale-cleanup branch isn't exercised.
+		destPath := filepath.Join(tmp, "myapp-rick-ws-PROJ-44444")
 		_ = os.MkdirAll(destPath, 0o755)
 		_ = os.WriteFile(filepath.Join(destPath, "stale-marker.txt"), []byte("old"), 0o644)
 
@@ -363,7 +369,7 @@ func TestSetupWorkspace(t *testing.T) {
 		}
 
 		// The isolated copy should have been cleaned up.
-		clonePath := filepath.Join(tmp, "myapp-PROJ-22222")
+		clonePath := filepath.Join(tmp, "myapp-rick-ws-PROJ-22222")
 		if _, statErr := os.Stat(clonePath); !os.IsNotExist(statErr) {
 			t.Errorf("expected clone to be cleaned up, but it exists: %s", clonePath)
 		}
