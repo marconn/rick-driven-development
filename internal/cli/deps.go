@@ -10,11 +10,33 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/estimation"
 	"github.com/marconn/rick-event-driven-development/internal/eventbus"
 	gh "github.com/marconn/rick-event-driven-development/internal/github"
+	"github.com/marconn/rick-event-driven-development/internal/handler"
 	"github.com/marconn/rick-event-driven-development/internal/jira"
 	"github.com/marconn/rick-event-driven-development/internal/jirapoller"
 	"github.com/marconn/rick-event-driven-development/internal/planning"
 	"github.com/marconn/rick-event-driven-development/internal/pluginstore"
 )
+
+// parseBackendTimeout reads RICK_BACKEND_TIMEOUT from the environment.
+// Falls back to handler.DefaultBackendTimeout when unset or unparseable.
+// Setting it to "0" disables the timeout entirely (legacy behavior — only
+// useful for debugging long-running AI runs).
+func parseBackendTimeout(logger *slog.Logger) time.Duration {
+	v := os.Getenv("RICK_BACKEND_TIMEOUT")
+	if v == "" {
+		return handler.DefaultBackendTimeout
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		logger.Warn("RICK_BACKEND_TIMEOUT unparseable, using default",
+			slog.String("value", v),
+			slog.Duration("default", handler.DefaultBackendTimeout),
+			slog.Any("error", err),
+		)
+		return handler.DefaultBackendTimeout
+	}
+	return d
+}
 
 // openEstimationStore opens the estimation SQLite DB.
 // Returns nil (non-fatal) when the DB path is unavailable.

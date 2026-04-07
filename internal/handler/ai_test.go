@@ -3,12 +3,15 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/marconn/rick-event-driven-development/internal/backend"
 	"github.com/marconn/rick-event-driven-development/internal/event"
+	"github.com/marconn/rick-event-driven-development/internal/eventbus"
 	"github.com/marconn/rick-event-driven-development/internal/eventstore"
 	"github.com/marconn/rick-event-driven-development/internal/persona"
 )
@@ -35,24 +38,38 @@ func (m *mockBackend) Run(_ context.Context, req backend.Request) (*backend.Resp
 }
 
 // ---------------------------------------------------------------------------
-// Mock store (minimal: only LoadByCorrelation is needed by AIHandler)
+// Mock store (minimal: LoadByCorrelation + Append/Load to back AIRequestSent
+// inline persistence)
 // ---------------------------------------------------------------------------
 
 type mockStore struct {
 	correlationEvents map[string][]event.Envelope
+	aggregateEvents   map[string][]event.Envelope
 }
 
 func newMockStore() *mockStore {
-	return &mockStore{correlationEvents: make(map[string][]event.Envelope)}
+	return &mockStore{
+		correlationEvents: make(map[string][]event.Envelope),
+		aggregateEvents:   make(map[string][]event.Envelope),
+	}
 }
 
 func (s *mockStore) LoadByCorrelation(_ context.Context, correlationID string) ([]event.Envelope, error) {
 	return s.correlationEvents[correlationID], nil
 }
 
-// Unused Store interface methods — stub implementations.
-func (s *mockStore) Append(context.Context, string, int, []event.Envelope) error              { return nil }
-func (s *mockStore) Load(context.Context, string) ([]event.Envelope, error)                   { return nil, nil }
+// Append records events under the given aggregate ID. Used by AIHandler to
+// persist AIRequestSent inline.
+func (s *mockStore) Append(_ context.Context, aggregateID string, _ int, events []event.Envelope) error {
+	s.aggregateEvents[aggregateID] = append(s.aggregateEvents[aggregateID], events...)
+	return nil
+}
+
+// Load returns events for an aggregate ID — needed by AIHandler.persistRequestEvent
+// to compute the next version.
+func (s *mockStore) Load(_ context.Context, aggregateID string) ([]event.Envelope, error) {
+	return s.aggregateEvents[aggregateID], nil
+}
 func (s *mockStore) LoadFrom(context.Context, string, int) ([]event.Envelope, error)          { return nil, nil }
 func (s *mockStore) LoadAll(context.Context, int64, int) ([]eventstore.PositionedEvent, error) { return nil, nil }
 func (s *mockStore) LoadEvent(context.Context, string) (*event.Envelope, error)               { return nil, nil }
@@ -921,5 +938,186 @@ func TestAIHandlerPlainTextOutput(t *testing.T) {
 	}
 	if decoded != rawOutput {
 		t.Errorf("want decoded output %q, got %q", rawOutput, decoded)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bug 1 regression: AIRequestSent must be persisted+published BEFORE
+// backend.Run so a hung backend still leaves a forensic trail.
+//
+// Incident: 2d8b4b99-f8e8-4af4-917c-9102fa6ca33a — the developer claude
+// subprocess hung for 17 minutes; because Handle returned both events at
+// the end, the events table looked like the handler was never dispatched.
+// ---------------------------------------------------------------------------
+
+// recordingBus captures every Publish call so tests can assert ordering of
+// AIRequestSent vs the backend invocation.
+type recordingBus struct {
+	mu        sync.Mutex
+	published []event.Envelope
+}
+
+func (b *recordingBus) Publish(_ context.Context, env event.Envelope) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.published = append(b.published, env)
+	return nil
+}
+
+func (b *recordingBus) Subscribe(_ event.Type, _ eventbus.HandlerFunc, _ ...eventbus.SubscribeOption) func() {
+	return func() {}
+}
+
+func (b *recordingBus) SubscribeAll(_ eventbus.HandlerFunc, _ ...eventbus.SubscribeOption) func() {
+	return func() {}
+}
+
+func (b *recordingBus) Close() error { return nil }
+
+func (b *recordingBus) snapshot() []event.Envelope {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]event.Envelope, len(b.published))
+	copy(out, b.published)
+	return out
+}
+
+// hangingBackend blocks Run until ctx is cancelled, simulating the wedged
+// claude subprocess from the incident.
+type hangingBackend struct {
+	name      string
+	gotPrompt chan struct{} // closed once Run is reached
+}
+
+func (b *hangingBackend) Name() string { return b.name }
+
+func (b *hangingBackend) Run(ctx context.Context, _ backend.Request) (*backend.Response, error) {
+	close(b.gotPrompt)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestAIHandlerEmitsRequestBeforeBackend(t *testing.T) {
+	// When Bus is wired, AIRequestSent must hit the bus + store BEFORE
+	// backend.Run is even entered. This is the load-bearing fix for the
+	// 2d8b4b99 observability gap.
+	store := newMockStore()
+	corrID := "corr-trace"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "build something",
+		})).WithCorrelation(corrID),
+	}
+
+	bus := &recordingBus{}
+	be := &hangingBackend{name: "claude", gotPrompt: make(chan struct{})}
+
+	h := NewAIHandler(AIHandlerConfig{
+		Name:           "developer",
+		Phase:          "develop",
+		Persona:        persona.Developer,
+		Backend:        be,
+		Store:          store,
+		Bus:            bus,
+		Personas:       persona.DefaultRegistry(),
+		Builder:        persona.NewPromptBuilder(),
+		BackendTimeout: 100 * time.Millisecond, // force a quick fail so the test exits
+	})
+
+	env := event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID)
+
+	// Run Handle in a goroutine because the hanging backend will block
+	// until the timeout fires.
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.Handle(context.Background(), env)
+		done <- err
+	}()
+
+	// Wait for Run to be entered. By this point AIRequestSent must
+	// already be on the bus and in the store — that's the whole fix.
+	select {
+	case <-be.gotPrompt:
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend.Run never reached")
+	}
+
+	// Snapshot the bus + store BEFORE the backend timeout fires.
+	pubs := bus.snapshot()
+	if len(pubs) != 1 {
+		t.Fatalf("want 1 published event before backend.Run, got %d", len(pubs))
+	}
+	if pubs[0].Type != event.AIRequestSent {
+		t.Errorf("want AIRequestSent published first, got %s", pubs[0].Type)
+	}
+
+	aggregateID := corrID + ":persona:developer"
+	stored := store.aggregateEvents[aggregateID]
+	if len(stored) != 1 {
+		t.Fatalf("want 1 event persisted to %s, got %d", aggregateID, len(stored))
+	}
+	if stored[0].Type != event.AIRequestSent {
+		t.Errorf("want AIRequestSent persisted, got %s", stored[0].Type)
+	}
+	if stored[0].Version != 1 {
+		t.Errorf("want version 1, got %d", stored[0].Version)
+	}
+	if stored[0].CorrelationID != corrID {
+		t.Errorf("want correlation %q, got %q", corrID, stored[0].CorrelationID)
+	}
+
+	// Now wait for Handle to return — it should fail with the wrapped
+	// backend timeout error.
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected backend timeout error, got nil")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "deadline") {
+			t.Errorf("want deadline exceeded error, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Handle did not return after backend timeout")
+	}
+}
+
+func TestAIHandlerOmitsRequestEventWhenBusWired(t *testing.T) {
+	// Counterpart to the legacy [reqEvt, respEvt] test: with Bus wired,
+	// Handle returns ONLY AIResponseReceived because the request event
+	// has already been emitted inline.
+	store := newMockStore()
+	corrID := "corr-bus-wired"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "x",
+		})).WithCorrelation(corrID),
+	}
+
+	mb := &mockBackend{
+		name:     "claude",
+		response: &backend.Response{Output: "done", Duration: time.Second},
+	}
+
+	h := NewAIHandler(AIHandlerConfig{
+		Name:     "researcher",
+		Phase:    "research",
+		Persona:  persona.Researcher,
+		Backend:  mb,
+		Store:    store,
+		Bus:      &recordingBus{},
+		Personas: persona.DefaultRegistry(),
+		Builder:  persona.NewPromptBuilder(),
+	})
+
+	env := event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID)
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 returned event (response only), got %d", len(results))
+	}
+	if results[0].Type != event.AIResponseReceived {
+		t.Errorf("want AIResponseReceived, got %s", results[0].Type)
 	}
 }

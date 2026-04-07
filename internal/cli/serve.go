@@ -14,14 +14,14 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/marconn/rick-event-driven-development/internal/backend"
+	"github.com/marconn/rick-event-driven-development/internal/confluence"
 	"github.com/marconn/rick-event-driven-development/internal/engine"
 	"github.com/marconn/rick-event-driven-development/internal/eventbus"
 	"github.com/marconn/rick-event-driven-development/internal/eventstore"
 	"github.com/marconn/rick-event-driven-development/internal/grpchandler"
-	"github.com/marconn/rick-event-driven-development/internal/confluence"
-	"github.com/marconn/rick-event-driven-development/internal/jira"
 	pb "github.com/marconn/rick-event-driven-development/internal/grpchandler/proto"
 	"github.com/marconn/rick-event-driven-development/internal/handler"
+	"github.com/marconn/rick-event-driven-development/internal/jira"
 	"github.com/marconn/rick-event-driven-development/internal/mcp"
 	"github.com/marconn/rick-event-driven-development/internal/persona"
 	"github.com/marconn/rick-event-driven-development/internal/projection"
@@ -94,19 +94,21 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 
 	reg := handler.NewRegistry()
 	deps := handler.Deps{
-		Backend:     be,
-		Store:       store,
-		Personas:    personas,
-		Builder:     builder,
-		Jira:        jira.NewClientFromEnv(),
-		Confluence:  confluence.NewClientFromEnv(),
-		Estimation:  openEstimationStore(logger),
-		MsMap:       loadMicroserviceMap(logger),
-		GitHub:      ghClient,
-		PluginStore: pstore,
-		Logger:      logger,
-		WorkDir:     opts.workDir,
-		Yolo:        opts.yolo,
+		Backend:        be,
+		Store:          store,
+		Bus:            bus,
+		Personas:       personas,
+		Builder:        builder,
+		Jira:           jira.NewClientFromEnv(),
+		Confluence:     confluence.NewClientFromEnv(),
+		Estimation:     openEstimationStore(logger),
+		MsMap:          loadMicroserviceMap(logger),
+		GitHub:         ghClient,
+		PluginStore:    pstore,
+		Logger:         logger,
+		WorkDir:        opts.workDir,
+		Yolo:           opts.yolo,
+		BackendTimeout: parseBackendTimeout(logger),
 	}
 	if err := handler.RegisterAll(reg, deps); err != nil {
 		return fmt.Errorf("register handlers: %w", err)

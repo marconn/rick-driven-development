@@ -113,6 +113,12 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 
 	if err := cmd.Run(); err != nil {
 		_ = sw.Close()
+		// Prefer the context error when the deadline tripped — otherwise the
+		// caller sees "claude: signal: killed", which is the symptom (we
+		// SIGKILL'd the child) not the root cause (we timed out).
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("claude: %w (after %s)", ctxErr, time.Since(start))
+		}
 		return nil, fmt.Errorf("claude: %w", err)
 	}
 	_ = sw.Close()

@@ -78,17 +78,19 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 
 	reg := handler.NewRegistry()
 	deps := handler.Deps{
-		Backend:    be,
-		Store:      store,
-		Personas:   personas,
-		Builder:    builder,
-		Jira:       jira.NewClientFromEnv(),
-		Confluence: confluence.NewClientFromEnv(),
-		Estimation: openEstimationStore(logger),
-		MsMap:      loadMicroserviceMap(logger),
-		Logger:     logger,
-		WorkDir:    opts.workDir,
-		Yolo:       opts.yolo,
+		Backend:        be,
+		Store:          store,
+		Bus:            bus,
+		Personas:       personas,
+		Builder:        builder,
+		Jira:           jira.NewClientFromEnv(),
+		Confluence:     confluence.NewClientFromEnv(),
+		Estimation:     openEstimationStore(logger),
+		MsMap:          loadMicroserviceMap(logger),
+		Logger:         logger,
+		WorkDir:        opts.workDir,
+		Yolo:           opts.yolo,
+		BackendTimeout: parseBackendTimeout(logger),
 	}
 	if err := handler.RegisterAll(reg, deps); err != nil {
 		return fmt.Errorf("register handlers: %w", err)

@@ -7,27 +7,37 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/marconn/rick-event-driven-development/internal/backend"
 	"github.com/marconn/rick-event-driven-development/internal/event"
+	"github.com/marconn/rick-event-driven-development/internal/eventbus"
 	"github.com/marconn/rick-event-driven-development/internal/eventstore"
 	"github.com/marconn/rick-event-driven-development/internal/persona"
 )
 
 // AIHandler is the base handler for AI-powered workflow phases.
 // It loads context from the event store, builds prompts via the persona system,
-// calls an AI backend, and returns AIRequestSent + AIResponseReceived events.
+// calls an AI backend, and emits AIRequestSent + AIResponseReceived events.
+//
+// AIRequestSent is persisted+published BEFORE the backend call so a hung
+// subprocess leaves a forensic trail. Without this, an indefinitely-blocked
+// backend.Run would make the event log look like the handler was never
+// dispatched, masking dispatch-vs-backend bugs (see incident
+// 2d8b4b99-f8e8-4af4-917c-9102fa6ca33a).
 type AIHandler struct {
 	name     string
 	phase    string            // workflow phase this handler processes
 	persona  string            // persona name for system prompt
 	backend  backend.Backend   // AI provider (claude, gemini)
-	store    eventstore.Store  // for loading workflow context
+	store    eventstore.Store  // for loading workflow context + inline AIRequestSent persist
+	bus      eventbus.Bus      // optional: publishes AIRequestSent before backend.Run
 	registry *persona.Registry // for system prompt lookup
 	builder  *persona.PromptBuilder
-	workDir   string   // working directory for backend execution
-	yolo      bool     // skip permission checks
-	plainText bool     // skip structured JSON extraction, store raw text
+	workDir        string        // working directory for backend execution
+	yolo           bool          // skip permission checks
+	plainText      bool          // skip structured JSON extraction, store raw text
+	backendTimeout time.Duration // hard cap on backend.Run; 0 disables
 }
 
 // AIHandlerConfig configures an AI handler.
@@ -36,12 +46,22 @@ type AIHandlerConfig struct {
 	Phase   string            // workflow phase (e.g., "research", "develop")
 	Persona string            // persona name for system prompt
 	Backend backend.Backend   // AI backend to call
-	Store   eventstore.Store  // event store for context loading
+	Store   eventstore.Store  // event store for context loading + inline AIRequestSent persist
+	// Bus is optional. When non-nil, AIRequestSent is persisted to the
+	// persona-scoped aggregate AND published on the bus before backend.Run
+	// fires, so a hung backend leaves a forensic trail. Tests that don't
+	// care about observability can omit Bus and the handler falls back to
+	// returning AIRequestSent alongside the response.
+	Bus      eventbus.Bus
 	Personas *persona.Registry // persona registry for system prompts
 	Builder *persona.PromptBuilder
 	WorkDir   string  // working directory for backend execution
 	Yolo      bool    // skip permission checks
 	PlainText bool    // skip structured JSON extraction, store raw text
+	// BackendTimeout caps how long backend.Run may block. Zero means no
+	// timeout (legacy behavior). Production should always set this so a
+	// wedged claude/gemini subprocess fails fast instead of hanging.
+	BackendTimeout time.Duration
 }
 
 // NewAIHandler creates an AI handler with the given configuration.
@@ -52,11 +72,13 @@ func NewAIHandler(cfg AIHandlerConfig) *AIHandler {
 		persona:  cfg.Persona,
 		backend:  cfg.Backend,
 		store:    cfg.Store,
+		bus:      cfg.Bus,
 		registry: cfg.Personas,
 		builder:  cfg.Builder,
-		workDir:   cfg.WorkDir,
-		yolo:      cfg.Yolo,
-		plainText: cfg.PlainText,
+		workDir:        cfg.WorkDir,
+		yolo:           cfg.Yolo,
+		plainText:      cfg.PlainText,
+		backendTimeout: cfg.BackendTimeout,
 	}
 }
 
@@ -69,8 +91,9 @@ func (h *AIHandler) Subscribes() []event.Type { return nil }
 // Handle processes a triggering event by:
 // 1. Loading workflow context from the event store (previous outputs, feedback)
 // 2. Building system + user prompts via the persona system
-// 3. Calling the AI backend
-// 4. Returning AIRequestSent + AIResponseReceived events
+// 3. Persisting+publishing AIRequestSent (so a hung backend still leaves a trail)
+// 4. Calling the AI backend (with optional timeout)
+// 5. Returning AIResponseReceived (or [AIRequestSent, AIResponseReceived] when no Bus is wired)
 func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Envelope, error) {
 	pctx, err := h.buildPromptContext(ctx, env)
 	if err != nil {
@@ -87,7 +110,11 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		return nil, fmt.Errorf("handler %s: build prompt: %w", h.name, err)
 	}
 
-	// AIRequestSent
+	// Build AIRequestSent. When a Bus + Store + correlation are available we
+	// persist+publish it inline BEFORE calling backend.Run, so a hung
+	// subprocess still leaves a forensic trail in the event log. Otherwise
+	// we fall back to bundling it with the response (legacy behavior used
+	// by tests that don't wire a bus).
 	promptHash := sha256Short(userPrompt)
 	reqEvt := event.New(event.AIRequestSent, 1, event.MustMarshal(event.AIRequestPayload{
 		Phase:      h.phase,
@@ -96,14 +123,33 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		PromptHash: promptHash,
 	})).WithSource("handler:" + h.name)
 
+	emittedInline := false
+	if h.bus != nil && h.store != nil && env.CorrelationID != "" {
+		if persisted, ok := h.persistRequestEvent(ctx, env, reqEvt); ok {
+			reqEvt = persisted
+			emittedInline = true
+		}
+	}
+
 	// Use workspace path as working directory when available (overrides static workDir).
 	workDir := h.workDir
 	if pctx.WorkspacePath != "" {
 		workDir = pctx.WorkspacePath
 	}
 
+	// Wrap with a backend timeout when configured. This is the only escape
+	// hatch for a wedged claude/gemini subprocess — without it, cmd.Run()
+	// blocks until the per-correlation context is cancelled (i.e., the
+	// operator manually cancels the workflow).
+	backendCtx := ctx
+	if h.backendTimeout > 0 {
+		var cancel context.CancelFunc
+		backendCtx, cancel = context.WithTimeout(ctx, h.backendTimeout)
+		defer cancel()
+	}
+
 	// Call backend
-	resp, err := h.backend.Run(ctx, backend.Request{
+	resp, err := h.backend.Run(backendCtx, backend.Request{
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
 		WorkDir:      workDir,
@@ -132,7 +178,37 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		Output:     output,
 	})).WithSource("handler:" + h.name)
 
+	if emittedInline {
+		return []event.Envelope{respEvt}, nil
+	}
 	return []event.Envelope{reqEvt, respEvt}, nil
+}
+
+// persistRequestEvent appends AIRequestSent to the persona-scoped aggregate
+// and publishes it on the bus before backend.Run is called. Uses the same
+// load-current-version-then-append loop as engine.resultPersister so it
+// composes safely with feedback-loop iterations (where the same persona
+// aggregate already has events from prior cycles). Returns the versioned
+// envelope and true on success; on failure logs nothing and returns ok=false
+// so Handle falls back to the legacy "return alongside response" path —
+// observability is best-effort, never fail the handler over it.
+func (h *AIHandler) persistRequestEvent(ctx context.Context, env event.Envelope, reqEvt event.Envelope) (event.Envelope, bool) {
+	aggregateID := env.CorrelationID + ":persona:" + h.name
+	staged := reqEvt.WithCorrelation(env.CorrelationID).WithCausation(env.ID)
+
+	const maxAttempts = 3
+	for range maxAttempts {
+		currentVersion := 0
+		if existing, loadErr := h.store.Load(ctx, aggregateID); loadErr == nil && len(existing) > 0 {
+			currentVersion = existing[len(existing)-1].Version
+		}
+		versioned := staged.WithAggregate(aggregateID, currentVersion+1)
+		if appendErr := h.store.Append(ctx, aggregateID, currentVersion, []event.Envelope{versioned}); appendErr == nil {
+			_ = h.bus.Publish(ctx, versioned)
+			return versioned, true
+		}
+	}
+	return reqEvt, false
 }
 
 // buildPromptContext loads workflow state from the event store and constructs

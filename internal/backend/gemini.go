@@ -85,6 +85,11 @@ func (g *Gemini) Run(ctx context.Context, req Request) (*Response, error) {
 
 	if err := cmd.Run(); err != nil {
 		_ = sw.Close()
+		// Surface the context error when the deadline tripped so the caller
+		// sees the timeout, not the SIGKILL exit status.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("gemini: %w (after %s)", ctxErr, time.Since(start))
+		}
 		return nil, fmt.Errorf("gemini: %w", err)
 	}
 	_ = sw.Close()
