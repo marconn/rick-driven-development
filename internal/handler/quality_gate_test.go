@@ -39,16 +39,20 @@ exit 0
 
 // fakeStackCommandFail returns a script that emits NDJSON with a non-zero
 // inner exit_code for the specified check (command failed inside VM).
+// Detection is by substring match against any positional arg before --json,
+// so it works for both `./run.sh lint` and the wrapped form
+// `bash -c "./run.sh up && ./run.sh test"`.
 func fakeStackCommandFail(check string) string {
 	return `#!/bin/bash
-# Extract check name: last arg before --json
 args=("$@")
-check=""
+matched=0
 for arg in "${args[@]}"; do
     if [ "$arg" = "--json" ]; then break; fi
-    check="$arg"
+    if [[ "$arg" == *"./run.sh ` + check + `"* ]] || [ "$arg" = "` + check + `" ]; then
+        matched=1
+    fi
 done
-if [ "$check" = "` + check + `" ]; then
+if [ "$matched" = "1" ]; then
     cat <<'EOF'
 {"action":"create","code_copy_path":"/tmp/test","compose_file":"deployments/docker-compose.yml","container":"huli-tmp-test","ip":"10.0.0.1","name":"tmp-test","status":"success"}
 {"action":"run","exit_code":1,"kept":false,"output":"FAIL: some test error","stack":"tmp-test","status":"success"}
@@ -543,7 +547,8 @@ exit 0
 `)
 
 	h := &QualityGateHandler{store: newMockStore(), name: "quality-gate", stackBin: fakeStack, timeout: 42}
-	_, err := h.runCheck(context.Background(), "/ws/my-repo", "lint")
+	lintCheck := qualityCheck{name: "lint", command: []string{"./run.sh", "lint"}}
+	_, err := h.runCheck(context.Background(), "/ws/my-repo", lintCheck)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -583,7 +588,7 @@ sleep 60
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	_, err := h.runCheck(ctx, tmp, "lint")
+	_, err := h.runCheck(ctx, tmp, qualityCheck{name: "lint", command: []string{"./run.sh", "lint"}})
 	if err == nil {
 		t.Fatal("expected error from cancelled context, got nil")
 	}

@@ -17,6 +17,17 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/eventstore"
 )
 
+// qualityCheck pairs a logical check name (used in summaries and debug filenames)
+// with the actual command args passed to `stack run` after the workspace path.
+// Tests need a "setup → run" wrapper (e.g. `./run.sh up` before `./run.sh test`)
+// because each `stack run` is a one-shot VM — services started in a separate
+// invocation would be torn down with their VM. Compound shell commands ensure
+// setup and execution share the same VM.
+type qualityCheck struct {
+	name    string
+	command []string
+}
+
 // QualityGateHandler runs project-level quality checks (lint, test) inside an
 // isolated VM via `stack run --json`. The stack tool copies the workspace into a
 // temporary Multipass VM, executes ./run.sh lint and ./run.sh test at /code,
@@ -70,11 +81,21 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	// Run lint first, then test. Collect all failures before reporting.
 	// Track kept stacks so we can destroy them at the end — VMs must not
 	// survive across iterations; a failed gate means a fresh VM on retry.
+	//
+	// `test` is wrapped in `bash -c "./run.sh up && ./run.sh test"` because
+	// many repos (e.g. hulihealth-web) require services to be running before
+	// tests can exec into them. Each `stack run` is a one-shot VM, so up and
+	// test must share the same invocation.
 	var issues []event.Issue
 	var failSummaries []string
 	var keptStacks []string
 
-	for _, check := range []string{"lint", "test"} {
+	checks := []qualityCheck{
+		{name: "lint", command: []string{"./run.sh", "lint"}},
+		{name: "test", command: []string{"bash", "-c", "./run.sh up && ./run.sh test"}},
+	}
+
+	for _, check := range checks {
 		result, runErr := h.runCheck(ctx, wsPath, check)
 		if result.Kept && result.Stack != "" {
 			keptStacks = append(keptStacks, result.Stack)
@@ -87,11 +108,11 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 			}
 
 			// Save full raw output to debug file for operator inspection.
-			debugRef := h.saveDebugOutput(env.CorrelationID, check, result.Output)
+			debugRef := h.saveDebugOutput(env.CorrelationID, check.name, result.Output)
 
 			// Filter Docker noise before truncation so actual errors survive.
 			cleaned := filterDockerNoise(result.Output)
-			desc := fmt.Sprintf("./run.sh %s failed:\n%s", check, truncateOutput(cleaned, 2000))
+			desc := fmt.Sprintf("./run.sh %s failed:\n%s", check.name, truncateOutput(cleaned, 2000))
 			if debugRef != "" {
 				desc += "\n\n[full output: " + debugRef + "]"
 			}
@@ -101,7 +122,7 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 				Category:    "correctness",
 				Description: desc,
 			})
-			failSummaries = append(failSummaries, fmt.Sprintf("%s failed", check))
+			failSummaries = append(failSummaries, fmt.Sprintf("%s failed", check.name))
 		}
 	}
 
@@ -139,14 +160,15 @@ func (r *stackRunResult) isStackError() bool {
 	return false
 }
 
-// runCheck executes `stack run <wsPath> ./run.sh <check> --json --timeout <n>`
-// to run the quality check inside an isolated Multipass VM.
-func (h *QualityGateHandler) runCheck(ctx context.Context, wsPath, check string) (stackRunResult, error) {
-	cmd := exec.CommandContext(ctx, h.stackBin, "run", wsPath,
-		"./run.sh", check,
-		"--json",
-		"--timeout", fmt.Sprintf("%d", h.timeout),
-	)
+// runCheck executes `stack run <wsPath> <check.command...> --json --timeout <n>`
+// to run the quality check inside an isolated Multipass VM. The command is
+// supplied by the caller so that compound shell invocations (e.g.
+// `bash -c "./run.sh up && ./run.sh test"`) can share a single one-shot VM.
+func (h *QualityGateHandler) runCheck(ctx context.Context, wsPath string, check qualityCheck) (stackRunResult, error) {
+	args := []string{"run", wsPath}
+	args = append(args, check.command...)
+	args = append(args, "--json", "--timeout", fmt.Sprintf("%d", h.timeout))
+	cmd := exec.CommandContext(ctx, h.stackBin, args...)
 
 	// Separate stdout (JSON envelopes) from stderr (VM lifecycle noise) so
 	// that Docker image pulls and VM creation messages don't corrupt the
