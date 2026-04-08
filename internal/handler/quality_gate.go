@@ -160,14 +160,19 @@ func (r *stackRunResult) isStackError() bool {
 	return false
 }
 
-// runCheck executes `stack run <wsPath> <check.command...> --json --timeout <n>`
+// runCheck executes `stack run --json --timeout <n> <wsPath> -- <check.command...>`
 // to run the quality check inside an isolated Multipass VM. The command is
 // supplied by the caller so that compound shell invocations (e.g.
 // `bash -c "./run.sh up && ./run.sh test"`) can share a single one-shot VM.
+//
+// The `--` separator is mandatory: without it cobra parses flag-like args in
+// the inner command (e.g. `bash -c "…"`) and rejects them with
+// `unknown shorthand flag: 'c' in -c`, short-circuiting before the VM is ever
+// reached. Stack flags must appear before the separator so cobra consumes
+// them rather than passing them through to the command.
 func (h *QualityGateHandler) runCheck(ctx context.Context, wsPath string, check qualityCheck) (stackRunResult, error) {
-	args := []string{"run", wsPath}
+	args := []string{"run", "--json", "--timeout", fmt.Sprintf("%d", h.timeout), wsPath, "--"}
 	args = append(args, check.command...)
-	args = append(args, "--json", "--timeout", fmt.Sprintf("%d", h.timeout))
 	cmd := exec.CommandContext(ctx, h.stackBin, args...)
 
 	// Separate stdout (JSON envelopes) from stderr (VM lifecycle noise) so

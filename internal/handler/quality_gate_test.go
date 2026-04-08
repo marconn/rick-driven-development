@@ -39,15 +39,15 @@ exit 0
 
 // fakeStackCommandFail returns a script that emits NDJSON with a non-zero
 // inner exit_code for the specified check (command failed inside VM).
-// Detection is by substring match against any positional arg before --json,
-// so it works for both `./run.sh lint` and the wrapped form
-// `bash -c "./run.sh up && ./run.sh test"`.
+// Detection scans every positional arg for a substring match, so it works
+// for both `./run.sh lint` and the wrapped form
+// `bash -c "./run.sh up && ./run.sh test"`, regardless of where the `--`
+// separator sits in the command line.
 func fakeStackCommandFail(check string) string {
 	return `#!/bin/bash
 args=("$@")
 matched=0
 for arg in "${args[@]}"; do
-    if [ "$arg" = "--json" ]; then break; fi
     if [[ "$arg" == *"./run.sh ` + check + `"* ]] || [ "$arg" = "` + check + `" ]; then
         matched=1
     fi
@@ -529,7 +529,12 @@ exit 31
 
 // TestQualityGateRunCheckPassesCorrectArgs verifies that runCheck invokes
 // the stack binary with the expected argument format:
-// stack run <wsPath> ./run.sh <check> --json --timeout <n>
+// stack run --json --timeout <n> <wsPath> -- <check command...>
+//
+// Stack flags must appear before the repo path and command; the `--` separator
+// is mandatory so cobra does not try to parse flag-like args inside the inner
+// command (e.g. `bash -c "…"` would otherwise fail with
+// `unknown shorthand flag: 'c' in -c`).
 func TestQualityGateRunCheckPassesCorrectArgs(t *testing.T) {
 	tmp := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
@@ -547,8 +552,8 @@ exit 0
 `)
 
 	h := &QualityGateHandler{store: newMockStore(), name: "quality-gate", stackBin: fakeStack, timeout: 42}
-	lintCheck := qualityCheck{name: "lint", command: []string{"./run.sh", "lint"}}
-	_, err := h.runCheck(context.Background(), "/ws/my-repo", lintCheck)
+	testCheck := qualityCheck{name: "test", command: []string{"bash", "-c", "./run.sh up && ./run.sh test"}}
+	_, err := h.runCheck(context.Background(), "/ws/my-repo", testCheck)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -559,7 +564,7 @@ exit 0
 	}
 	args := strings.Split(strings.TrimSpace(string(argsRaw)), "\n")
 
-	want := []string{"run", "/ws/my-repo", "./run.sh", "lint", "--json", "--timeout", "42"}
+	want := []string{"run", "--json", "--timeout", "42", "/ws/my-repo", "--", "bash", "-c", "./run.sh up && ./run.sh test"}
 	if len(args) != len(want) {
 		t.Fatalf("expected %d args, got %d: %v", len(want), len(args), args)
 	}
