@@ -1508,32 +1508,16 @@ func TestDAGRelevance_CacheMissBlocksGraphHandler(t *testing.T) {
 // Regression tests for production workflow failures (2026-03-24)
 // ---------------------------------------------------------------------------
 
-// TestThreeWayJoinWithFailVerdict_PRReview reproduces the pr-review failure
-// where pr-consolidator never dispatched because qa's fail verdict blocked
-// the 3-way join. In review-only workflows (no RetriggeredBy), fail verdicts
-// are informational and must NOT block downstream joins.
-func TestThreeWayJoinWithFailVerdict_PRReview(t *testing.T) {
+// TestElevenWayJoinWithFailVerdict_PRReview tests the pr-review 11-way join gate.
+// Verifies that:
+// 1. pr-consolidator does NOT fire when only 10 of 11 reviewers complete
+// 2. pr-consolidator DOES fire when all 11 complete
+// 3. A fail verdict from one reviewer does not block the join (no RetriggeredBy)
+func TestElevenWayJoinWithFailVerdict_PRReview(t *testing.T) {
 	runner, store, bus, reg := newTestPersonaRunner(t)
 
-	runner.RegisterWorkflow(WorkflowDef{
-		ID: "pr-review",
-		Required: []string{
-			"pr-workspace", "pr-jira-context",
-			"architect", "reviewer", "qa",
-			"pr-consolidator", "pr-cleanup",
-		},
-		Graph: map[string][]string{
-			"pr-workspace":    {},
-			"pr-jira-context": {"pr-workspace"},
-			"architect":       {"pr-jira-context"},
-			"reviewer":        {"pr-jira-context"},
-			"qa":              {"pr-jira-context"},
-			"pr-consolidator": {"architect", "reviewer", "qa"},
-			"pr-cleanup":      {"pr-consolidator"},
-		},
-		MaxIterations: 1,
-		// No RetriggeredBy — review-only workflow.
-	})
+	def := PRReviewWorkflowDef()
+	runner.RegisterWorkflow(def)
 
 	consolidatorFired := make(chan struct{}, 1)
 	consolidator := &stubHandler{
@@ -1549,7 +1533,7 @@ func TestThreeWayJoinWithFailVerdict_PRReview(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	corrID := "corr-pr-review-3way"
+	corrID := "corr-pr-review-11way"
 
 	// Seed workflow.started
 	wsEvt := event.New(event.WorkflowStartedFor("pr-review"), 1, event.MustMarshal(event.WorkflowStartedPayload{
@@ -1566,51 +1550,65 @@ func TestThreeWayJoinWithFailVerdict_PRReview(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	// Seed architect: pass (no verdict event).
-	archAgg := corrID + ":persona:architect"
-	archPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
-		Persona: "architect", ChainDepth: 2,
-	})).WithAggregate(archAgg, 1).WithCorrelation(corrID)
-	if err := store.Append(ctx, archAgg, 0, []event.Envelope{archPC}); err != nil {
-		t.Fatalf("append architect: %v", err)
+	// Complete the first 10 reviewers. The last one (pr-hygiene) is held back
+	// to verify partial completion doesn't trigger the consolidator.
+	reviewers := prCategoryReviewers
+	for i, reviewer := range reviewers[:len(reviewers)-1] {
+		agg := corrID + ":persona:" + reviewer
+		var evts []event.Envelope
+
+		// Give pr-security a FAIL verdict to test that fail doesn't block the join.
+		if reviewer == "pr-security" {
+			verdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+				Phase: "develop", SourcePhase: "pr-category-review", Outcome: event.VerdictFail,
+				Summary: "SQL injection risk",
+				Issues:  []event.Issue{{Severity: "critical", Category: "security", Description: "SQL injection"}},
+			})).WithAggregate(agg, 1).WithCorrelation(corrID)
+			evts = append(evts, verdict)
+		}
+
+		pc := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+			Persona: reviewer, ChainDepth: 2,
+		})).WithAggregate(agg, len(evts)+1).WithCorrelation(corrID)
+		evts = append(evts, pc)
+
+		if err := store.Append(ctx, agg, 0, evts); err != nil {
+			t.Fatalf("append %s: %v", reviewer, err)
+		}
+
+		// Publish each PersonaCompleted.
+		if err := bus.Publish(ctx, pc); err != nil {
+			t.Fatalf("publish %s (#%d): %v", reviewer, i, err)
+		}
 	}
 
-	// Seed reviewer: pass verdict + PersonaCompleted.
-	revAgg := corrID + ":persona:reviewer"
-	revVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase: "develop", SourcePhase: "review", Outcome: event.VerdictPass,
-		Summary: "looks good",
-	})).WithAggregate(revAgg, 1).WithCorrelation(corrID)
-	revPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
-		Persona: "reviewer", ChainDepth: 2,
-	})).WithAggregate(revAgg, 2).WithCorrelation(corrID)
-	if err := store.Append(ctx, revAgg, 0, []event.Envelope{revVerdict, revPC}); err != nil {
-		t.Fatalf("append reviewer: %v", err)
-	}
-
-	// Seed qa: FAIL verdict + PersonaCompleted — the condition that blocked pr-consolidator.
-	qaAgg := corrID + ":persona:qa"
-	qaVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase: "develop", SourcePhase: "qa", Outcome: event.VerdictFail,
-		Summary: "missing tests", Issues: []event.Issue{{Severity: "minor", Category: "testing", Description: "no tests"}},
-	})).WithAggregate(qaAgg, 1).WithCorrelation(corrID)
-	qaPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
-		Persona: "qa", ChainDepth: 2,
-	})).WithAggregate(qaAgg, 2).WithCorrelation(corrID)
-	if err := store.Append(ctx, qaAgg, 0, []event.Envelope{qaVerdict, qaPC}); err != nil {
-		t.Fatalf("append qa: %v", err)
-	}
-
-	// Publish PersonaCompleted{qa} — the last predecessor. pr-consolidator MUST fire.
-	if err := bus.Publish(ctx, qaPC); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-
+	// Wait briefly — consolidator must NOT have fired yet (only 10 of 11 done).
 	select {
 	case <-consolidatorFired:
-		// Expected: 3-way join satisfied despite qa's fail verdict.
+		t.Fatal("pr-consolidator fired with only 10 of 11 reviewers complete — join gate is broken")
+	case <-time.After(300 * time.Millisecond):
+		// Expected: still waiting for the 11th reviewer.
+	}
+
+	// Complete the last reviewer (pr-hygiene).
+	lastReviewer := reviewers[len(reviewers)-1]
+	lastAgg := corrID + ":persona:" + lastReviewer
+	lastPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: lastReviewer, ChainDepth: 2,
+	})).WithAggregate(lastAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, lastAgg, 0, []event.Envelope{lastPC}); err != nil {
+		t.Fatalf("append %s: %v", lastReviewer, err)
+	}
+	if err := bus.Publish(ctx, lastPC); err != nil {
+		t.Fatalf("publish %s: %v", lastReviewer, err)
+	}
+
+	// Now consolidator MUST fire — all 11 predecessors complete.
+	select {
+	case <-consolidatorFired:
+		// Expected: 11-way join satisfied despite pr-security's fail verdict.
 	case <-time.After(2 * time.Second):
-		t.Error("pr-consolidator must fire in review-only workflow despite qa fail verdict (3-way join)")
+		t.Error("pr-consolidator must fire when all 11 category reviewers complete (11-way join)")
 	}
 }
 
