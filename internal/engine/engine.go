@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"sync"
 
 	"github.com/marconn/rick-event-driven-development/internal/event"
@@ -31,16 +33,63 @@ type Engine struct {
 	eventCh chan event.Envelope
 	stopCh  chan struct{} // signals processLoop to drain and exit
 	done    chan struct{} // closed when processLoop exits
+
+	// Workflow concurrency throttle. Limits how many workflows can be
+	// running simultaneously. Owned exclusively by the processLoop goroutine.
+	throttle *workflowThrottle
 }
 
 // NewEngine creates a new workflow lifecycle engine.
 func NewEngine(store eventstore.Store, bus eventbus.Bus, logger *slog.Logger) *Engine {
-	return &Engine{
+	e := &Engine{
 		store:     store,
 		bus:       bus,
 		logger:    logger,
 		workflows: make(map[string]WorkflowDef),
 	}
+	e.initThrottleFromEnv()
+	return e
+}
+
+// initThrottleFromEnv reads RICK_MAX_WORKFLOWS and initializes the throttle.
+func (e *Engine) initThrottleFromEnv() {
+	raw := os.Getenv("RICK_MAX_WORKFLOWS")
+	if raw == "" {
+		return
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		e.logger.Warn("engine: ignoring invalid RICK_MAX_WORKFLOWS",
+			slog.String("value", raw),
+		)
+		return
+	}
+	if n > 0 {
+		e.throttle = newWorkflowThrottle(n, e.logger)
+		e.logger.Info("engine: workflow throttle enabled",
+			slog.Int("max_concurrent", n),
+		)
+	}
+}
+
+// SetMaxConcurrentWorkflows sets the maximum number of concurrently running
+// workflows. Must be called before Start(). A value of 0 disables throttling.
+func (e *Engine) SetMaxConcurrentWorkflows(n int) {
+	if n <= 0 {
+		e.throttle = nil
+		return
+	}
+	e.throttle = newWorkflowThrottle(n, e.logger)
+}
+
+// WarmThrottle seeds the throttle's running set with workflow IDs that were
+// already running before a restart. Called by RecoveryScanner after projections
+// have caught up.
+func (e *Engine) WarmThrottle(runningIDs []string) {
+	if e.throttle == nil {
+		return
+	}
+	e.throttle.warmRunning(runningIDs)
 }
 
 // OnWorkflowRegistered sets a callback that fires whenever a workflow
@@ -161,6 +210,23 @@ func (e *Engine) processAndLog(env event.Envelope) {
 }
 
 func (e *Engine) processDecision(ctx context.Context, env event.Envelope) error {
+	// Throttle: queue WorkflowRequested if at capacity.
+	if env.Type == event.WorkflowRequested && e.throttle != nil && e.throttle.shouldQueue() {
+		e.throttle.enqueue(env)
+		return nil
+	}
+
+	// Track incoming terminal events that are external (WorkflowCancelled).
+	// These arrive from operator actions, not from Decide.
+	if env.Type == event.WorkflowCancelled && e.throttle != nil {
+		corrID := env.CorrelationID
+		if corrID == "" {
+			corrID = env.AggregateID
+		}
+		e.throttle.removeRunning(corrID)
+		e.throttle.removeQueued(corrID)
+	}
+
 	aggID := e.resolveWorkflowAggregateID(env)
 
 	newEvents, err := e.tryProcessDecision(ctx, aggID, env)
@@ -169,6 +235,16 @@ func (e *Engine) processDecision(ctx context.Context, env event.Envelope) error 
 	}
 
 	for _, ne := range newEvents {
+		// Track state transitions for throttle.
+		if e.throttle != nil {
+			if event.IsWorkflowStarted(ne.Type) {
+				e.throttle.addRunning(ne.CorrelationID)
+			}
+			if ne.Type == event.WorkflowCompleted || ne.Type == event.WorkflowFailed {
+				e.throttle.removeRunning(ne.CorrelationID)
+			}
+		}
+
 		if pubErr := e.bus.Publish(ctx, ne); pubErr != nil {
 			e.logger.Error("engine: publish failed",
 				slog.String("event_type", string(ne.Type)),
@@ -176,7 +252,36 @@ func (e *Engine) processDecision(ctx context.Context, env event.Envelope) error 
 			)
 		}
 	}
+
+	// Drain queued workflows into freed slots.
+	e.drainThrottleQueue(ctx)
+
 	return nil
+}
+
+// drainThrottleQueue processes queued WorkflowRequested events until the
+// throttle is at capacity again or the queue is empty.
+func (e *Engine) drainThrottleQueue(ctx context.Context) {
+	if e.throttle == nil {
+		return
+	}
+	for !e.throttle.shouldQueue() {
+		next, ok := e.throttle.dequeue()
+		if !ok {
+			return
+		}
+		e.logger.Info("engine: dequeuing throttled workflow",
+			slog.String("aggregate_id", next.AggregateID),
+			slog.Int("running", e.throttle.runningCount()),
+			slog.Int("queued", e.throttle.queuedCount()),
+		)
+		if err := e.processDecision(ctx, next); err != nil {
+			e.logger.Error("engine: process queued workflow failed",
+				slog.String("aggregate_id", next.AggregateID),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
 }
 
 // tryProcessDecision performs a single load-track-decide-append cycle.

@@ -444,6 +444,7 @@ Serve mode defaults to `--yolo=true` (auto-approves AI backend tool permissions)
 | Variable | Effect |
 |----------|--------|
 | `RICK_DISABLE_QUALITY_GATE` | When non-empty, removes quality-gate from all workflow DAGs. Committer depends directly on `[reviewer, qa]`. Use on machines that lack Multipass/VM support. Affects `workspace-dev`, `jira-dev`, `ci-fix`. |
+| `RICK_MAX_WORKFLOWS` | Maximum number of concurrently running workflows (default: `0` = unlimited). Excess `WorkflowRequested` events are queued and auto-started when a slot frees up. Useful for resource-constrained machines and wave launches. |
 | `RICK_REPOS_PATH` | Root directory for isolated workspaces and repo clones. Required by workspace/wave tools. |
 | `RICK_CLAUDE_BIN` | Path to claude CLI binary (default: `claude`). |
 | `RICK_GEMINI_BIN` | Path to gemini CLI binary (default: `gemini`). |

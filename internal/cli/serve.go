@@ -187,6 +187,16 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 	personaRunner.Start(ctx, reg)
 	defer func() { _ = personaRunner.Close() }()
 
+	// Recovery: resume in-flight workflows from before restart.
+	scanner := engine.NewRecoveryScanner(store, workflows, personaRunner, eng, logger)
+	if result := scanner.Recover(ctx); result.Recovered > 0 || result.PausedRestored > 0 || result.Errors > 0 {
+		logger.Info("recovery: scan complete",
+			slog.Int("recovered", result.Recovered),
+			slog.Int("paused_restored", result.PausedRestored),
+			slog.Int("errors", result.Errors),
+		)
+	}
+
 	// Optional services — start if configured.
 	startOptionalServices(ctx, bus, deps.Jira, ghClient, pstore, logger)
 

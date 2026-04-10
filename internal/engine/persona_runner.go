@@ -198,7 +198,55 @@ func (r *PersonaRunner) RegisterWorkflow(def WorkflowDef) {
 	r.resolver.registerWorkflow(def)
 }
 
+// RecoverDispatch directly enqueues a handler for dispatch, bypassing the bus.
+// Used by RecoveryScanner to resume handlers that were in-flight before restart.
+// Returns an error if the handler is not found or the join condition is not met.
+func (r *PersonaRunner) RecoverDispatch(handlerName string, env event.Envelope) error {
+	r.handlersMu.RLock()
+	h, ok := r.handlers[handlerName]
+	r.handlersMu.RUnlock()
+	if !ok {
+		return fmt.Errorf("persona runner: recover dispatch: handler %q not found", handlerName)
+	}
 
+	// Safety: verify join condition against the store.
+	afterPersonas := r.resolver.effectiveAfterPersonas(h, env.CorrelationID, r.hooks)
+	if len(afterPersonas) > 0 && env.CorrelationID != "" {
+		satisfied, _ := r.resolver.checkJoinCondition(r.ctx, afterPersonas, env.CorrelationID)
+		if !satisfied {
+			return fmt.Errorf("persona runner: recover dispatch: join unsatisfied for %q", handlerName)
+		}
+	}
+
+	if r.pauser.isPaused(env.CorrelationID) {
+		r.pauser.addBlocked(env.CorrelationID, h, env)
+		r.logger.Info("persona runner: recovery deferred (workflow paused)",
+			slog.String("handler", handlerName),
+			slog.String("correlation", env.CorrelationID),
+		)
+		return nil
+	}
+
+	r.logger.Info("persona runner: recovery dispatch",
+		slog.String("handler", handlerName),
+		slog.String("correlation", env.CorrelationID),
+		slog.String("trigger_type", string(env.Type)),
+	)
+	r.enqueueAndDrain(h, env, 0)
+	return nil
+}
+
+// WarmCorrelationCache populates the correlationID→workflowID mapping for
+// workflows that existed before this server instance started.
+func (r *PersonaRunner) WarmCorrelationCache(correlationID, workflowID string) {
+	r.resolver.cacheWorkflowID(correlationID, workflowID)
+}
+
+// WarmPauseState marks a correlation as paused in the pause controller.
+// Used by the recovery scanner to restore pause state from durable aggregate status.
+func (r *PersonaRunner) WarmPauseState(correlationID string) {
+	r.pauser.pause(correlationID)
+}
 
 // Start subscribes all handlers to the bus using DAG-based event resolution.
 // Handlers are subscribed based on their role across all registered workflows'
