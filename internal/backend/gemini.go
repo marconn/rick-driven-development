@@ -79,6 +79,9 @@ func (g *Gemini) Run(ctx context.Context, req Request) (*Response, error) {
 	sw := NewStreamWriter(inner, ExtractGeminiText, WithResultCheck(GeminiCheckResult))
 	cmd.Stdout = sw
 
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
 	if stdinPrompt != "" {
 		cmd.Stdin = strings.NewReader(stdinPrompt)
 	}
@@ -89,6 +92,9 @@ func (g *Gemini) Run(ctx context.Context, req Request) (*Response, error) {
 		// sees the timeout, not the SIGKILL exit status.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("gemini: %w (after %s)", ctxErr, time.Since(start))
+		}
+		if stderr := strings.TrimSpace(stderrBuf.String()); stderr != "" {
+			return nil, fmt.Errorf("gemini: %w: %s", err, stderr)
 		}
 		return nil, fmt.Errorf("gemini: %w", err)
 	}

@@ -105,6 +105,9 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 	sw := NewStreamWriter(inner, extractor.ExtractFn(), WithResultCheck(ClaudeCheckResult))
 	cmd.Stdout = sw
 
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
 	if stdinPrompt != "" {
 		cmd.Stdin = strings.NewReader(stdinPrompt)
 	}
@@ -118,6 +121,9 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 		// SIGKILL'd the child) not the root cause (we timed out).
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("claude: %w (after %s)", ctxErr, time.Since(start))
+		}
+		if stderr := strings.TrimSpace(stderrBuf.String()); stderr != "" {
+			return nil, fmt.Errorf("claude: %w: %s", err, stderr)
 		}
 		return nil, fmt.Errorf("claude: %w", err)
 	}
