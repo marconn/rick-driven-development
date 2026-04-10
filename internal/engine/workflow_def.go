@@ -118,26 +118,37 @@ func WorkspaceDevWorkflowDef() WorkflowDef {
 	}
 }
 
-// PRReviewWorkflowDef returns the pr-review v2 workflow definition.
-// Flow: pr-workspace → pr-jira-context → architect + reviewer + qa (parallel)
+// prCategoryReviewers lists the 11 dedicated single-concern reviewers
+// for the pr-review workflow. Order matches the consolidator output.
+var prCategoryReviewers = []string{
+	"pr-security", "pr-concurrency", "pr-error-handling",
+	"pr-observability", "pr-api-contract", "pr-idempotency",
+	"pr-testing", "pr-integration", "pr-performance",
+	"pr-data", "pr-hygiene",
+}
+
+// PRReviewWorkflowDef returns the pr-review workflow definition.
+// Flow: pr-workspace → pr-jira-context → 11 category reviewers (parallel)
 // → pr-consolidator (posts consolidated GitHub comment) → pr-cleanup.
 func PRReviewWorkflowDef() WorkflowDef {
+	required := []string{"pr-workspace", "pr-jira-context"}
+	required = append(required, prCategoryReviewers...)
+	required = append(required, "pr-consolidator", "pr-cleanup")
+
+	graph := map[string][]string{
+		"pr-workspace":    {},
+		"pr-jira-context": {"pr-workspace"},
+		"pr-consolidator": prCategoryReviewers,
+		"pr-cleanup":      {"pr-consolidator"},
+	}
+	for _, reviewer := range prCategoryReviewers {
+		graph[reviewer] = []string{"pr-jira-context"}
+	}
+
 	return WorkflowDef{
-		ID: "pr-review",
-		Required: []string{
-			"pr-workspace", "pr-jira-context",
-			"architect", "reviewer", "qa",
-			"pr-consolidator", "pr-cleanup",
-		},
-		Graph: map[string][]string{
-			"pr-workspace":    {},
-			"pr-jira-context": {"pr-workspace"},
-			"architect":       {"pr-jira-context"},
-			"reviewer":        {"pr-jira-context"},
-			"qa":              {"pr-jira-context"},
-			"pr-consolidator": {"architect", "reviewer", "qa"},
-			"pr-cleanup":      {"pr-consolidator"},
-		},
+		ID:            "pr-review",
+		Required:      required,
+		Graph:         graph,
 		MaxIterations: 1,
 	}
 }

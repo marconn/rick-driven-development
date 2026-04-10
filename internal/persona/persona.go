@@ -25,6 +25,19 @@ const (
 	ContextSnapshot  = "context-snapshot"
 	FeedbackAnalyzer = "feedback-analyzer"
 	PRConsolidator   = "pr-consolidator"
+
+	// PR category review personas — dedicated single-concern reviewers for pr-review workflow.
+	PRSecurity      = "pr-security"
+	PRConcurrency   = "pr-concurrency"
+	PRErrorHandling = "pr-error-handling"
+	PRObservability = "pr-observability"
+	PRAPIContract   = "pr-api-contract"
+	PRIdempotency   = "pr-idempotency"
+	PRTesting       = "pr-testing"
+	PRIntegration   = "pr-integration"
+	PRPerformance   = "pr-performance"
+	PRData          = "pr-data"
+	PRHygiene       = "pr-hygiene"
 )
 
 // PhasePersona maps a workflow phase name to its default persona.
@@ -76,6 +89,18 @@ func DefaultRegistry() *Registry {
 		{Name: QAAnalyzer, Description: "QA Steps Generator"},
 		{Name: FeedbackAnalyzer, Description: "PR Feedback Triage Analyst"},
 		{Name: PRConsolidator, Description: "PR Review Consolidator"},
+		// PR category review personas.
+		{Name: PRSecurity, Description: "Security Reviewer"},
+		{Name: PRConcurrency, Description: "Concurrency Reviewer"},
+		{Name: PRErrorHandling, Description: "Error Handling Reviewer"},
+		{Name: PRObservability, Description: "Observability Reviewer"},
+		{Name: PRAPIContract, Description: "API Contract Reviewer"},
+		{Name: PRIdempotency, Description: "Idempotency Reviewer"},
+		{Name: PRTesting, Description: "Testing Reviewer"},
+		{Name: PRIntegration, Description: "Integration Reviewer"},
+		{Name: PRPerformance, Description: "Performance Reviewer"},
+		{Name: PRData, Description: "Data Integrity Reviewer"},
+		{Name: PRHygiene, Description: "Code Hygiene Reviewer"},
 	} {
 		_ = r.Register(&p)
 	}

@@ -116,6 +116,52 @@ func RegisterAll(reg *Registry, d Deps) error {
 		NewPRConsolidator(d),
 		NewPRCleanup(d),
 
+		// PR category reviewers — dedicated single-concern reviewers for pr-review workflow.
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:    aiCfg("pr-security", "pr-category-review", persona.PRSecurity),
+			TargetPhase: "develop",
+		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:    aiCfg("pr-concurrency", "pr-category-review", persona.PRConcurrency),
+			TargetPhase: "develop",
+		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:    aiCfg("pr-error-handling", "pr-category-review", persona.PRErrorHandling),
+			TargetPhase: "develop",
+		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:    aiCfg("pr-observability", "pr-category-review", persona.PRObservability),
+			TargetPhase: "develop",
+		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:    aiCfg("pr-api-contract", "pr-category-review", persona.PRAPIContract),
+			TargetPhase: "develop",
+		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:    aiCfg("pr-idempotency", "pr-category-review", persona.PRIdempotency),
+			TargetPhase: "develop",
+		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:    aiCfg("pr-testing", "pr-category-review", persona.PRTesting),
+			TargetPhase: "develop",
+		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:    aiCfg("pr-integration", "pr-category-review", persona.PRIntegration),
+			TargetPhase: "develop",
+		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:    aiCfg("pr-performance", "pr-category-review", persona.PRPerformance),
+			TargetPhase: "develop",
+		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:    aiCfg("pr-data", "pr-category-review", persona.PRData),
+			TargetPhase: "develop",
+		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:    aiCfg("pr-hygiene", "pr-category-review", persona.PRHygiene),
+			TargetPhase: "develop",
+		}),
+
 		// Jira context handler (jira-dev workflow).
 		NewJiraContext(d),
 

@@ -430,8 +430,8 @@ func TestParseIssuesFromFail(t *testing.T) {
 	}
 
 	// Category classification
-	if issues[2].Category != "style" {
-		t.Errorf("issue[2] (naming): want style, got %q", issues[2].Category)
+	if issues[2].Category != "good_hygiene" {
+		t.Errorf("issue[2] (naming): want good_hygiene, got %q", issues[2].Category)
 	}
 }
 
@@ -469,8 +469,16 @@ func TestClassifySeverity(t *testing.T) {
 	}{
 		{"SQL injection in user input", "critical"},
 		{"Security vulnerability in auth", "critical"},
+		{"Hardcoded credential in config", "critical"},
+		{"XSS in template output", "critical"},
+		{"Deadlock between goroutines", "critical"},
+		{"Data loss on failed transaction", "critical"},
 		{"Missing error handling", "major"},
 		{"Race condition in cache", "major"},
+		{"Goroutine leak in worker pool", "major"},
+		{"Breaking change to API contract", "major"},
+		{"Silent failure in background job", "major"},
+		{"Partial write on multi-table update", "major"},
 		{"Rename variable for clarity", "minor"},
 	}
 	for _, tc := range tests {
@@ -486,12 +494,62 @@ func TestClassifyCategory(t *testing.T) {
 		desc string
 		want string
 	}{
+		// security
 		{"SQL injection vulnerability", "security"},
 		{"Auth bypass risk", "security"},
+		{"Hardcoded credential in config", "security"},
+		{"XSS vulnerability in template", "security"},
+		{"CSRF token missing", "security"},
+		// concurrency
+		{"Race condition in cache update", "concurrency"},
+		{"Deadlock between mutex acquisitions", "concurrency"},
+		{"Goroutine leak in worker pool", "concurrency"},
+		{"Channel misuse causes panic", "concurrency"},
+		{"Concurrent map access without lock", "concurrency"},
+		{"TOCTOU bug in file creation", "concurrency"},
+		// error_handling
+		{"Error handling missing in handler", "error_handling"},
+		{"Swallowed error in database call", "error_handling"},
+		{"Naked return after err != nil check", "error_handling"},
+		{"Bare log without error context", "error_handling"},
+		// observability
+		{"Missing logging on failure path", "observability"},
+		{"Dropped tracing context in middleware", "observability"},
+		{"Silent failure in background job", "observability"},
+		{"No metric for new endpoint latency", "observability"},
+		// api_contract
+		{"Breaking change to user response", "api_contract"},
+		{"Removed field from API contract", "api_contract"},
+		{"Changed status code for error response", "api_contract"},
+		{"Proto field removal breaks clients", "api_contract"},
+		// idempotency
+		{"Non-idempotent write endpoint", "idempotency"},
+		{"Missing dedup guard on event handler", "idempotency"},
+		{"Retry-unsafe database operation", "idempotency"},
+		// integration
+		{"Missing integration test for API boundary", "integration"},
+		{"No contract test for gRPC service", "integration"},
+		{"E2E coverage gap in checkout flow", "integration"},
+		// data
+		{"Unsafe data migration without rollback", "data"},
+		{"Partial write on multi-table update", "data"},
+		{"Orphaned records after cascade delete", "data"},
+		{"Data integrity risk in schema migration", "data"},
+		// testing
 		{"No tests for error paths", "testing"},
-		{"Naming convention violation", "style"},
+		{"Test coverage below threshold", "testing"},
+		// performance
 		{"N+1 query in list endpoint", "performance"},
+		{"Unbounded SELECT on large table", "performance"},
+		{"Missing index on frequently queried column", "performance"},
+		// good_hygiene
+		{"Code smell in deeply nested function", "good_hygiene"},
+		{"Dead code in legacy handler", "good_hygiene"},
+		{"Magic number used for timeout", "good_hygiene"},
+		{"Anti-pattern in repository layer", "good_hygiene"},
+		// correctness (default)
 		{"Missing null check", "correctness"},
+		{"Logic error in discount calculation", "correctness"},
 	}
 	for _, tc := range tests {
 		got := classifyCategory(tc.desc)

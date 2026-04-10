@@ -13,10 +13,10 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/persona"
 )
 
-// PRConsolidatorHandler collects outputs from pr-architect, pr-reviewer, and pr-qa,
-// calls AI to produce a single consolidated review comment, and posts it to the PR
-// via `gh pr comment`. This is the only handler in the flow that has an external
-// side-effect (posting the comment).
+// PRConsolidatorHandler collects outputs from the 11 dedicated category
+// reviewers, calls AI to produce a single consolidated review comment, and
+// posts it to the PR via `gh pr comment`. This is the only handler in the
+// flow that has an external side-effect (posting the comment).
 type PRConsolidatorHandler struct {
 	backend  backend.Backend
 	store    eventstore.Store
@@ -78,10 +78,12 @@ func (h *PRConsolidatorHandler) Handle(ctx context.Context, env event.Envelope) 
 }
 
 // extractConsolidatorInputs scans the correlation chain and returns the
-// WorkflowRequestedPayload and a map of phase → AI output text.
+// WorkflowRequestedPayload and a map of handler name → AI output text.
+// Keyed by handler name (from event Source "handler:<name>") so that
+// multiple handlers sharing the same phase template don't collide.
 func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequestedPayload, map[string]string) {
 	var params event.WorkflowRequestedPayload
-	phaseOutputs := make(map[string]string)
+	handlerOutputs := make(map[string]string)
 
 	for _, e := range events {
 		switch e.Type {
@@ -91,12 +93,16 @@ func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequested
 		case event.AIResponseReceived:
 			var p event.AIResponsePayload
 			if err := json.Unmarshal(e.Payload, &p); err == nil {
-				phaseOutputs[p.Phase] = unmarshalOutput(p.Output, p.Structured)
+				key := strings.TrimPrefix(e.Source, "handler:")
+				if key == "" {
+					key = p.Phase // fallback for events without Source
+				}
+				handlerOutputs[key] = unmarshalOutput(p.Output, p.Structured)
 			}
 		}
 	}
 
-	return params, phaseOutputs
+	return params, handlerOutputs
 }
 
 // callAI builds the consolidation prompt and invokes the AI backend.
@@ -134,8 +140,26 @@ func (h *PRConsolidatorHandler) callAI(
 	return resp.Output, nil
 }
 
+// prCategoryReviewerLabels maps handler name → human label for the consolidation prompt.
+var prCategoryReviewerLabels = []struct {
+	key   string
+	label string
+}{
+	{"pr-security", "Security Review"},
+	{"pr-concurrency", "Concurrency Review"},
+	{"pr-error-handling", "Error Handling Review"},
+	{"pr-observability", "Observability Review"},
+	{"pr-api-contract", "API Contract Review"},
+	{"pr-idempotency", "Idempotency Review"},
+	{"pr-testing", "Testing Review"},
+	{"pr-integration", "Integration Review"},
+	{"pr-performance", "Performance Review"},
+	{"pr-data", "Data Integrity Review"},
+	{"pr-hygiene", "Code Hygiene Review"},
+}
+
 // buildConsolidationPrompt assembles the user prompt for the consolidator AI call.
-func buildConsolidationPrompt(params event.WorkflowRequestedPayload, phaseOutputs map[string]string) string {
+func buildConsolidationPrompt(params event.WorkflowRequestedPayload, handlerOutputs map[string]string) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## PR Review Consolidation Task\n\n")
@@ -145,24 +169,15 @@ func buildConsolidationPrompt(params event.WorkflowRequestedPayload, phaseOutput
 		fmt.Fprintf(&b, "**PR Description / Task Context**:\n%s\n\n", params.Prompt)
 	}
 
-	phases := []struct {
-		key   string
-		label string
-	}{
-		{"architect", "Architecture Review (pr-architect)"},
-		{"review", "Code Review (pr-reviewer)"},
-		{"qa", "QA Analysis (pr-qa)"},
-	}
-
-	for _, p := range phases {
-		output := phaseOutputs[p.key]
+	for _, r := range prCategoryReviewerLabels {
+		output := handlerOutputs[r.key]
 		if output == "" {
 			output = "(no output)"
 		}
-		fmt.Fprintf(&b, "---\n### %s\n\n%s\n\n", p.label, output)
+		fmt.Fprintf(&b, "---\n### %s\n\n%s\n\n", r.label, output)
 	}
 
-	b.WriteString("---\n\nProduced a single, consolidated PR review comment based on the three independent analyses above.")
+	b.WriteString("---\n\nProduce a single, consolidated PR review comment based on the 11 independent category analyses above.")
 
 	return b.String()
 }

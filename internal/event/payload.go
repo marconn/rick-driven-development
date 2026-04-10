@@ -89,7 +89,7 @@ const (
 // Issue represents a typed, categorized issue found during review.
 type Issue struct {
 	Severity    string `json:"severity"`    // "critical", "major", "minor"
-	Category    string `json:"category"`    // "correctness", "security", "style"
+	Category    string `json:"category"`    // security, concurrency, error_handling, observability, api_contract, idempotency, testing, integration, performance, data, good_hygiene, correctness
 	Description string `json:"description"`
 	File        string `json:"file,omitempty"`
 	Line        int    `json:"line,omitempty"`

@@ -172,10 +172,14 @@ func classifySeverity(desc string) string {
 	lower := strings.ToLower(desc)
 	switch {
 	case strings.Contains(lower, "critical") || strings.Contains(lower, "security") ||
-		strings.Contains(lower, "injection") || strings.Contains(lower, "vulnerability"):
+		strings.Contains(lower, "injection") || strings.Contains(lower, "vulnerability") ||
+		strings.Contains(lower, "credential") || strings.Contains(lower, "xss") ||
+		strings.Contains(lower, "deadlock") || strings.Contains(lower, "data loss"):
 		return "critical"
 	case strings.Contains(lower, "missing") || strings.Contains(lower, "error handling") ||
-		strings.Contains(lower, "race condition") || strings.Contains(lower, "data loss"):
+		strings.Contains(lower, "race condition") || strings.Contains(lower, "breaking change") ||
+		strings.Contains(lower, "goroutine leak") || strings.Contains(lower, "silent fail") ||
+		strings.Contains(lower, "partial write"):
 		return "major"
 	default:
 		return "minor"
@@ -187,16 +191,53 @@ func classifyCategory(desc string) string {
 	lower := strings.ToLower(desc)
 	switch {
 	case strings.Contains(lower, "security") || strings.Contains(lower, "injection") ||
-		strings.Contains(lower, "auth") || strings.Contains(lower, "vulnerability"):
+		strings.Contains(lower, "auth") || strings.Contains(lower, "vulnerability") ||
+		strings.Contains(lower, "credential") || strings.Contains(lower, "secret") ||
+		strings.Contains(lower, "xss") || strings.Contains(lower, "csrf"):
 		return "security"
+	case strings.Contains(lower, "race condition") || strings.Contains(lower, "deadlock") ||
+		strings.Contains(lower, "mutex") || strings.Contains(lower, "goroutine leak") ||
+		strings.Contains(lower, "channel") || strings.Contains(lower, "concurrent") ||
+		strings.Contains(lower, "synchronization") || strings.Contains(lower, "toctou") ||
+		strings.Contains(lower, "concurrent map"):
+		return "concurrency"
+	case strings.Contains(lower, "error handling") || strings.Contains(lower, "swallowed error") ||
+		strings.Contains(lower, "unwrapped") || strings.Contains(lower, "naked return") ||
+		strings.Contains(lower, "missing context") || strings.Contains(lower, "err != nil") ||
+		strings.Contains(lower, "error ignored") || strings.Contains(lower, "bare log"):
+		return "error_handling"
+	case strings.Contains(lower, "observability") || strings.Contains(lower, "logging") ||
+		strings.Contains(lower, "tracing") || strings.Contains(lower, "metric") ||
+		strings.Contains(lower, "silent fail") || strings.Contains(lower, "correlation") ||
+		strings.Contains(lower, "debug") || strings.Contains(lower, "monitor"):
+		return "observability"
+	case strings.Contains(lower, "breaking change") || strings.Contains(lower, "api contract") ||
+		strings.Contains(lower, "backward compat") || strings.Contains(lower, "removed field") ||
+		strings.Contains(lower, "response shape") || strings.Contains(lower, "status code") ||
+		strings.Contains(lower, "proto") || strings.Contains(lower, "schema break"):
+		return "api_contract"
+	case strings.Contains(lower, "idempoten") || strings.Contains(lower, "dedup") ||
+		strings.Contains(lower, "retry-unsafe") || strings.Contains(lower, "replay"):
+		return "idempotency"
+	case strings.Contains(lower, "integration") || strings.Contains(lower, "contract test") ||
+		strings.Contains(lower, "end-to-end") || strings.Contains(lower, "e2e"):
+		return "integration"
+	case strings.Contains(lower, "data integrity") || strings.Contains(lower, "migration") ||
+		strings.Contains(lower, "partial write") || strings.Contains(lower, "data loss") ||
+		strings.Contains(lower, "rollback") || strings.Contains(lower, "schema migration") ||
+		strings.Contains(lower, "orphan"):
+		return "data"
 	case strings.Contains(lower, "test") || strings.Contains(lower, "coverage"):
 		return "testing"
-	case strings.Contains(lower, "naming") || strings.Contains(lower, "style") ||
-		strings.Contains(lower, "format"):
-		return "style"
 	case strings.Contains(lower, "performance") || strings.Contains(lower, "n+1") ||
-		strings.Contains(lower, "index"):
+		strings.Contains(lower, "index") || strings.Contains(lower, "latency") ||
+		strings.Contains(lower, "unbounded") || strings.Contains(lower, "slow query"):
 		return "performance"
+	case strings.Contains(lower, "naming") || strings.Contains(lower, "style") ||
+		strings.Contains(lower, "format") || strings.Contains(lower, "code smell") ||
+		strings.Contains(lower, "dead code") || strings.Contains(lower, "magic number") ||
+		strings.Contains(lower, "complexity") || strings.Contains(lower, "anti-pattern"):
+		return "good_hygiene"
 	default:
 		return "correctness"
 	}

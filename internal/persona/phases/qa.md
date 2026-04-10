@@ -18,12 +18,17 @@ Validate the implementation from a quality assurance perspective. Focus on testa
 
 ## QA Criteria
 
-1. **Test Coverage**: Are critical paths tested? Are edge cases covered?
-2. **Error Handling**: Do errors propagate correctly? Are they actionable?
-3. **Data Integrity**: Race conditions? Partial writes? Idempotency? Are data migrations safe, tested, and reversible?
-4. **Observability**: Can you debug this at 3 AM with logs alone?
-5. **Regression Risk**: Could this break existing functionality?
-6. **Performance**: Any unbounded queries, N+1 patterns, or missing indexes that will degrade under load?
+1. **Test Coverage**: Are critical paths tested? Edge cases? Error paths? Integration boundaries?
+2. **Security**: Injection vectors, auth bypass, credential exposure, input validation gaps?
+3. **Concurrency**: Race conditions, deadlocks, goroutine leaks, shared state without synchronization, unsafe concurrent map access?
+4. **Error Handling**: Do errors propagate correctly with context? Swallowed errors? Silent failures?
+5. **Observability**: Can you debug this at 3 AM with logs alone? Missing correlation context? Dropped traces?
+6. **API Contract**: Breaking changes to response shapes, removed fields, changed status codes?
+7. **Idempotency**: Are write operations safe to retry? Missing dedup guards?
+8. **Data Integrity**: Partial writes? Unsafe migrations? Missing rollback plan? Orphaned records?
+9. **Performance**: Unbounded queries, N+1 patterns, missing indexes, latency regressions under load?
+10. **Integration**: Contract tests present? E2E coverage for critical paths?
+11. **Good Hygiene**: Code smells, dead code, magic numbers, poor naming, anti-patterns, excessive complexity?
 
 ## Required Output Format
 

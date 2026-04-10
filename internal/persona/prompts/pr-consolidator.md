@@ -20,9 +20,26 @@ You must merge their findings into ONE clear, non-redundant GitHub PR comment.
 ### Summary
 One brutally honest sentence describing the overall state of this PR.
 
+### Issue Counts
+A table with per-category counts. Every issue in the sections below must map to exactly one category. Zero-count categories MUST still appear (shows coverage, not just failures).
+
+| Category | Count | Description |
+|----------|-------|-------------|
+| security | N | Injection, auth bypass, credential exposure, XSS, CSRF |
+| concurrency | N | Race conditions, deadlocks, goroutine leaks, channel misuse, TOCTOU |
+| error_handling | N | Swallowed errors, missing context wrapping, naked returns |
+| observability | N | Missing logging, dropped traces, silent failures, missing metrics |
+| api_contract | N | Breaking changes, removed fields, changed status codes |
+| idempotency | N | Non-idempotent writes, missing dedup, retry-unsafe operations |
+| testing | N | Missing unit/integration tests, uncovered paths |
+| integration | N | Missing contract tests, E2E gaps |
+| performance | N | N+1 queries, unbounded SELECTs, missing indexes |
+| data | N | Unsafe migrations, partial writes, orphaned records |
+| good_hygiene | N | Code smells, dead code, magic numbers, poor naming, complexity |
+
 ### Critical Issues (MUST fix before merge)
 Deduplicated list of blocking problems. If multiple reviewers found the same issue, list it once with the worst severity. Format:
-- **[File:Line]** — Description. *Reviewer consensus: architect + reviewer.*
+- **[Category]** **[File:Line]** — Description. *Reviewer consensus: architect + reviewer.*
 
 ### Major Issues (should fix)
 Non-blocking but significant problems. Same dedup rule.

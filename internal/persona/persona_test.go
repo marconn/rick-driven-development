@@ -16,11 +16,17 @@ import (
 func TestDefaultRegistry(t *testing.T) {
 	r := DefaultRegistry()
 	names := r.Names()
-	if len(names) != 11 {
-		t.Fatalf("want 11 personas, got %d: %v", len(names), names)
+	if len(names) != 22 {
+		t.Fatalf("want 22 personas, got %d: %v", len(names), names)
 	}
 	// Names are returned sorted — verify all expected personas are present.
-	want := []string{Architect, Committer, ContextSnapshot, Developer, FeedbackAnalyzer, PRConsolidator, QA, QAAnalyzer, Researcher, Reviewer, Workspace}
+	want := []string{
+		Architect, Committer, ContextSnapshot, Developer, FeedbackAnalyzer,
+		PRAPIContract, PRConcurrency, PRConsolidator, PRData, PRErrorHandling,
+		PRHygiene, PRIdempotency, PRIntegration, PRObservability, PRPerformance,
+		PRSecurity, PRTesting,
+		QA, QAAnalyzer, Researcher, Reviewer, Workspace,
+	}
 	for i, name := range want {
 		if names[i] != name {
 			t.Errorf("names[%d]: want %q, got %q", i, name, names[i])

@@ -36,9 +36,9 @@ func TestNewPRConsolidator(t *testing.T) {
 func TestExtractConsolidatorInputs(t *testing.T) {
 	corrID := "corr-consolidate-1"
 
-	archOutput, _ := json.Marshal("Architecture review output")
-	reviewOutput, _ := json.Marshal("Code review output")
-	qaOutput, _ := json.Marshal("QA output")
+	securityOutput, _ := json.Marshal("Security review output")
+	testingOutput, _ := json.Marshal("Testing review output")
+	perfOutput, _ := json.Marshal("Performance review output")
 
 	events := []event.Envelope{
 		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
@@ -47,23 +47,23 @@ func TestExtractConsolidatorInputs(t *testing.T) {
 			Source:     "gh:owner/repo#42",
 		})).WithCorrelation(corrID),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:   "architect",
+			Phase:   "pr-category-review",
 			Backend: "claude",
-			Output:  json.RawMessage(archOutput),
-		})).WithCorrelation(corrID),
+			Output:  json.RawMessage(securityOutput),
+		})).WithCorrelation(corrID).WithSource("handler:pr-security"),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:   "review",
+			Phase:   "pr-category-review",
 			Backend: "claude",
-			Output:  json.RawMessage(reviewOutput),
-		})).WithCorrelation(corrID),
+			Output:  json.RawMessage(testingOutput),
+		})).WithCorrelation(corrID).WithSource("handler:pr-testing"),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:   "qa",
+			Phase:   "pr-category-review",
 			Backend: "claude",
-			Output:  json.RawMessage(qaOutput),
-		})).WithCorrelation(corrID),
+			Output:  json.RawMessage(perfOutput),
+		})).WithCorrelation(corrID).WithSource("handler:pr-performance"),
 	}
 
-	params, phaseOutputs := extractConsolidatorInputs(events)
+	params, handlerOutputs := extractConsolidatorInputs(events)
 
 	if params.Source != "gh:owner/repo#42" {
 		t.Errorf("params.Source: want 'gh:owner/repo#42', got %q", params.Source)
@@ -71,14 +71,31 @@ func TestExtractConsolidatorInputs(t *testing.T) {
 	if params.Prompt != "Review this PR" {
 		t.Errorf("params.Prompt: want 'Review this PR', got %q", params.Prompt)
 	}
-	if phaseOutputs["architect"] != "Architecture review output" {
-		t.Errorf("architect output: want 'Architecture review output', got %q", phaseOutputs["architect"])
+	if handlerOutputs["pr-security"] != "Security review output" {
+		t.Errorf("pr-security output: want 'Security review output', got %q", handlerOutputs["pr-security"])
 	}
-	if phaseOutputs["review"] != "Code review output" {
-		t.Errorf("review output: want 'Code review output', got %q", phaseOutputs["review"])
+	if handlerOutputs["pr-testing"] != "Testing review output" {
+		t.Errorf("pr-testing output: want 'Testing review output', got %q", handlerOutputs["pr-testing"])
 	}
-	if phaseOutputs["qa"] != "QA output" {
-		t.Errorf("qa output: want 'QA output', got %q", phaseOutputs["qa"])
+	if handlerOutputs["pr-performance"] != "Performance review output" {
+		t.Errorf("pr-performance output: want 'Performance review output', got %q", handlerOutputs["pr-performance"])
+	}
+}
+
+func TestExtractConsolidatorInputsFallbackToPhase(t *testing.T) {
+	// Events without Source fall back to Phase as key.
+	output, _ := json.Marshal("fallback output")
+	events := []event.Envelope{
+		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
+			Phase:   "review",
+			Backend: "claude",
+			Output:  json.RawMessage(output),
+		})),
+	}
+
+	_, handlerOutputs := extractConsolidatorInputs(events)
+	if handlerOutputs["review"] != "fallback output" {
+		t.Errorf("fallback: want 'fallback output', got %q", handlerOutputs["review"])
 	}
 }
 
@@ -91,13 +108,13 @@ func TestBuildConsolidationPrompt(t *testing.T) {
 		Prompt: "Review PR for security changes",
 		Source: "gh:owner/repo#10",
 	}
-	phaseOutputs := map[string]string{
-		"architect": "Architecture looks good.",
-		"review":    "Code has issues.",
-		"qa":        "Tests pass.",
+	handlerOutputs := map[string]string{
+		"pr-security":    "No security issues found.",
+		"pr-testing":     "Missing unit tests.",
+		"pr-performance": "N+1 query detected.",
 	}
 
-	prompt := buildConsolidationPrompt(params, phaseOutputs)
+	prompt := buildConsolidationPrompt(params, handlerOutputs)
 
 	if !strings.Contains(prompt, "Review PR for security changes") {
 		t.Error("prompt should contain task description")
@@ -105,16 +122,16 @@ func TestBuildConsolidationPrompt(t *testing.T) {
 	if !strings.Contains(prompt, "gh:owner/repo#10") {
 		t.Error("prompt should contain source reference")
 	}
-	if !strings.Contains(prompt, "Architecture looks good") {
-		t.Error("prompt should contain architect output")
+	if !strings.Contains(prompt, "No security issues found") {
+		t.Error("prompt should contain security review output")
 	}
-	if !strings.Contains(prompt, "Code has issues") {
-		t.Error("prompt should contain reviewer output")
+	if !strings.Contains(prompt, "Missing unit tests") {
+		t.Error("prompt should contain testing review output")
 	}
-	if !strings.Contains(prompt, "Tests pass") {
-		t.Error("prompt should contain QA output")
+	if !strings.Contains(prompt, "N+1 query detected") {
+		t.Error("prompt should contain performance review output")
 	}
-	if !strings.Contains(prompt, "Architecture Review (pr-architect)") {
+	if !strings.Contains(prompt, "Security Review") {
 		t.Error("prompt should label each section")
 	}
 }
@@ -123,15 +140,15 @@ func TestBuildConsolidationPromptMissingOutputs(t *testing.T) {
 	params := event.WorkflowRequestedPayload{
 		Source: "gh:owner/repo#5",
 	}
-	// Simulate one persona not yet having output.
-	phaseOutputs := map[string]string{
-		"architect": "Arch output",
+	// Simulate most personas not yet having output.
+	handlerOutputs := map[string]string{
+		"pr-security": "Looks clean.",
 	}
 
-	prompt := buildConsolidationPrompt(params, phaseOutputs)
+	prompt := buildConsolidationPrompt(params, handlerOutputs)
 
 	if !strings.Contains(prompt, "(no output)") {
-		t.Error("prompt should show '(no output)' for missing phases")
+		t.Error("prompt should show '(no output)' for missing handlers")
 	}
 }
 
@@ -160,13 +177,12 @@ func TestPRConsolidatorCallAI(t *testing.T) {
 		Source: "gh:owner/repo#1",
 		Prompt: "test",
 	}
-	phaseOutputs := map[string]string{
-		"architect": "ok",
-		"review":    "ok",
-		"qa":        "ok",
+	handlerOutputs := map[string]string{
+		"pr-security": "ok",
+		"pr-testing":  "ok",
 	}
 
-	output, err := h.callAI(context.Background(), env, params, phaseOutputs)
+	output, err := h.callAI(context.Background(), env, params, handlerOutputs)
 	if err != nil {
 		t.Fatalf("callAI: %v", err)
 	}
