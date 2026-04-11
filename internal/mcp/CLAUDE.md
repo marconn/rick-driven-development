@@ -12,7 +12,7 @@ JSON-RPC 2.0 Model Context Protocol server exposing Rick's workflow, job, worksp
 - `tools_workspace.go` — Workspace tools (3): `rick_workspace_setup`, `rick_workspace_cleanup`, `rick_workspace_list`. Operate on `$RICK_REPOS_PATH` with a `*-rick-ws-*` deletion guard.
 - `tools_jira.go` — Jira tools (10): read/write/transition/comment, epic-issues, search, link/delete-link, set-microservice, pr-links. Requires `JIRA_URL` / `JIRA_EMAIL` / `JIRA_TOKEN` (resolved via `Deps.Jira`).
 - `tools_wave.go` — Wave tools (4): `rick_wave_plan`, `rick_wave_launch`, `rick_wave_status`, `rick_wave_cleanup`. Topologically sorts an epic's children and batch-launches `jira-dev` workflows.
-- `tools_observability.go` — Observability tools (6): `rick_search_workflows`, `rick_retry_workflow`, `rick_workflow_output`, `rick_diff`, `rick_create_pr`, `rick_project_sync`. Reads tags/projections, drives `gh pr create`, emits Mermaid diagrams.
+- `tools_observability.go` — Observability tools (7): `rick_search_workflows`, `rick_retry_workflow`, `rick_workflow_output`, `rick_diff`, `rick_pr_diff`, `rick_create_pr`, `rick_project_sync`. Reads tags/projections, fetches PR diffs via `gh`, drives `gh pr create`, emits Mermaid diagrams.
 - `tools_confluence.go` — Confluence tools (2): `rick_confluence_read`, `rick_confluence_write`. Requires `CONFLUENCE_URL` / `CONFLUENCE_EMAIL` / `CONFLUENCE_TOKEN` (resolved via `Deps.Confluence`).
 
 Test files (`*_test.go`) cover protocol handshake, HTTP transport, job lifecycle, and per-tool behavior with mocked Jira/Confluence clients.

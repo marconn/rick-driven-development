@@ -15,6 +15,9 @@ import (
 // safeBranchRe validates git branch names to prevent flag injection.
 var safeBranchRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9/_.\-]+$`)
 
+// safeRepoRe validates owner/repo format to prevent argument injection.
+var safeRepoRe = regexp.MustCompile(`^[a-zA-Z0-9_.\-]+/[a-zA-Z0-9_.\-]+$`)
+
 func (s *Server) registerObservabilityTools() {
 
 	s.register(Tool{
@@ -113,6 +116,33 @@ func (s *Server) registerObservabilityTools() {
 			},
 		},
 		Handler: s.toolDiff,
+	})
+
+	s.register(Tool{
+		Definition: ToolDefinition{
+			Name:        "rick_pr_diff",
+			Description: "Fetch the diff of a GitHub pull request by repo and PR number. Does not require a workflow or workspace — calls GitHub directly via `gh` CLI.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"repo": map[string]any{
+						"type":        "string",
+						"description": "Repository in owner/repo format (e.g. 'hulilabs/hulihealth-web').",
+					},
+					"pr_number": map[string]any{
+						"type":        "integer",
+						"description": "Pull request number.",
+					},
+					"stat_only": map[string]any{
+						"type":    "boolean",
+						"default": false,
+						"description": "Show only diffstat, not full diff.",
+					},
+				},
+				"required": []string{"repo", "pr_number"},
+			},
+		},
+		Handler: s.toolPRDiff,
 	})
 
 	s.register(Tool{
@@ -467,6 +497,52 @@ func (s *Server) toolDiff(ctx context.Context, raw json.RawMessage) (any, error)
 		"workspace":   workDir,
 		"diff":        diff,
 		"truncated":   truncated,
+	}, nil
+}
+
+func (s *Server) toolPRDiff(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args struct {
+		Repo     string `json:"repo"`
+		PRNumber int    `json:"pr_number"`
+		StatOnly bool   `json:"stat_only"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if args.Repo == "" {
+		return nil, fmt.Errorf("repo is required")
+	}
+	if args.PRNumber <= 0 {
+		return nil, fmt.Errorf("pr_number is required and must be positive")
+	}
+
+	// Validate repo format to prevent argument injection.
+	if !safeRepoRe.MatchString(args.Repo) {
+		return nil, fmt.Errorf("invalid repo format: %q (expected owner/repo)", args.Repo)
+	}
+
+	ghArgs := []string{"pr", "diff", fmt.Sprintf("%d", args.PRNumber), "--repo", args.Repo}
+	if args.StatOnly {
+		ghArgs = append(ghArgs, "--name-only")
+	}
+
+	out, err := exec.CommandContext(ctx, "gh", ghArgs...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh pr diff: %w", err)
+	}
+
+	diff := string(out)
+	truncated := false
+	if len(diff) > 50000 {
+		diff = diff[:50000]
+		truncated = true
+	}
+
+	return map[string]any{
+		"repo":      args.Repo,
+		"pr_number": args.PRNumber,
+		"diff":      diff,
+		"truncated": truncated,
 	}, nil
 }
 
