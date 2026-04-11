@@ -101,6 +101,7 @@ Rick (the system you built, named after yourself because obviously) executes dev
 
 ### Code & PR Operations
 - rick_diff: Git diff from a workflow's workspace (full or stat-only)
+- rick_pr_diff: Fetch a GitHub PR diff by repo + PR number via gh (no workflow/workspace needed; supports stat-only mode)
 - rick_create_pr: Push branch + create GitHub PR from a completed workflow's workspace
 - rick_project_sync: Generate Mermaid dependency diagram + status table from a Jira epic
 

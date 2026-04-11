@@ -22,7 +22,7 @@ All Rick Go packages live here. No public API — `internal/` is enforced by Go'
 - [`source/`](source/CLAUDE.md) — `gh:`/`jira:`/`file:` source string parser
 
 ## Workflow + tooling surface
-- [`mcp/`](mcp/CLAUDE.md) — JSON-RPC 2.0 MCP server (46 tools)
+- [`mcp/`](mcp/CLAUDE.md) — JSON-RPC 2.0 MCP server (47 tools)
 - [`grpchandler/`](grpchandler/CLAUDE.md) — bidi gRPC stream for external handlers (+ [`grpchandler/proto/`](grpchandler/proto/CLAUDE.md))
 - [`cli/`](cli/CLAUDE.md) — cobra command tree (note: `run.go` is DEPRECATED)
 - [`workspace/`](workspace/CLAUDE.md) — isolated git clones under `$RICK_REPOS_PATH`

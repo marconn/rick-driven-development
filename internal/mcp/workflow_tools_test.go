@@ -278,6 +278,48 @@ func TestToolDiff_NoWorkspace(t *testing.T) {
 	}
 }
 
+// --- toolPRDiff tests ---
+
+func TestToolPRDiff_MissingRepo(t *testing.T) {
+	s, cleanup := testServer(t)
+	defer cleanup()
+
+	_, err := callTool(t, s, "rick_pr_diff", map[string]any{
+		"pr_number": 1,
+	})
+	if err == nil {
+		t.Fatal("expected error for missing repo")
+	}
+}
+
+func TestToolPRDiff_MissingPRNumber(t *testing.T) {
+	s, cleanup := testServer(t)
+	defer cleanup()
+
+	_, err := callTool(t, s, "rick_pr_diff", map[string]any{
+		"repo": "owner/repo",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing pr_number")
+	}
+}
+
+func TestToolPRDiff_InvalidRepoFormat(t *testing.T) {
+	s, cleanup := testServer(t)
+	defer cleanup()
+
+	_, err := callTool(t, s, "rick_pr_diff", map[string]any{
+		"repo":      "not-a-valid-format",
+		"pr_number": 1,
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid repo format")
+	}
+	if !strings.Contains(err.Error(), "invalid repo format") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 // --- toolCreatePR tests ---
 
 func TestToolCreatePR_MissingID(t *testing.T) {
