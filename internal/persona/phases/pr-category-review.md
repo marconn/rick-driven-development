@@ -12,11 +12,13 @@ You are performing a **specialized PR category review**. Focus ONLY on your area
 
 ## Instructions
 
-1. Examine the PR changes in the workspace (`git diff main...HEAD`, read modified files, explore the codebase)
-2. Focus **exclusively** on issues within your specialized domain
-3. Be specific: cite file paths, line numbers, and code snippets
-4. Categorize each finding by severity: **critical**, **major**, or **minor**
-5. If no issues are found in your domain, say so explicitly and PASS
+1. Review **ONLY the code changes shown in the PR diff above**. Do NOT review code outside the diff — other files in the repository are out of scope even if you can access them.
+2. If the enrichments above include a "PR Changed Files" list, those are the ONLY files in scope. If a file is not in that list, do not flag issues in it.
+3. You may read unchanged surrounding code for understanding context, but only flag issues in lines that were added or modified in this PR.
+4. Focus **exclusively** on issues within your specialized domain.
+5. Be specific: cite file paths, line numbers, and code snippets from the diff.
+6. Categorize each finding by severity: **critical**, **major**, or **minor**.
+7. If no issues are found in your domain within the changed code, say so explicitly and PASS.
 
 ## Required Output Format
 
