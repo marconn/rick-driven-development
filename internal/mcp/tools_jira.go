@@ -223,17 +223,17 @@ func (s *Server) registerJiraTools() {
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_jira_link",
-			Description: "Create an issue link between two Jira tickets (Blocks, Relates to, etc).",
+			Description: "Create an issue link between two Jira tickets. For directional links like Blocks: from_ticket=A, to_ticket=B means 'A blocks B'.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"from_ticket": map[string]any{
 						"type":        "string",
-						"description": "Source issue key.",
+						"description": "Active side of the link. For Blocks: the issue that BLOCKS.",
 					},
 					"to_ticket": map[string]any{
 						"type":        "string",
-						"description": "Target issue key.",
+						"description": "Passive side of the link. For Blocks: the issue that IS BLOCKED.",
 					},
 					"link_type": map[string]any{
 						"type":        "string",
@@ -283,7 +283,7 @@ func (s *Server) registerJiraTools() {
 					},
 					"project": map[string]any{
 						"type":        "string",
-						"description": "Project key (e.g., PROJ). Defaults to JIRA_PROJECT env.",
+						"description": "Project key (e.g., HULI). Defaults to JIRA_PROJECT env var. Required if JIRA_PROJECT is unset.",
 					},
 					"description": map[string]any{
 						"type":        "string",
@@ -309,11 +309,11 @@ func (s *Server) registerJiraTools() {
 					},
 					"priority": map[string]any{
 						"type":        "string",
-						"description": "Priority name (e.g., High, Medium, Low).",
+						"description": "Priority name as configured in your Jira instance (run a JQL search to discover valid values).",
 					},
 					"assigned_team": map[string]any{
 						"type":        "string",
-						"description": "Team ID to override the default JIRA_TEAM_ID (numeric ID for the Assigned Team field).",
+						"description": "Numeric team ID for the Assigned Team field. Defaults to JIRA_TEAM_ID env var. Known IDs: 10571 (Team Rocket), 10204 (Team Darwin). Required if JIRA_TEAM_ID is unset.",
 					},
 				},
 				"required": []string{"summary"},
@@ -797,6 +797,12 @@ func (s *Server) toolJiraCreate(ctx context.Context, raw json.RawMessage) (any, 
 	}
 	if args.IssueType == "" {
 		args.IssueType = "Task"
+	}
+	if args.Project == "" && os.Getenv("JIRA_PROJECT") == "" {
+		return nil, fmt.Errorf("project is required — set JIRA_PROJECT env var or pass a project key")
+	}
+	if args.AssignedTeam == "" && os.Getenv("JIRA_TEAM_ID") == "" {
+		return nil, fmt.Errorf("assigned_team is required — set JIRA_TEAM_ID env var or pass a team ID (e.g., 10571 for Team Rocket)")
 	}
 
 	var opts []jira.CreateOption

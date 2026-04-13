@@ -205,13 +205,13 @@ func TestClient_LinkIssues_RequestShape(t *testing.T) {
 	if linkType["name"] != "Blocks" {
 		t.Errorf("link type=%v, want Blocks", linkType["name"])
 	}
-	outward, _ := capturedBody["outwardIssue"].(map[string]any)
-	if outward["key"] != "TEST-1" {
-		t.Errorf("outwardIssue.key=%v, want TEST-1 (blocker)", outward["key"])
-	}
 	inward, _ := capturedBody["inwardIssue"].(map[string]any)
-	if inward["key"] != "TEST-2" {
-		t.Errorf("inwardIssue.key=%v, want TEST-2 (blocked)", inward["key"])
+	if inward["key"] != "TEST-1" {
+		t.Errorf("inwardIssue.key=%v, want TEST-1 (blocker)", inward["key"])
+	}
+	outward, _ := capturedBody["outwardIssue"].(map[string]any)
+	if outward["key"] != "TEST-2" {
+		t.Errorf("outwardIssue.key=%v, want TEST-2 (blocked)", outward["key"])
 	}
 }
 
@@ -222,6 +222,57 @@ func TestClient_LinkIssues_HTTPError(t *testing.T) {
 	})
 
 	err := client.LinkIssues(context.Background(), "TEST-1", "TEST-2")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("error should mention status 400: %v", err)
+	}
+}
+
+// --- LinkIssuesWithType ---
+
+func TestClient_LinkIssuesWithType_RequestShape(t *testing.T) {
+	var capturedBody map[string]any
+
+	_, client := newTestJiraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/issueLink" {
+			json.NewDecoder(r.Body).Decode(&capturedBody) //nolint:errcheck
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"key":"TEST-1"}`)) //nolint:errcheck
+	})
+
+	err := client.LinkIssuesWithType(context.Background(), "BLOCKER-1", "BLOCKED-2", "Blocks")
+	if err != nil {
+		t.Fatalf("LinkIssuesWithType: %v", err)
+	}
+
+	linkType, _ := capturedBody["type"].(map[string]any)
+	if linkType["name"] != "Blocks" {
+		t.Errorf("link type=%v, want Blocks", linkType["name"])
+	}
+	// from_ticket (BLOCKER-1) should be the inward (active) side.
+	inward, _ := capturedBody["inwardIssue"].(map[string]any)
+	if inward["key"] != "BLOCKER-1" {
+		t.Errorf("inwardIssue.key=%v, want BLOCKER-1 (from_ticket)", inward["key"])
+	}
+	// to_ticket (BLOCKED-2) should be the outward (passive) side.
+	outward, _ := capturedBody["outwardIssue"].(map[string]any)
+	if outward["key"] != "BLOCKED-2" {
+		t.Errorf("outwardIssue.key=%v, want BLOCKED-2 (to_ticket)", outward["key"])
+	}
+}
+
+func TestClient_LinkIssuesWithType_HTTPError(t *testing.T) {
+	_, client := newTestJiraClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"errorMessages":["bad link"]}`)) //nolint:errcheck
+	})
+
+	err := client.LinkIssuesWithType(context.Background(), "TEST-1", "TEST-2", "Blocks")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

@@ -401,6 +401,9 @@ func TestToolJiraEpicIssues_WithMockServer(t *testing.T) {
 }
 
 func TestToolJiraCreate_WithMockServer(t *testing.T) {
+	t.Setenv("JIRA_PROJECT", "PROJ")
+	t.Setenv("JIRA_TEAM_ID", "10571")
+
 	mockSrv, client := newMockJiraServer(t)
 	mockSrv.handleJSON("/rest/api/3/issue", http.StatusCreated,
 		map[string]any{"key": "PROJ-NEW"})

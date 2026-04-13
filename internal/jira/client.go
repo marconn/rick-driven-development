@@ -401,8 +401,8 @@ func (c *Client) createIssue(ctx context.Context, fields map[string]any) (string
 func (c *Client) LinkIssues(ctx context.Context, blockerKey, blockedKey string) error {
 	body, err := json.Marshal(map[string]any{
 		"type":         map[string]any{"name": "Blocks"},
-		"inwardIssue":  map[string]any{"key": blockedKey},
-		"outwardIssue": map[string]any{"key": blockerKey},
+		"inwardIssue":  map[string]any{"key": blockerKey},
+		"outwardIssue": map[string]any{"key": blockedKey},
 	})
 	if err != nil {
 		return fmt.Errorf("jira: marshal link: %w", err)
@@ -808,11 +808,13 @@ func (c *Client) FetchEpicChildren(ctx context.Context, epicKey string, includeC
 }
 
 // LinkIssuesWithType creates an issue link of the specified type.
+// For directional links (e.g., "Blocks"), fromKey is the active side:
+// fromKey=A, toKey=B, linkType="Blocks" → "A blocks B".
 func (c *Client) LinkIssuesWithType(ctx context.Context, fromKey, toKey, linkType string) error {
 	body, err := json.Marshal(map[string]any{
 		"type":         map[string]any{"name": linkType},
-		"outwardIssue": map[string]any{"key": fromKey},
-		"inwardIssue":  map[string]any{"key": toKey},
+		"inwardIssue":  map[string]any{"key": fromKey},
+		"outwardIssue": map[string]any{"key": toKey},
 	})
 	if err != nil {
 		return fmt.Errorf("jira: marshal link: %w", err)

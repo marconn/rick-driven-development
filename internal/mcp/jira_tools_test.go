@@ -231,6 +231,9 @@ func TestToolJiraCreate_NoClient(t *testing.T) {
 }
 
 func TestToolJiraCreate_DefaultsToTask(t *testing.T) {
+	t.Setenv("JIRA_PROJECT", "PROJ")
+	t.Setenv("JIRA_TEAM_ID", "10571")
+
 	var capturedBody []byte
 	mux := http.NewServeMux()
 	mux.HandleFunc("/rest/api/3/issue", func(w http.ResponseWriter, r *http.Request) {
@@ -269,7 +272,70 @@ func TestToolJiraCreate_DefaultsToTask(t *testing.T) {
 	}
 }
 
+func TestToolJiraCreate_MissingProject(t *testing.T) {
+	t.Setenv("JIRA_TEAM_ID", "10571")
+	// JIRA_PROJECT intentionally unset.
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rest/api/3/issue", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"key":"PROJ-1"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := jira.NewClient(srv.URL, "test", "tok")
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	_, err := callTool(t, s, "rick_jira_create", map[string]any{
+		"summary": "Needs project",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing project")
+	}
+	if !strings.Contains(err.Error(), "project is required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestToolJiraCreate_MissingTeam(t *testing.T) {
+	t.Setenv("JIRA_PROJECT", "PROJ")
+	// JIRA_TEAM_ID intentionally unset.
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/rest/api/3/issue", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"key":"PROJ-1"}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := jira.NewClient(srv.URL, "test", "tok")
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.Jira = client
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	_, err := callTool(t, s, "rick_jira_create", map[string]any{
+		"summary": "Needs team",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing team")
+	}
+	if !strings.Contains(err.Error(), "assigned_team is required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestToolJiraCreate_WithAllOptions(t *testing.T) {
+	t.Setenv("JIRA_PROJECT", "PROJ")
+	t.Setenv("JIRA_TEAM_ID", "10571")
+
 	var capturedBody []byte
 	mux := http.NewServeMux()
 	mux.HandleFunc("/rest/api/3/issue", func(w http.ResponseWriter, r *http.Request) {
@@ -321,6 +387,8 @@ func TestToolJiraCreate_WithAllOptions(t *testing.T) {
 }
 
 func TestToolJiraCreate_AssignedTeam(t *testing.T) {
+	t.Setenv("JIRA_PROJECT", "PROJ")
+
 	var capturedBody []byte
 	mux := http.NewServeMux()
 	mux.HandleFunc("/rest/api/3/issue", func(w http.ResponseWriter, r *http.Request) {
@@ -356,6 +424,9 @@ func TestToolJiraCreate_AssignedTeam(t *testing.T) {
 }
 
 func TestToolJiraCreate_APIError(t *testing.T) {
+	t.Setenv("JIRA_PROJECT", "PROJ")
+	t.Setenv("JIRA_TEAM_ID", "10571")
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/rest/api/3/issue", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
