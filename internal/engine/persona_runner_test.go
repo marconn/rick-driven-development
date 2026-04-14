@@ -222,7 +222,7 @@ func TestPersonaRunnerWidthLimit(t *testing.T) {
 		Persona: "developer", ChainDepth: 0,
 	})).WithCorrelation("corr-1")
 
-	// Second event — should be width-limited
+	// Second event — should be held at the concurrency gate (not dropped).
 	evt2 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
 		Persona: "researcher", ChainDepth: 0,
 	})).WithCorrelation("corr-2")
@@ -238,21 +238,24 @@ func TestPersonaRunnerWidthLimit(t *testing.T) {
 		t.Fatal("first handler never entered")
 	}
 
-	// Now publish second while first is active
+	// Publish the second while the first is still holding the slot.
 	if err := bus.Publish(context.Background(), evt2); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 
-	// Give time for second to be dropped
+	// Second must not enter while the slot is held.
 	time.Sleep(200 * time.Millisecond)
+	if len(entered) > 0 {
+		t.Fatal("second handler entered while concurrency cap was held")
+	}
 
-	// Release the first handler
+	// Release the first handler — second should now acquire the slot.
 	close(release)
 
-	// Only one should have entered
-	time.Sleep(100 * time.Millisecond)
-	if len(entered) > 0 {
-		t.Error("second handler should have been width-limited")
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second handler never entered after slot was released")
 	}
 }
 

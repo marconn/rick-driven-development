@@ -20,8 +20,13 @@ import (
 const (
 	defaultDrainTimeout = 30 * time.Second
 	defaultMaxChain     = 5
-	defaultMaxActive    = 10
-	defaultDedup        = 10000
+	// defaultMaxActive caps concurrent handler execution. Sized above the
+	// widest fan-out in a single workflow (pr-review dispatches 11 parallel
+	// reviewers) so a single workflow can never fully saturate the pool on
+	// its own. Beyond the cap, dispatches block at the semaphore rather than
+	// being dropped.
+	defaultMaxActive = 32
+	defaultDedup     = 10000
 )
 
 // Event dispatch priorities. Lower value = higher priority.
@@ -75,7 +80,13 @@ type PersonaRunner struct {
 	maxChain  atomic.Int32 // max reactive chain depth (adjusted dynamically)
 	maxActive int32        // max concurrent reactive handlers
 	active    atomic.Int32
-	seen      *idempotencyCache
+	// sem throttles concurrent handler execution. Each dispatch acquires a
+	// slot before running and releases it after. When full, drain goroutines
+	// block rather than dropping events — this preserves the per-(handler,
+	// correlation) queue ordering and prevents lost dispatches under bursty
+	// fan-out (e.g., pr-review's 11 parallel reviewers × N concurrent PRs).
+	sem  chan struct{}
+	seen *idempotencyCache
 
 	// Pause support
 	pauser *pauseController
@@ -189,7 +200,42 @@ func NewPersonaRunner(store eventstore.Store, bus eventbus.Bus, dispatcher Dispa
 	for _, opt := range opts {
 		opt(r)
 	}
+	// Build the semaphore after options so WithMaxActive is honored.
+	r.sem = make(chan struct{}, r.maxActive)
 	return r
+}
+
+// acquireSlot blocks until a concurrency slot is available or the runner
+// context is cancelled. Returns false if the caller should abort (shutdown).
+func (r *PersonaRunner) acquireSlot(env event.Envelope, handlerName string) bool {
+	// Fast path.
+	select {
+	case r.sem <- struct{}{}:
+		r.active.Add(1)
+		return true
+	default:
+	}
+	// Slow path: log once, then block. Keeps parity with the old WARN log
+	// so operators still see saturation events.
+	r.logger.Warn("persona runner: concurrency cap reached, dispatch waiting",
+		slog.String("handler", handlerName),
+		slog.Int("active", int(r.active.Load())),
+		slog.Int("cap", int(r.maxActive)),
+		slog.String("correlation", env.CorrelationID),
+	)
+	select {
+	case r.sem <- struct{}{}:
+		r.active.Add(1)
+		return true
+	case <-r.ctx.Done():
+		return false
+	}
+}
+
+// releaseSlot frees a concurrency slot acquired by acquireSlot.
+func (r *PersonaRunner) releaseSlot() {
+	r.active.Add(-1)
+	<-r.sem
 }
 
 // RegisterWorkflow registers a workflow definition for DAG-based dispatch.
@@ -519,14 +565,12 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 			return nil
 		}
 
-		// 5. Width limit
-		if r.active.Load() >= r.maxActive {
-			r.logger.Warn("persona runner: max active handlers reached",
-				slog.String("handler", h.Name()),
-				slog.Int("active", int(r.active.Load())),
-			)
-			return nil
-		}
+		// 5. Width limit is no longer enforced at admission. Events are always
+		// queued and the drain goroutine blocks on the semaphore in
+		// executeDispatch / executeHintApprovedDispatch. This preserves
+		// per-(handler, correlation) ordering and prevents lost dispatches
+		// when many workflows with parallel fan-out (e.g., pr-review) run
+		// concurrently.
 
 		// 6. Join condition check (DAG deps + hooks)
 		afterPersonas := r.resolver.effectiveAfterPersonas(h, env.CorrelationID, r.hooks)
@@ -634,8 +678,10 @@ func (r *PersonaRunner) enqueueAndDrain(h handler.Handler, env event.Envelope, c
 // executeDispatch runs the handler, emits PersonaCompleted/PersonaFailed,
 // persists to the persona-scoped aggregate, and publishes resulting events.
 func (r *PersonaRunner) executeDispatch(h handler.Handler, env event.Envelope, chainDepth int) {
-	r.active.Add(1)
-	defer r.active.Add(-1)
+	if !r.acquireSlot(env, h.Name()) {
+		return
+	}
+	defer r.releaseSlot()
 
 	// Two-phase hint: if handler implements Hinter and this isn't a
 	// HintApproved replay, run the hint phase instead of full dispatch.
@@ -903,8 +949,10 @@ func (r *PersonaRunner) executeHint(hinter handler.Hinter, h handler.Handler, en
 
 // executeHintApprovedDispatch runs full Handle() for a handler after hint approval.
 func (r *PersonaRunner) executeHintApprovedDispatch(handlerName string, env event.Envelope, chainDepth int) {
-	r.active.Add(1)
-	defer r.active.Add(-1)
+	if !r.acquireSlot(env, handlerName) {
+		return
+	}
+	defer r.releaseSlot()
 
 	dispatchCtx := r.corrCtxs.get(r.ctx, env.CorrelationID)
 
