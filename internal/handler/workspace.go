@@ -60,6 +60,15 @@ func (h *WorkspaceHandler) Handle(ctx context.Context, env event.Envelope) ([]ev
 		suffix = suffix[:8]
 	}
 
+	// workspace-dev callers often provide only `repo` — no upstream handler
+	// enriches a ticket and no PR exists to derive a branch. Default to a
+	// correlation-derived branch so SetupWorkspace can proceed instead of
+	// failing with "ticket or branch is required". The suffix is unique
+	// per workflow, matching the workspace directory naming convention.
+	if params.Ticket == "" && params.RepoBranch == "" {
+		params.Ticket = "rick/" + suffix
+	}
+
 	result, err := workspace.SetupWorkspace(
 		params.Repo,
 		params.Ticket,

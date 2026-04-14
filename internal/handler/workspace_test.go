@@ -342,6 +342,53 @@ func TestWorkspaceHandlerRepoBranchSuppressesEnrichmentTicket(t *testing.T) {
 	}
 }
 
+// TestWorkspaceHandlerDefaultsBranchWhenOnlyRepoProvided is a regression test
+// for workflow c4187d2c-1a0a-4944-a7c2-75631e900865: workspace-dev with
+// repo but no ticket/branch failed at workspace with
+// "ticket or branch is required". The handler now synthesizes a
+// correlation-derived branch name so generic workspace-dev callers work.
+func TestWorkspaceHandlerDefaultsBranchWhenOnlyRepoProvided(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("RICK_REPOS_PATH", tmp)
+	setupTestGitRepo(t, tmp, "huli")
+
+	store := newMockStore()
+
+	reqPayload := event.MustMarshal(event.WorkflowRequestedPayload{
+		Prompt:     "implement observability P0",
+		WorkflowID: "workspace-dev",
+		Source:     "mcp",
+		Repo:       "huli",
+		Isolate:    false,
+		// Ticket, RepoBranch intentionally empty.
+	})
+	reqEvt := event.New(event.WorkflowRequested, 1, reqPayload).
+		WithAggregate("wf-ws", 1).
+		WithCorrelation("c4187d2c-1a0a-4944-a7c2-75631e900865")
+	store.correlationEvents["c4187d2c-1a0a-4944-a7c2-75631e900865"] = []event.Envelope{reqEvt}
+
+	startedEvt := event.New(event.WorkflowStarted, 1, event.MustMarshal(map[string]any{})).
+		WithAggregate("wf-ws", 2).
+		WithCorrelation("c4187d2c-1a0a-4944-a7c2-75631e900865")
+
+	h := &WorkspaceHandler{store: store, name: "workspace"}
+	got, err := h.Handle(context.Background(), startedEvt)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(got) != 1 || got[0].Type != event.WorkspaceReady {
+		t.Fatalf("expected WorkspaceReady event, got %+v", got)
+	}
+
+	var payload event.WorkspaceReadyPayload
+	if err := json.Unmarshal(got[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Branch != "rick/c4187d2c" {
+		t.Errorf("branch=%q, want rick/c4187d2c (correlation-derived default)", payload.Branch)
+	}
+}
+
 func TestWorkspaceHandlerIsolatedUsesCorrelationSuffix(t *testing.T) {
 	// Isolated workspace should include correlation ID prefix in path to avoid collisions.
 	tmp := t.TempDir()
