@@ -98,6 +98,9 @@ func runWorkflow(ctx context.Context, opts *runOpts, args []string) error {
 		return err
 	}
 
+	// For review workflows, we always prefer Gemini.
+	reviewBe, _ := backend.New("gemini")
+
 	// Create persona system
 	personas := persona.DefaultRegistry()
 	builder := persona.NewPromptBuilder()
@@ -105,10 +108,11 @@ func runWorkflow(ctx context.Context, opts *runOpts, args []string) error {
 	// Create and register handlers
 	reg := handler.NewRegistry()
 	deps := handler.Deps{
-		Backend:    be,
-		Store:      store,
-		Personas:   personas,
-		Builder:    builder,
+		Backend:       be,
+		ReviewBackend: reviewBe,
+		Store:         store,
+		Personas:      personas,
+		Builder:       builder,
 		Jira:       jira.NewClientFromEnv(),
 		Confluence: confluence.NewClientFromEnv(),
 		Estimation: openEstimationStore(logger),

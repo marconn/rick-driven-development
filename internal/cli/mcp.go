@@ -73,12 +73,16 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 		return err
 	}
 
+	// For review workflows, we always prefer Gemini.
+	reviewBe, _ := backend.New("gemini")
+
 	personas := persona.DefaultRegistry()
 	builder := persona.NewPromptBuilder()
 
 	reg := handler.NewRegistry()
 	deps := handler.Deps{
 		Backend:        be,
+		ReviewBackend:  reviewBe,
 		Store:          store,
 		Bus:            bus,
 		Personas:       personas,

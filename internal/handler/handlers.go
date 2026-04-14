@@ -38,6 +38,9 @@ type Deps struct {
 	Logger      *slog.Logger
 	WorkDir    string // working directory for AI backend execution
 	Yolo       bool   // skip AI backend permission checks
+	// ReviewBackend is the backend used for review-related handlers (e.g.,
+	// reviewer, qa, pr-consolidator). When nil, defaults to a Gemini backend.
+	ReviewBackend backend.Backend
 	// BackendTimeout caps how long AIHandler.backend.Run may block.
 	// Zero falls back to handler.DefaultBackendTimeout. Set explicitly via
 	// RICK_BACKEND_TIMEOUT in serve mode.
@@ -86,6 +89,32 @@ func RegisterAll(reg *Registry, d Deps) error {
 		}
 	}
 
+	// resolveReviewBackend returns the backend for review handlers:
+	// 1. d.ReviewBackend if provided
+	// 2. d.Backend if it's already gemini
+	// 3. A new gemini backend
+	resolveReviewBackend := func() backend.Backend {
+		if d.ReviewBackend != nil {
+			return d.ReviewBackend
+		}
+		if d.Backend.Name() == "gemini" {
+			return d.Backend
+		}
+		g, err := backend.New("gemini")
+		if err == nil {
+			return g
+		}
+		return d.Backend
+	}
+	reviewBackend := resolveReviewBackend()
+
+	// reviewAiCfg ensures the gemini backend is used for review-related handlers.
+	reviewAiCfg := func(name, phase, personaName string) AIHandlerConfig {
+		cfg := aiCfg(name, phase, personaName)
+		cfg.Backend = reviewBackend
+		return cfg
+	}
+
 	handlers := []Handler{
 		// Core AI handlers — used across default, workspace-dev, jira-dev, pr-review,
 		// pr-feedback, ci-fix workflows via DAG scoping.
@@ -93,17 +122,17 @@ func RegisterAll(reg *Registry, d Deps) error {
 		NewAIHandler(aiCfg("architect", "architect", persona.Architect)),
 		NewDeveloperHandler(aiCfg("developer", "develop", persona.Developer)),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("reviewer", "review", persona.Reviewer),
+			AIConfig:    reviewAiCfg("reviewer", "review", persona.Reviewer),
 			TargetPhase: "develop",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("qa", "qa", persona.QA),
+			AIConfig:    reviewAiCfg("qa", "qa", persona.QA),
 			TargetPhase: "develop",
 		}),
 		NewCommitterHandler(aiCfg("committer", "commit", persona.Committer)),
 
 		// Feedback-specific AI handler.
-		NewAIHandler(aiCfg("feedback-analyzer", "feedback-analyze", persona.FeedbackAnalyzer)),
+		NewAIHandler(reviewAiCfg("feedback-analyzer", "feedback-analyze", persona.FeedbackAnalyzer)),
 
 		// Non-AI handlers.
 		NewWorkspace(d),
@@ -113,52 +142,66 @@ func RegisterAll(reg *Registry, d Deps) error {
 		// PR-specific handlers.
 		NewPRWorkspace(d),
 		NewPRJiraContext(d),
-		NewPRConsolidator(d),
+		NewPRConsolidator(Deps{
+			Backend:    reviewBackend,
+			Store:      d.Store,
+			Bus:        d.Bus,
+			Personas:   d.Personas,
+			Builder:    d.Builder,
+			Jira:       d.Jira,
+			Confluence: d.Confluence,
+			Estimation: d.Estimation,
+			MsMap:      d.MsMap,
+			GitHub:     d.GitHub,
+			Logger:     d.Logger,
+			WorkDir:    d.WorkDir,
+			Yolo:       d.Yolo,
+		}),
 		NewPRCleanup(d),
 
 		// PR category reviewers — dedicated single-concern reviewers for pr-review workflow.
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("pr-security", "pr-category-review", persona.PRSecurity),
+			AIConfig:    reviewAiCfg("pr-security", "pr-category-review", persona.PRSecurity),
 			TargetPhase: "develop",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("pr-concurrency", "pr-category-review", persona.PRConcurrency),
+			AIConfig:    reviewAiCfg("pr-concurrency", "pr-category-review", persona.PRConcurrency),
 			TargetPhase: "develop",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("pr-error-handling", "pr-category-review", persona.PRErrorHandling),
+			AIConfig:    reviewAiCfg("pr-error-handling", "pr-category-review", persona.PRErrorHandling),
 			TargetPhase: "develop",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("pr-observability", "pr-category-review", persona.PRObservability),
+			AIConfig:    reviewAiCfg("pr-observability", "pr-category-review", persona.PRObservability),
 			TargetPhase: "develop",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("pr-api-contract", "pr-category-review", persona.PRAPIContract),
+			AIConfig:    reviewAiCfg("pr-api-contract", "pr-category-review", persona.PRAPIContract),
 			TargetPhase: "develop",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("pr-idempotency", "pr-category-review", persona.PRIdempotency),
+			AIConfig:    reviewAiCfg("pr-idempotency", "pr-category-review", persona.PRIdempotency),
 			TargetPhase: "develop",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("pr-testing", "pr-category-review", persona.PRTesting),
+			AIConfig:    reviewAiCfg("pr-testing", "pr-category-review", persona.PRTesting),
 			TargetPhase: "develop",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("pr-integration", "pr-category-review", persona.PRIntegration),
+			AIConfig:    reviewAiCfg("pr-integration", "pr-category-review", persona.PRIntegration),
 			TargetPhase: "develop",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("pr-performance", "pr-category-review", persona.PRPerformance),
+			AIConfig:    reviewAiCfg("pr-performance", "pr-category-review", persona.PRPerformance),
 			TargetPhase: "develop",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("pr-data", "pr-category-review", persona.PRData),
+			AIConfig:    reviewAiCfg("pr-data", "pr-category-review", persona.PRData),
 			TargetPhase: "develop",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    aiCfg("pr-hygiene", "pr-category-review", persona.PRHygiene),
+			AIConfig:    reviewAiCfg("pr-hygiene", "pr-category-review", persona.PRHygiene),
 			TargetPhase: "develop",
 		}),
 
@@ -171,7 +214,7 @@ func RegisterAll(reg *Registry, d Deps) error {
 		// QA-steps-specific handlers.
 		NewQAContext(d),
 		func() Handler {
-			cfg := aiCfg("qa-analyzer", "qa-analyze", persona.QAAnalyzer)
+			cfg := reviewAiCfg("qa-analyzer", "qa-analyze", persona.QAAnalyzer)
 			cfg.PlainText = true
 			return NewAIHandler(cfg)
 		}(),
