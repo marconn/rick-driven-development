@@ -96,7 +96,7 @@ func (h *WorkspaceHandler) loadWorkspaceParams(ctx context.Context, correlationI
 	}
 
 	var params event.WorkflowRequestedPayload
-	var enrichmentRepo string
+	var enrichmentRepo, enrichmentTicket string
 
 	for _, e := range events {
 		switch e.Type {
@@ -110,16 +110,24 @@ func (h *WorkspaceHandler) loadWorkspaceParams(ctx context.Context, correlationI
 				continue
 			}
 			for _, item := range ep.Items {
-				if item.Name == "repo" {
+				switch item.Name {
+				case "repo":
 					enrichmentRepo = item.Reason
+				case "ticket":
+					enrichmentTicket = item.Reason
 				}
 			}
 		}
 	}
 
-	// Fall back to enrichment repo when WorkflowRequested doesn't specify one.
+	// Fall back to enrichment values when WorkflowRequested doesn't specify them.
+	// github-dev relies on github-context to emit `ticket` (e.g. "issue-641"),
+	// since callers pass only source=gh:owner/repo#N — the ticket field is empty.
 	if params.Repo == "" && enrichmentRepo != "" {
 		params.Repo = enrichmentRepo
+	}
+	if params.Ticket == "" && params.RepoBranch == "" && enrichmentTicket != "" {
+		params.Ticket = enrichmentTicket
 	}
 
 	return params, nil

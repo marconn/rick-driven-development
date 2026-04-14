@@ -289,6 +289,7 @@ func TestBuiltinWorkflowDefs_StructuralValidity(t *testing.T) {
 		PRReviewWorkflowDef(),
 		PRFeedbackWorkflowDef(),
 		JiraDevWorkflowDef(),
+		GithubDevWorkflowDef(),
 		PlanBTUWorkflowDef(),
 		CIFixWorkflowDef(),
 	}

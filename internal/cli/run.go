@@ -246,6 +246,8 @@ func selectWorkflowDef(name string) (engine.WorkflowDef, error) {
 		def = engine.PRFeedbackWorkflowDef()
 	case "jira-dev":
 		def = engine.JiraDevWorkflowDef()
+	case "github-dev":
+		def = engine.GithubDevWorkflowDef()
 	case "ci-fix":
 		def = engine.CIFixWorkflowDef()
 	case "plan-btu":
@@ -257,7 +259,7 @@ func selectWorkflowDef(name string) (engine.WorkflowDef, error) {
 	case "task-creator":
 		def = engine.TaskCreatorWorkflowDef()
 	default:
-		return engine.WorkflowDef{}, fmt.Errorf("unknown workflow: %s (valid: develop-only, workspace-dev, pr-review, pr-feedback, jira-dev, ci-fix, plan-btu, plan-jira, task-creator, jira-qa-steps)", name)
+		return engine.WorkflowDef{}, fmt.Errorf("unknown workflow: %s (valid: develop-only, workspace-dev, pr-review, pr-feedback, jira-dev, github-dev, ci-fix, plan-btu, plan-jira, task-creator, jira-qa-steps)", name)
 	}
 
 	if os.Getenv("RICK_DISABLE_QUALITY_GATE") != "" {

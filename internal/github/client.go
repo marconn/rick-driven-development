@@ -313,6 +313,39 @@ func (c *Client) GetPRHead(ctx context.Context, owner, repo string, prNumber int
 	return &pr.Head, nil
 }
 
+// Issue represents a GitHub issue.
+type Issue struct {
+	Number    int        `json:"number"`
+	Title     string     `json:"title"`
+	Body      string     `json:"body"`
+	State     string     `json:"state"`
+	HTMLURL   string     `json:"html_url"`
+	Labels    []IssueLabel `json:"labels"`
+	User      User       `json:"user"`
+	PullRequest *struct{} `json:"pull_request,omitempty"` // set when issue is actually a PR
+}
+
+// IssueLabel is a label applied to an issue.
+type IssueLabel struct {
+	Name string `json:"name"`
+}
+
+// GetIssue retrieves a GitHub issue. The endpoint also returns PRs (they share
+// numbering), so callers that specifically want issues should reject results
+// where PullRequest is non-nil.
+func (c *Client) GetIssue(ctx context.Context, owner, repo string, number int) (*Issue, error) {
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d", owner, repo, number)
+	body, err := c.get(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("github: get issue %s/%s#%d: %w", owner, repo, number, err)
+	}
+	var issue Issue
+	if err := json.Unmarshal(body, &issue); err != nil {
+		return nil, fmt.Errorf("github: unmarshal issue: %w", err)
+	}
+	return &issue, nil
+}
+
 // nextPagePath extracts the path for rel="next" from a GitHub Link header.
 // Returns empty string if no next page.
 // Input example: <https://api.github.com/repos/owner/repo/pulls/1/reviews?page=2>; rel="next"

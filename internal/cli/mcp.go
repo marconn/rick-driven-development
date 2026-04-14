@@ -99,7 +99,7 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 	eng := engine.NewEngine(store, bus, logger)
 
 	// Register all workflow definitions
-	for _, name := range []string{"develop-only", "workspace-dev", "pr-review", "pr-feedback"} {
+	for _, name := range []string{"develop-only", "workspace-dev", "pr-review", "pr-feedback", "jira-dev", "github-dev"} {
 		if def, err := selectWorkflowDef(name); err == nil {
 			eng.RegisterWorkflow(def)
 		}
@@ -109,7 +109,7 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 	dispatcher := engine.NewLocalDispatcher(reg)
 	personaRunner := engine.NewPersonaRunner(store, bus, dispatcher, logger)
 	// Register workflow defs with PersonaRunner for DAG-based dispatch.
-	for _, name := range []string{"develop-only", "workspace-dev", "pr-review", "pr-feedback"} {
+	for _, name := range []string{"develop-only", "workspace-dev", "pr-review", "pr-feedback", "jira-dev", "github-dev"} {
 		if def, defErr := selectWorkflowDef(name); defErr == nil {
 			personaRunner.RegisterWorkflow(def)
 		}

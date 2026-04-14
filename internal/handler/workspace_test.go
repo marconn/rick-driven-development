@@ -210,6 +210,138 @@ func TestWorkspaceHandlerReadsRepoFromEnrichment(t *testing.T) {
 	}
 }
 
+// TestWorkspaceHandlerReadsTicketFromGithubEnrichment is a regression test
+// for workflow 2b42bf76-b2c0-4e4a-93b4-d330381f5ae2: the github-dev workflow
+// was failing at the workspace step with "ticket or branch is required"
+// because WorkflowRequested carried only `source=gh:owner/repo#N` (no ticket
+// or branch). github-context now emits a `ticket` enrichment item so the
+// workspace handler can derive the branch name from the issue number.
+func TestWorkspaceHandlerReadsTicketFromGithubEnrichment(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("RICK_REPOS_PATH", tmp)
+	setupTestGitRepo(t, tmp, "huli")
+
+	store := newMockStore()
+
+	// Mirrors the real github-dev payload: source set, no ticket, no branch.
+	reqPayload := event.MustMarshal(event.WorkflowRequestedPayload{
+		Prompt:     "implement observability P0",
+		WorkflowID: "github-dev",
+		Source:     "gh:hulilabs/huli#641",
+		Repo:       "huli",
+		Isolate:    false,
+	})
+	reqEvt := event.New(event.WorkflowRequested, 1, reqPayload).
+		WithAggregate("wf-gh", 1).
+		WithCorrelation("corr-gh")
+
+	enrichPayload := event.MustMarshal(event.ContextEnrichmentPayload{
+		Source:  "github-context",
+		Kind:    "issue",
+		Summary: "GitHub Issue hulilabs/huli#641",
+		Items: []event.EnrichmentItem{
+			{Name: "repo", Reason: "hulilabs/huli"},
+			{Name: "ticket", Reason: "issue-641"},
+		},
+	})
+	enrichEvt := event.New(event.ContextEnrichment, 1, enrichPayload).
+		WithAggregate("wf-gh:persona:github-context", 1).
+		WithCorrelation("corr-gh")
+
+	store.correlationEvents["corr-gh"] = []event.Envelope{reqEvt, enrichEvt}
+
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).
+		WithAggregate("wf-gh", 3).
+		WithCorrelation("corr-gh")
+
+	h := &WorkspaceHandler{store: store, name: "workspace"}
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(got))
+	}
+	if got[0].Type != event.WorkspaceReady {
+		t.Fatalf("expected WorkspaceReady, got %s", got[0].Type)
+	}
+
+	var payload event.WorkspaceReadyPayload
+	if err := json.Unmarshal(got[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Branch != "issue-641" {
+		t.Errorf("branch=%q, want issue-641", payload.Branch)
+	}
+}
+
+// Callers passing an explicit ticket must keep precedence over enrichment —
+// the enrichment fallback must be fallback, not override.
+func TestWorkspaceHandlerExplicitTicketBeatsEnrichment(t *testing.T) {
+	store := newMockStore()
+
+	reqPayload := event.MustMarshal(event.WorkflowRequestedPayload{
+		Prompt: "explicit ticket wins",
+		Repo:   "myrepo",
+		Ticket: "PROJ-1",
+	})
+	enrichPayload := event.MustMarshal(event.ContextEnrichmentPayload{
+		Source: "github-context",
+		Kind:   "issue",
+		Items: []event.EnrichmentItem{
+			{Name: "ticket", Reason: "issue-99"},
+		},
+	})
+	store.correlationEvents["corr-explicit-ticket"] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, reqPayload).WithCorrelation("corr-explicit-ticket"),
+		event.New(event.ContextEnrichment, 1, enrichPayload).WithCorrelation("corr-explicit-ticket"),
+	}
+
+	h := &WorkspaceHandler{store: store, name: "workspace"}
+	params, err := h.loadWorkspaceParams(context.Background(), "corr-explicit-ticket")
+	if err != nil {
+		t.Fatalf("loadWorkspaceParams: %v", err)
+	}
+	if params.Ticket != "PROJ-1" {
+		t.Errorf("ticket=%q, want PROJ-1 (explicit beats enrichment)", params.Ticket)
+	}
+}
+
+// When RepoBranch is set (PR / ci-fix path), enrichment ticket must not
+// clobber branch selection — the branch override wins.
+func TestWorkspaceHandlerRepoBranchSuppressesEnrichmentTicket(t *testing.T) {
+	store := newMockStore()
+
+	reqPayload := event.MustMarshal(event.WorkflowRequestedPayload{
+		Prompt:     "PR flow",
+		Repo:       "myrepo",
+		RepoBranch: "feature/existing",
+	})
+	enrichPayload := event.MustMarshal(event.ContextEnrichmentPayload{
+		Source: "github-context",
+		Kind:   "issue",
+		Items: []event.EnrichmentItem{
+			{Name: "ticket", Reason: "issue-99"},
+		},
+	})
+	store.correlationEvents["corr-prflow"] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, reqPayload).WithCorrelation("corr-prflow"),
+		event.New(event.ContextEnrichment, 1, enrichPayload).WithCorrelation("corr-prflow"),
+	}
+
+	h := &WorkspaceHandler{store: store, name: "workspace"}
+	params, err := h.loadWorkspaceParams(context.Background(), "corr-prflow")
+	if err != nil {
+		t.Fatalf("loadWorkspaceParams: %v", err)
+	}
+	if params.Ticket != "" {
+		t.Errorf("ticket=%q, want empty (RepoBranch set → ticket enrichment must be ignored)", params.Ticket)
+	}
+	if params.RepoBranch != "feature/existing" {
+		t.Errorf("repoBranch=%q, want feature/existing", params.RepoBranch)
+	}
+}
+
 func TestWorkspaceHandlerIsolatedUsesCorrelationSuffix(t *testing.T) {
 	// Isolated workspace should include correlation ID prefix in path to avoid collisions.
 	tmp := t.TempDir()

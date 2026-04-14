@@ -128,7 +128,7 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 	})
 
 	// Register workflow defs with both Engine (lifecycle) and PersonaRunner (DAG dispatch).
-	for _, name := range []string{"develop-only", "workspace-dev", "pr-review", "pr-feedback", "jira-dev", "ci-fix", "plan-btu", "plan-jira", "task-creator", "jira-qa-steps"} {
+	for _, name := range []string{"develop-only", "workspace-dev", "pr-review", "pr-feedback", "jira-dev", "github-dev", "ci-fix", "plan-btu", "plan-jira", "task-creator", "jira-qa-steps"} {
 		if def, defErr := selectWorkflowDef(name); defErr == nil {
 			eng.RegisterWorkflow(def)
 			personaRunner.RegisterWorkflow(def)

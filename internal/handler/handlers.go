@@ -165,6 +165,9 @@ func RegisterAll(reg *Registry, d Deps) error {
 		// Jira context handler (jira-dev workflow).
 		NewJiraContext(d),
 
+		// GitHub issue context handler (github-dev workflow).
+		NewGithubContext(d),
+
 		// QA-steps-specific handlers.
 		NewQAContext(d),
 		func() Handler {

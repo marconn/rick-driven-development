@@ -224,6 +224,38 @@ func JiraDevWorkflowDef() WorkflowDef {
 	}
 }
 
+// GithubDevWorkflowDef returns a workflow that reads a GitHub issue, provisions
+// a workspace, snapshots the codebase, then runs the full development pipeline.
+// Mirrors jira-dev but sources ticket context from GitHub Issues instead of Jira.
+func GithubDevWorkflowDef() WorkflowDef {
+	return WorkflowDef{
+		ID: "github-dev",
+		Required: []string{
+			"github-context", "workspace", "context-snapshot",
+			"researcher", "architect", "developer",
+			"quality-gate", "reviewer", "qa", "committer",
+		},
+		Graph: map[string][]string{
+			"github-context":   {},
+			"workspace":        {"github-context"},
+			"context-snapshot": {"workspace"},
+			"researcher":       {"context-snapshot"},
+			"architect":        {"researcher"},
+			"developer":        {"architect"},
+			"reviewer":         {"developer"},
+			"qa":               {"developer"},
+			"quality-gate":     {"reviewer", "qa"},
+			"committer":        {"quality-gate"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+		MaxIterations:     3,
+		EscalateOnMaxIter: true,
+		PhaseMap:          corePhaseMap,
+	}
+}
+
 // PlanBTUWorkflowDef returns a workflow for technical planning from Confluence
 // BTU documents.
 func PlanBTUWorkflowDef() WorkflowDef {
