@@ -19,7 +19,7 @@ func (s *Server) registerWaveTools() {
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_wave_plan",
-			Description: "Compute development waves from a parent work item. Supports a Jira epic (source.type=jira) or a GitHub parent issue with sub-issues (source.type=github). Reads children and dependency links, performs topological sort, returns a wave schedule showing which items can be developed in parallel. Back-compat: passing 'epic' alone is equivalent to {source:{type:'jira',epic:<value>}}.",
+			Description: "Compute development waves from a parent work item. Supports a Jira epic (source.type=jira), a GitHub parent issue with sub-issues (source.type=github, source.parent='owner/repo#N'), or a GitHub Projects V2 board (source.type=github, source.project='owner/N'). Reads children and dependency links, performs topological sort, returns a wave schedule showing which items can be developed in parallel. Back-compat: passing 'epic' alone is equivalent to {source:{type:'jira',epic:<value>}}.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -41,7 +41,11 @@ func (s *Server) registerWaveTools() {
 							},
 							"parent": map[string]any{
 								"type":        "string",
-								"description": "GitHub parent issue as 'owner/repo#N' (when type='github').",
+								"description": "GitHub parent issue as 'owner/repo#N' (when type='github'). Mutually exclusive with source.project.",
+							},
+							"project": map[string]any{
+								"type":        "string",
+								"description": "GitHub Projects V2 board (when type='github'). Format 'owner/N' (owner is org or user). Mutually exclusive with source.parent. Requires token scope 'read:project'.",
 							},
 							"child_discovery": map[string]any{
 								"type":        "string",
@@ -51,9 +55,9 @@ func (s *Server) registerWaveTools() {
 							},
 							"dependency_source": map[string]any{
 								"type":        "string",
-								"enum":        []string{"table", "body_refs", "labels", "none"},
+								"enum":        []string{"table", "body_refs", "labels", "none", "project_field"},
 								"default":     "table",
-								"description": "Dependency source: 'table' (Depends-on column in parent body), 'body_refs' (scan each child body for Depends-on / Blocks / Blocked-by keywords), 'labels' (depends:<number>), or 'none'.",
+								"description": "Dependency source. For parent-issue sources (source.parent): 'table' (Depends-on column in parent body), 'body_refs' (scan each child body for Depends-on / Blocks / Blocked-by keywords), 'labels' (depends:<number>), or 'none'. For Projects V2 (source.project): 'project_field' (read a 'Depends on' custom text field, default), plus body_refs / labels / none.",
 							},
 							"dag_options": map[string]any{
 								"type":        "object",
@@ -65,6 +69,11 @@ func (s *Server) registerWaveTools() {
 										"additionalProperties": map[string]any{"type": "string"},
 									},
 								},
+							},
+							"allow_cross_repo": map[string]any{
+								"type":        "boolean",
+								"default":     false,
+								"description": "When true, keeps cross-repo children (sub-issues or body refs pointing at a different owner/repo than the parent) instead of filtering them with 'cross_repo_not_supported'. Each cross-repo child is planned against its own repo. Requires token scope on every referenced repo.",
 							},
 						},
 					},
@@ -121,6 +130,23 @@ func (s *Server) registerWaveTools() {
 
 	s.register(Tool{
 		Definition: ToolDefinition{
+			Name:        "rick_github_pr_links",
+			Description: "Get GitHub pull request links for an issue or every child of a wave. Symmetrical to rick_jira_pr_links. Accepts either 'issue' (single owner/repo#N) or a wave source (same shape as rick_wave_plan). For each issue, resolves the workflow correlation via the 'source' tag and inspects the GitHub timeline for cross-referenced PRs.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"issue":  map[string]any{"type": "string", "description": "Single GitHub issue ref 'owner/repo#N'. Mutually exclusive with source/epic."},
+					"epic":   map[string]any{"type": "string", "description": "Jira epic key (back-compat shorthand for wave-wide lookup)."},
+					"source": waveSourceSchema(),
+					"wave":   map[string]any{"type": "integer", "description": "Wave number (optional, iterates all waves if omitted)."},
+				},
+			},
+		},
+		Handler: s.toolGitHubPRLinks,
+	})
+
+	s.register(Tool{
+		Definition: ToolDefinition{
 			Name:        "rick_wave_cleanup",
 			Description: "Remove all isolated workspaces for a wave. Supports Jira and GitHub sources.",
 			InputSchema: map[string]any{
@@ -148,8 +174,10 @@ func waveSourceSchema() map[string]any {
 			"epic":              map[string]any{"type": "string"},
 			"parent":            map[string]any{"type": "string"},
 			"child_discovery":   map[string]any{"type": "string", "enum": []string{"sub_issues", "task_list", "body_refs", "auto"}},
-			"dependency_source": map[string]any{"type": "string", "enum": []string{"table", "body_refs", "labels", "none"}},
+			"project":           map[string]any{"type": "string"},
+			"dependency_source": map[string]any{"type": "string", "enum": []string{"table", "body_refs", "labels", "none", "project_field"}},
 			"dag_options":       map[string]any{"type": "object"},
+			"allow_cross_repo":  map[string]any{"type": "boolean"},
 		},
 	}
 }
@@ -217,12 +245,23 @@ type wavePlanArgs struct {
 }
 
 type wavePlanSourceIn struct {
-	Type             string             `json:"type"`
-	Epic             string             `json:"epic"`
-	Parent           string             `json:"parent"`
-	ChildDiscovery   string             `json:"child_discovery"`
-	DependencySource string             `json:"dependency_source"`
-	DAGOptions       *dagOptionsIn      `json:"dag_options,omitempty"`
+	Type             string        `json:"type"`
+	Epic             string        `json:"epic"`
+	Parent           string        `json:"parent"`
+	ChildDiscovery   string        `json:"child_discovery"`
+	DependencySource string        `json:"dependency_source"`
+	DAGOptions       *dagOptionsIn `json:"dag_options,omitempty"`
+	// AllowCrossRepo, when true, keeps sub-issues and body-ref children whose
+	// owner/repo differs from the parent's instead of marking them as skipped.
+	// Each cross-repo child is planned against its own repo — workspace dirs,
+	// source tags, and cleanup matchers already key on the child's repo.
+	AllowCrossRepo bool `json:"allow_cross_repo"`
+	// Project enables the Projects V2 source. Format: "owner/N" where owner is
+	// the org or user and N is the project number. Mutually exclusive with
+	// parent — when set, child_discovery and AllowCrossRepo are ignored and
+	// children are read from the project board. Dependency_source defaults to
+	// "project_field" when Project is set.
+	Project string `json:"project"`
 }
 
 // dagOptionsIn carries per-workflow DAG-selection rules. Phase 2: dag_map is
@@ -236,13 +275,18 @@ type dagOptionsIn struct {
 // resolvedWaveSource is the normalized form used by wave_launch/status/cleanup
 // after parsing args. Exactly one of Epic or GHParent is populated.
 type resolvedWaveSource struct {
-	Kind             string // "jira" | "github"
+	Kind             string // "jira" | "github" | "github_project"
 	Epic             string
 	GHOwner, GHRepo  string
 	GHNumber         int
 	ChildDiscovery   string
 	DependencySource string
 	DAGMap           map[string]string
+	AllowCrossRepo   bool
+	// Projects V2 (when Kind=="github_project"): ProjectLogin is the owning
+	// org or user; ProjectNumber is the board number.
+	ProjectLogin  string
+	ProjectNumber int
 }
 
 func (r resolvedWaveSource) ghParent() string {
@@ -269,8 +313,39 @@ func parseWaveSource(args wavePlanArgs) (resolvedWaveSource, error) {
 		}
 		return resolvedWaveSource{Kind: "jira", Epic: epic}, nil
 	case "github":
+		// Projects V2 shape wins when `project` is set.
+		if src.Project != "" {
+			if src.Parent != "" {
+				return resolvedWaveSource{}, fmt.Errorf("source.project and source.parent are mutually exclusive")
+			}
+			login, num, err := parseGHProject(src.Project)
+			if err != nil {
+				return resolvedWaveSource{}, err
+			}
+			depSrc := src.DependencySource
+			if depSrc == "" {
+				depSrc = "project_field"
+			}
+			switch depSrc {
+			case "project_field", "body_refs", "labels", "none":
+			default:
+				return resolvedWaveSource{}, fmt.Errorf("source.dependency_source=%q unsupported for Projects V2 (use 'project_field', 'body_refs', 'labels', or 'none')", depSrc)
+			}
+			var dagMap map[string]string
+			if src.DAGOptions != nil {
+				dagMap = src.DAGOptions.DAGMap
+			}
+			return resolvedWaveSource{
+				Kind:             "github_project",
+				ProjectLogin:     login,
+				ProjectNumber:    num,
+				DependencySource: depSrc,
+				DAGMap:           dagMap,
+				AllowCrossRepo:   true, // project boards routinely span repos
+			}, nil
+		}
 		if src.Parent == "" {
-			return resolvedWaveSource{}, fmt.Errorf("source.parent is required when source.type='github'")
+			return resolvedWaveSource{}, fmt.Errorf("source.parent or source.project is required when source.type='github'")
 		}
 		owner, repo, num, err := parseGHParent(src.Parent)
 		if err != nil {
@@ -306,10 +381,41 @@ func parseWaveSource(args wavePlanArgs) (resolvedWaveSource, error) {
 			ChildDiscovery:   discovery,
 			DependencySource: depSrc,
 			DAGMap:           dagMap,
+			AllowCrossRepo:   src.AllowCrossRepo,
 		}, nil
 	default:
 		return resolvedWaveSource{}, fmt.Errorf("unknown source.type=%q (expected 'jira' or 'github')", src.Type)
 	}
+}
+
+// parseGHProject accepts project refs in two forms:
+//   - "owner/N" — short form, owner can be an org or user
+//   - "orgs/owner/projects/N" or "users/owner/projects/N" — URL path form
+//
+// Either way it returns (login, number). Invalid input yields a clear error.
+func parseGHProject(s string) (string, int, error) {
+	// URL-path form.
+	if strings.Contains(s, "/projects/") {
+		parts := strings.Split(s, "/")
+		if len(parts) == 4 && (parts[0] == "orgs" || parts[0] == "users") && parts[2] == "projects" {
+			n, err := strconv.Atoi(parts[3])
+			if err != nil || n <= 0 {
+				return "", 0, fmt.Errorf("invalid project ref %q: project number must be positive integer", s)
+			}
+			return parts[1], n, nil
+		}
+		return "", 0, fmt.Errorf("invalid project ref %q (expected 'orgs/OWNER/projects/N' or 'users/OWNER/projects/N')", s)
+	}
+	// Short form.
+	slash := strings.Index(s, "/")
+	if slash <= 0 || slash == len(s)-1 {
+		return "", 0, fmt.Errorf("invalid project ref %q (expected 'owner/N' or URL path form)", s)
+	}
+	n, err := strconv.Atoi(s[slash+1:])
+	if err != nil || n <= 0 {
+		return "", 0, fmt.Errorf("invalid project ref %q: project number must be positive integer", s)
+	}
+	return s[:slash], n, nil
 }
 
 // parseGHParent accepts "owner/repo#N". Rejects anything else with a clear
@@ -354,6 +460,8 @@ func (s *Server) computeWavePlanForSource(ctx context.Context, src resolvedWaveS
 		return s.computeJiraWavePlan(ctx, src.Epic)
 	case "github":
 		return s.computeGithubWavePlan(ctx, src)
+	case "github_project":
+		return s.computeProjectsV2WavePlan(ctx, src)
 	default:
 		return wavePlanResult{}, fmt.Errorf("unsupported source kind %q", src.Kind)
 	}
@@ -526,7 +634,8 @@ func (s *Server) computeGithubWavePlan(ctx context.Context, src resolvedWaveSour
 		}
 	}
 
-	parent, err := s.deps.GitHub.GetIssue(ctx, src.GHOwner, src.GHRepo, src.GHNumber)
+	cache := newIssueCache()
+	parent, err := cache.Get(ctx, s.deps.GitHub, src.GHOwner, src.GHRepo, src.GHNumber)
 	if err != nil {
 		return wavePlanResult{}, fmt.Errorf("fetch parent issue: %w", err)
 	}
@@ -542,7 +651,7 @@ func (s *Server) computeGithubWavePlan(ctx context.Context, src resolvedWaveSour
 		Source: wavePlanSource{Type: "github", Parent: src.ghParent()},
 	}
 
-	nodes, order, discoveryPath, err := s.discoverGithubChildren(ctx, src, parent, parentRepo, &result)
+	nodes, order, discoveryPath, err := s.discoverGithubChildren(ctx, src, parent, parentRepo, cache, &result)
 	if err != nil {
 		return wavePlanResult{}, err
 	}
@@ -554,7 +663,7 @@ func (s *Server) computeGithubWavePlan(ctx context.Context, src resolvedWaveSour
 		return result, nil
 	}
 
-	preds, depPath, err := s.buildGithubDependencies(ctx, src, parent, parentRepo, nodes, &result)
+	preds, depPath, err := s.buildGithubDependencies(ctx, src, parent, parentRepo, nodes, cache, &result)
 	if err != nil {
 		return wavePlanResult{}, err
 	}
@@ -567,7 +676,7 @@ func (s *Server) computeGithubWavePlan(ctx context.Context, src resolvedWaveSour
 
 	// DAG selection per child runs before we materialize tickets so that
 	// ticket.dag_params carries the resolved workflow / PR source.
-	s.assignDAGParams(ctx, src, nodes, parentRepo, &result)
+	s.assignDAGParams(ctx, src, nodes, &result)
 
 	result.Waves = buildWaveTickets(waves, nodes, order)
 	result.Parallelism = maxPar
@@ -605,7 +714,7 @@ type waveNode struct {
 // discoverGithubChildren resolves the set of children using the configured
 // discovery mode. Returns the node map, iteration order, and the path used
 // (so the caller can record it in diagnostics.discovery_path).
-func (s *Server) discoverGithubChildren(ctx context.Context, src resolvedWaveSource, parent *gh.Issue, parentRepo string, result *wavePlanResult) (map[string]*waveNode, []string, string, error) {
+func (s *Server) discoverGithubChildren(ctx context.Context, src resolvedWaveSource, parent *gh.Issue, parentRepo string, cache *issueCache, result *wavePlanResult) (map[string]*waveNode, []string, string, error) {
 	mode := src.ChildDiscovery
 	tryOrder := []string{mode}
 	if mode == "auto" {
@@ -614,7 +723,7 @@ func (s *Server) discoverGithubChildren(ctx context.Context, src resolvedWaveSou
 
 	var lastErr error
 	for _, attempt := range tryOrder {
-		nodes, order, attemptErr := s.discoverOnce(ctx, attempt, src, parent, parentRepo, result)
+		nodes, order, attemptErr := s.discoverOnce(ctx, attempt, src, parent, parentRepo, cache, result)
 		if attemptErr != nil {
 			lastErr = attemptErr
 			continue
@@ -633,14 +742,14 @@ func (s *Server) discoverGithubChildren(ctx context.Context, src resolvedWaveSou
 
 // discoverOnce runs a single discovery mode. `sub_issues` uses the dedicated
 // endpoint; the two body-based modes fall through to per-ref issue fetches.
-func (s *Server) discoverOnce(ctx context.Context, mode string, src resolvedWaveSource, parent *gh.Issue, parentRepo string, result *wavePlanResult) (map[string]*waveNode, []string, error) {
+func (s *Server) discoverOnce(ctx context.Context, mode string, src resolvedWaveSource, parent *gh.Issue, parentRepo string, cache *issueCache, result *wavePlanResult) (map[string]*waveNode, []string, error) {
 	switch mode {
 	case "sub_issues":
 		subs, err := s.deps.GitHub.GetSubIssues(ctx, src.GHOwner, src.GHRepo, src.GHNumber)
 		if err != nil {
 			return nil, nil, fmt.Errorf("fetch sub-issues: %w", err)
 		}
-		nodes := s.materializeFromSubIssues(subs, parentRepo, result)
+		nodes := s.materializeFromSubIssues(subs, parentRepo, src.AllowCrossRepo, result)
 		order := make([]string, 0, len(subs))
 		for _, sub := range subs {
 			repo := parentRepo
@@ -655,12 +764,12 @@ func (s *Server) discoverOnce(ctx context.Context, mode string, src resolvedWave
 		return nodes, order, nil
 	case "task_list":
 		refs := gh.ParseTaskList(parent.Body)
-		return s.materializeFromRefs(ctx, refs, parentRepo, result)
+		return s.materializeFromRefs(ctx, refs, parentRepo, src.AllowCrossRepo, cache, result)
 	case "body_refs":
 		refs := gh.ParseBodyRefs(parent.Body)
 		// Parent itself shouldn't be its own child.
 		refs = filterSelf(refs, gh.IssueRef{Owner: src.GHOwner, Repo: src.GHRepo, Number: src.GHNumber}, parentRepo)
-		return s.materializeFromRefs(ctx, refs, parentRepo, result)
+		return s.materializeFromRefs(ctx, refs, parentRepo, src.AllowCrossRepo, cache, result)
 	default:
 		return nil, nil, fmt.Errorf("unsupported discovery mode %q", mode)
 	}
@@ -668,7 +777,7 @@ func (s *Server) discoverOnce(ctx context.Context, mode string, src resolvedWave
 
 // materializeFromSubIssues converts SubIssue payloads into waveNodes and
 // records filter reasons in diagnostics.skipped. Order is preserved.
-func (s *Server) materializeFromSubIssues(subs []gh.SubIssue, parentRepo string, result *wavePlanResult) map[string]*waveNode {
+func (s *Server) materializeFromSubIssues(subs []gh.SubIssue, parentRepo string, allowCrossRepo bool, result *wavePlanResult) map[string]*waveNode {
 	nodes := make(map[string]*waveNode, len(subs))
 	for _, sub := range subs {
 		repo := parentRepo
@@ -685,7 +794,7 @@ func (s *Server) materializeFromSubIssues(subs []gh.SubIssue, parentRepo string,
 			result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{ID: id, Reason: "is_pull_request"})
 			continue
 		}
-		if repo != parentRepo {
+		if repo != parentRepo && !allowCrossRepo {
 			result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{ID: id, Reason: "cross_repo_not_supported"})
 			continue
 		}
@@ -702,7 +811,7 @@ func (s *Server) materializeFromSubIssues(subs []gh.SubIssue, parentRepo string,
 // labels/body — needed when body-based discovery yields bare numbers. Returns
 // the node map plus preserved-order slice; failures on individual issues are
 // non-fatal (recorded in diagnostics.skipped).
-func (s *Server) materializeFromRefs(ctx context.Context, refs []gh.IssueRef, parentRepo string, result *wavePlanResult) (map[string]*waveNode, []string, error) {
+func (s *Server) materializeFromRefs(ctx context.Context, refs []gh.IssueRef, parentRepo string, allowCrossRepo bool, cache *issueCache, result *wavePlanResult) (map[string]*waveNode, []string, error) {
 	nodes := make(map[string]*waveNode)
 	order := make([]string, 0, len(refs))
 	for _, ref := range refs {
@@ -714,12 +823,12 @@ func (s *Server) materializeFromRefs(ctx context.Context, refs []gh.IssueRef, pa
 		if _, dup := nodes[id]; dup {
 			continue
 		}
-		if repo != parentRepo {
+		if repo != parentRepo && !allowCrossRepo {
 			result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{ID: id, Reason: "cross_repo_not_supported"})
 			continue
 		}
 		owner, name := splitRepoFullName(repo)
-		issue, err := s.deps.GitHub.GetIssue(ctx, owner, name, ref.Number)
+		issue, err := cache.Get(ctx, s.deps.GitHub, owner, name, ref.Number)
 		if err != nil {
 			result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{ID: id, Reason: fmt.Sprintf("fetch failed: %v", err)})
 			continue
@@ -744,7 +853,7 @@ func (s *Server) materializeFromRefs(ctx context.Context, refs []gh.IssueRef, pa
 
 // buildGithubDependencies produces the predecessor map per the configured
 // dependency source. Unknown refs are recorded as skipped rather than failing.
-func (s *Server) buildGithubDependencies(ctx context.Context, src resolvedWaveSource, parent *gh.Issue, parentRepo string, nodes map[string]*waveNode, result *wavePlanResult) (map[string]map[string]bool, string, error) {
+func (s *Server) buildGithubDependencies(ctx context.Context, src resolvedWaveSource, parent *gh.Issue, parentRepo string, nodes map[string]*waveNode, cache *issueCache, result *wavePlanResult) (map[string]map[string]bool, string, error) {
 	preds := make(map[string]map[string]bool, len(nodes))
 	for id := range nodes {
 		preds[id] = make(map[string]bool)
@@ -775,7 +884,7 @@ func (s *Server) buildGithubDependencies(ctx context.Context, src resolvedWaveSo
 			body := node.body
 			if body == "" {
 				owner, name := splitRepoFullName(node.repo)
-				issue, err := s.deps.GitHub.GetIssue(ctx, owner, name, node.number)
+				issue, err := cache.Get(ctx, s.deps.GitHub, owner, name, node.number)
 				if err != nil {
 					result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{ID: node.id, Reason: fmt.Sprintf("fetch body for body_refs: %v", err)})
 					continue
@@ -926,7 +1035,7 @@ func buildWaveTickets(assigned map[string]int, nodes map[string]*waveNode, order
 //
 // The chosen DAG is written back into waveNode.dag so the launcher can pick
 // it up without re-running label logic.
-func (s *Server) assignDAGParams(ctx context.Context, src resolvedWaveSource, nodes map[string]*waveNode, parentRepo string, result *wavePlanResult) {
+func (s *Server) assignDAGParams(ctx context.Context, src resolvedWaveSource, nodes map[string]*waveNode, result *wavePlanResult) {
 	dagMap := src.DAGMap
 	defaultDAG := "workspace-dev"
 	if v, ok := dagMap["default"]; ok && v != "" {
@@ -934,7 +1043,7 @@ func (s *Server) assignDAGParams(ctx context.Context, src resolvedWaveSource, no
 	}
 
 	for id, node := range nodes {
-		dag, prRef, reason := s.pickDAG(ctx, node, dagMap, defaultDAG, parentRepo)
+		dag, prRef, reason := s.pickDAG(ctx, node, dagMap, defaultDAG)
 		if reason != "" {
 			result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{ID: id, Reason: reason})
 		}
@@ -946,7 +1055,7 @@ func (s *Server) assignDAGParams(ctx context.Context, src resolvedWaveSource, no
 // pickDAG is the pure decision function for a single child. Returns the
 // chosen DAG, an optional PR reference (for pr-feedback), and a diagnostic
 // reason string (non-empty when we want to record something).
-func (s *Server) pickDAG(ctx context.Context, node *waveNode, dagMap map[string]string, defaultDAG, parentRepo string) (string, string, string) {
+func (s *Server) pickDAG(ctx context.Context, node *waveNode, dagMap map[string]string, defaultDAG string) (string, string, string) {
 	// 1. rick:* labels.
 	for _, lab := range node.labels {
 		key, isRick := strings.CutPrefix(lab, "rick:")
@@ -988,7 +1097,17 @@ func (s *Server) pickDAG(ctx context.Context, node *waveNode, dagMap map[string]
 				if src.State != "open" {
 					continue
 				}
-				ref := fmt.Sprintf("gh:%s#%d", parentRepo, src.Number)
+				// PR may live in a different repo than the child (cross-repo
+				// PRs that reference an issue via Closes/Fixes). Prefer the
+				// PR's own repo extracted from its URL; fall back to the
+				// child's repo if the URL is missing or unparseable.
+				prRepo := node.repo
+				if src.HTMLURL != "" {
+					if o, r, _, ok := gh.ParsePRURL(src.HTMLURL); ok {
+						prRepo = fmt.Sprintf("%s/%s", o, r)
+					}
+				}
+				ref := fmt.Sprintf("gh:%s#%d", prRepo, src.Number)
 				return "pr-feedback", ref, ""
 			}
 		}
@@ -1073,6 +1192,231 @@ func canonicalizeEdgeRef(r gh.IssueRef, parentRepo string) string {
 	return fmt.Sprintf("%s#%d", parentRepo, r.Number)
 }
 
+// computeProjectsV2WavePlan handles the Projects V2 source. Reads the board
+// via GraphQL, converts each Issue item into a wave node, skips DraftIssue /
+// PullRequest items with explanatory diagnostics, resolves dependencies from
+// the "Depends on" text field (or falls back to the per-child modes), and
+// produces the same shape as the parent-issue path.
+func (s *Server) computeProjectsV2WavePlan(ctx context.Context, src resolvedWaveSource) (wavePlanResult, error) {
+	if s.deps.GitHub == nil {
+		return wavePlanResult{}, fmt.Errorf("GITHUB_TOKEN is not set — rick_wave_plan with source.project requires a configured GitHub client")
+	}
+
+	board, err := s.deps.GitHub.FetchProjectV2Items(ctx, src.ProjectLogin, src.ProjectNumber)
+	if err != nil {
+		return wavePlanResult{}, fmt.Errorf("fetch project v2: %w", err)
+	}
+
+	result := wavePlanResult{
+		Source: wavePlanSource{Type: "github", Parent: fmt.Sprintf("%s/projects/%d", src.ProjectLogin, src.ProjectNumber)},
+		Diagnostics: wavePlanDiagnostics{
+			DiscoveryPath: "projects_v2",
+		},
+	}
+
+	nodes := make(map[string]*waveNode, len(board.Items.Nodes))
+	order := make([]string, 0, len(board.Items.Nodes))
+	dependsOn := make(map[string]string) // nodeID -> raw "Depends on" value
+
+	for _, item := range board.Items.Nodes {
+		switch item.Content.Typename {
+		case "DraftIssue":
+			result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{
+				ID:     fmt.Sprintf("draft:%s", item.Content.Title),
+				Reason: "draft_item",
+			})
+			continue
+		case "PullRequest":
+			repo := item.Content.Repository.NameWithOwner
+			result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{
+				ID:     fmt.Sprintf("%s#%d", repo, item.Content.Number),
+				Reason: "is_pull_request",
+			})
+			continue
+		case "Issue":
+			// Fall through to the issue handling below.
+		default:
+			// Unknown content type — defensive skip.
+			continue
+		}
+
+		repo := item.Content.Repository.NameWithOwner
+		if repo == "" {
+			continue
+		}
+		id := fmt.Sprintf("%s#%d", repo, item.Content.Number)
+
+		if item.Content.State == "closed" {
+			result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{ID: id, Reason: "closed"})
+			continue
+		}
+
+		labels := make([]string, 0, len(item.Content.Labels.Nodes))
+		for _, l := range item.Content.Labels.Nodes {
+			labels = append(labels, l.Name)
+		}
+
+		nodes[id] = &waveNode{
+			id:     id,
+			repo:   repo,
+			number: item.Content.Number,
+			title:  item.Content.Title,
+			body:   item.Content.Body,
+			state:  item.Content.State,
+			labels: labels,
+		}
+		order = append(order, id)
+
+		// Capture "Depends on" (case-insensitive) custom text-field value.
+		for _, fv := range item.FieldValues.Nodes {
+			if fv.Typename != "ProjectV2ItemFieldTextValue" {
+				continue
+			}
+			if strings.EqualFold(fv.Field.Name, "depends on") && fv.Text != "" {
+				dependsOn[id] = fv.Text
+			}
+		}
+	}
+
+	if len(nodes) == 0 {
+		if result.Diagnostics.Reason == "" {
+			result.Diagnostics.Reason = "no_children_discovered"
+		}
+		return result, nil
+	}
+
+	preds, depPath, err := s.buildProjectsV2Dependencies(ctx, src, nodes, dependsOn, &result)
+	if err != nil {
+		return wavePlanResult{}, err
+	}
+	result.Diagnostics.DependencyPath = depPath
+
+	waves, maxPar, err := kahnWaves(order, preds, &result)
+	if err != nil {
+		return wavePlanResult{}, err
+	}
+
+	s.assignDAGParams(ctx, src, nodes, &result)
+	result.Waves = buildWaveTickets(waves, nodes, order)
+	result.Parallelism = maxPar
+
+	dependents := make(map[string]int)
+	for _, ps := range preds {
+		for p := range ps {
+			dependents[p]++
+		}
+	}
+	for id := range nodes {
+		if len(preds[id]) == 0 && dependents[id] == 0 {
+			result.Diagnostics.Orphans = append(result.Diagnostics.Orphans, id)
+		}
+	}
+	sort.Strings(result.Diagnostics.Orphans)
+	return result, nil
+}
+
+// buildProjectsV2Dependencies resolves the predecessor map for a Projects V2
+// source. "project_field" reads the "Depends on" values captured during item
+// iteration. Other modes (body_refs / labels / none) reuse the parent-issue
+// helpers so a team that keeps dependencies on the issue body still works.
+func (s *Server) buildProjectsV2Dependencies(_ context.Context, src resolvedWaveSource, nodes map[string]*waveNode, dependsOn map[string]string, result *wavePlanResult) (map[string]map[string]bool, string, error) {
+	preds := make(map[string]map[string]bool, len(nodes))
+	for id := range nodes {
+		preds[id] = make(map[string]bool)
+	}
+	switch src.DependencySource {
+	case "project_field":
+		for nodeID, raw := range dependsOn {
+			self := refFromNodeID(nodeID)
+			for _, ref := range gh.ParseIssueRefs(raw) {
+				if ref.Number == self.Number && sameOwnerRepoRef(ref, self) {
+					continue
+				}
+				onID := canonicalizeProjectEdge(ref, self)
+				if _, ok := nodes[onID]; !ok {
+					result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{
+						ID:     onID,
+						Reason: fmt.Sprintf("project_field dep of %s references unknown issue — treated as satisfied", nodeID),
+					})
+					continue
+				}
+				preds[nodeID][onID] = true
+			}
+		}
+		return preds, "project_field", nil
+	case "body_refs":
+		for nodeID, node := range nodes {
+			self := refFromNodeID(nodeID)
+			for _, edge := range gh.ParseBodyDependencies(self, node.body) {
+				from := canonicalizeProjectEdge(edge.From, self)
+				on := canonicalizeProjectEdge(edge.On, self)
+				if _, ok := nodes[from]; !ok {
+					continue
+				}
+				if _, ok := nodes[on]; !ok {
+					result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{
+						ID:     on,
+						Reason: fmt.Sprintf("body_refs dep of %s references unknown issue — treated as satisfied", from),
+					})
+					continue
+				}
+				preds[from][on] = true
+			}
+		}
+		return preds, "body_refs", nil
+	case "labels":
+		for id, node := range nodes {
+			self := refFromNodeID(id)
+			for _, lab := range node.labels {
+				dep, ok := parseDependsLabel(lab)
+				if !ok {
+					continue
+				}
+				onID := canonicalizeProjectEdge(dep, self)
+				if _, ok := nodes[onID]; !ok {
+					continue
+				}
+				preds[id][onID] = true
+			}
+		}
+		return preds, "labels", nil
+	case "none":
+		return preds, "none", nil
+	default:
+		return nil, "", fmt.Errorf("unsupported dependency source %q for Projects V2", src.DependencySource)
+	}
+}
+
+// refFromNodeID splits a canonical "owner/repo#N" node ID into an IssueRef.
+func refFromNodeID(id string) gh.IssueRef {
+	owner, repo, num := splitGHID(id)
+	return gh.IssueRef{Owner: owner, Repo: repo, Number: num}
+}
+
+// sameOwnerRepoRef is the Projects-V2 analogue of the package-private sameRepo
+// in github/discovery.go — an empty owner/repo on one side means "inherit from
+// the other side".
+func sameOwnerRepoRef(a, b gh.IssueRef) bool {
+	if a.Owner == "" || b.Owner == "" {
+		return true
+	}
+	return a.Owner == b.Owner && a.Repo == b.Repo
+}
+
+// canonicalizeProjectEdge fills in the missing owner/repo on a dependency ref
+// from the child that owns the edge (project items span multiple repos, so we
+// default to the referencing item's repo rather than a single "parentRepo").
+func canonicalizeProjectEdge(r, self gh.IssueRef) string {
+	owner, repo := r.Owner, r.Repo
+	if owner == "" {
+		owner = self.Owner
+	}
+	if repo == "" {
+		repo = self.Repo
+	}
+	return fmt.Sprintf("%s/%s#%d", owner, repo, r.Number)
+}
+
 // tryGraphQLWavePlan runs the single-query fast path. Returns (plan, true)
 // on success, or (_, false) to signal fallback to REST. Errors are swallowed
 // on purpose — this path is opt-in and non-authoritative.
@@ -1109,7 +1453,7 @@ func (s *Server) tryGraphQLWavePlan(ctx context.Context, src resolvedWaveSource)
 			result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{ID: id, Reason: "closed"})
 			continue
 		}
-		if repo != parentRepo {
+		if repo != parentRepo && !src.AllowCrossRepo {
 			result.Diagnostics.Skipped = append(result.Diagnostics.Skipped, wavePlanSkipEntry{ID: id, Reason: "cross_repo_not_supported"})
 			continue
 		}
@@ -1142,7 +1486,7 @@ func (s *Server) tryGraphQLWavePlan(ctx context.Context, src resolvedWaveSource)
 		return result, true
 	}
 
-	preds, depPath, err := s.buildGithubDependencies(ctx, src, &gh.Issue{Body: issue.Body}, parentRepo, nodes, &result)
+	preds, depPath, err := s.buildGithubDependencies(ctx, src, &gh.Issue{Body: issue.Body}, parentRepo, nodes, newIssueCache(), &result)
 	if err != nil {
 		return wavePlanResult{}, false
 	}
@@ -1155,7 +1499,7 @@ func (s *Server) tryGraphQLWavePlan(ctx context.Context, src resolvedWaveSource)
 
 	// DAG assignment — timeline-derived prRef is already on the node, so
 	// pickDAG will prefer pr-feedback without an extra HTTP call.
-	s.assignDAGParams(ctx, src, nodes, parentRepo, &result)
+	s.assignDAGParams(ctx, src, nodes, &result)
 
 	result.Waves = buildWaveTickets(assigned, nodes, order)
 	result.Parallelism = maxPar
@@ -1383,6 +1727,14 @@ type waveTicketStatus struct {
 	Phase          string `json:"phase,omitempty"`
 	JiraStatus     string `json:"jira_status,omitempty"`
 	IssueState     string `json:"issue_state,omitempty"`
+	// Done is true when the child is considered finished. Jira children: terminal
+	// status (Done/Closed/Cancelled). GitHub children: issue closed, OR a linked
+	// PR was merged (via timeline cross-reference) even if the issue is still
+	// open — matches GitHub workflows where PRs get merged but maintainers close
+	// issues manually later.
+	Done   bool   `json:"done"`
+	PRURL  string `json:"pr_url,omitempty"`
+	PRState string `json:"pr_state,omitempty"` // "merged" | "closed" | "open"
 }
 
 type waveStatusResult struct {
@@ -1436,8 +1788,16 @@ func (s *Server) toolWaveStatus(ctx context.Context, raw json.RawMessage) (any, 
 			}
 			if ticket.IDKind == "jira" {
 				ts.JiraStatus = ticket.Status
+				// Jira done = status is terminal.
+				switch ticket.Status {
+				case "Done", "Closed", "DONE", "Cancelled":
+					ts.Done = true
+				}
 			} else {
 				ts.IssueState = ticket.Status
+				if ticket.Status == "closed" {
+					ts.Done = true
+				}
 			}
 
 			tagKey, tagValue := waveStatusTag(ticket)
@@ -1451,6 +1811,23 @@ func (s *Server) toolWaveStatus(ctx context.Context, raw json.RawMessage) (any, 
 							ts.WorkflowStatus = w.Status
 							break
 						}
+					}
+				}
+			}
+
+			// Merge-to-close: when the workflow is completed and the issue is
+			// still open, consult the timeline once for linked PRs. If any
+			// linked PR is merged, treat the child as done. Caps API cost by
+			// gating on workflow completion — running/failed children skip the
+			// extra round-trip. Issue-only `closed` state is already covered
+			// above.
+			if ticket.IDKind == "github" && ts.WorkflowStatus == "completed" && !ts.Done && s.deps.GitHub != nil {
+				owner, repo, num := splitGHID(ticket.ID)
+				if owner != "" {
+					if mergedPR := s.findMergedPR(ctx, owner, repo, num); mergedPR != nil {
+						ts.Done = true
+						ts.PRURL = mergedPR.HTMLURL
+						ts.PRState = "merged"
 					}
 				}
 			}
@@ -1471,6 +1848,50 @@ func (s *Server) toolWaveStatus(ctx context.Context, raw json.RawMessage) (any, 
 	return result, nil
 }
 
+// findMergedPR walks the issue timeline for cross-referenced PR events and
+// returns the first PR whose state is closed AND whose merged flag is true.
+// Returns nil when no merged PR exists (either no PRs reference the issue or
+// all linked PRs are still open / closed-without-merge). All errors are
+// swallowed — this is best-effort enrichment for rick_wave_status and must not
+// break status lookups when GitHub is rate-limiting.
+func (s *Server) findMergedPR(ctx context.Context, owner, repo string, number int) *gh.PullRequest {
+	events, err := s.deps.GitHub.GetIssueTimeline(ctx, owner, repo, number)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	for _, ev := range events {
+		if ev.Event != "cross-referenced" || ev.Source == nil || ev.Source.Issue == nil {
+			continue
+		}
+		src := ev.Source.Issue
+		if src.PullRequest == nil || src.State != "closed" {
+			continue
+		}
+		// Resolve the PR's repo — usually the issue's own repo, but timeline
+		// cross-refs can point across repos.
+		prOwner, prRepo := owner, repo
+		if src.HTMLURL != "" {
+			if o, r, _, ok := gh.ParsePRURL(src.HTMLURL); ok {
+				prOwner, prRepo = o, r
+			}
+		}
+		key := fmt.Sprintf("%s/%s#%d", prOwner, prRepo, src.Number)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		pr, err := s.deps.GitHub.GetPR(ctx, prOwner, prRepo, src.Number)
+		if err != nil || pr == nil {
+			continue
+		}
+		if pr.Merged {
+			return pr
+		}
+	}
+	return nil
+}
+
 // waveStatusTag returns the (key, value) pair used to look up the workflow
 // correlation for a given child. Jira children are indexed by their ticket
 // key; GitHub children are indexed by their source tag.
@@ -1480,6 +1901,162 @@ func waveStatusTag(t wavePlanTicket) (string, string) {
 		return "source", fmt.Sprintf("gh:%s/%s#%d", owner, repo, number)
 	}
 	return "ticket", t.ID
+}
+
+// --- GitHub PR Links ---
+
+type githubPRLinksArgs struct {
+	Issue  string            `json:"issue"`
+	Epic   string            `json:"epic"`
+	Source *wavePlanSourceIn `json:"source"`
+	Wave   *int              `json:"wave"`
+}
+
+// prLink is one PR referencing the issue, extracted from the GitHub timeline.
+type prLink struct {
+	Repo   string `json:"repo"`
+	Number int    `json:"number"`
+	URL    string `json:"url"`
+	State  string `json:"state"`
+	Title  string `json:"title,omitempty"`
+	Merged bool   `json:"merged,omitempty"`
+}
+
+// githubIssuePRLinks is one issue's row: the issue itself, any linked PRs
+// discovered via the cross-referenced timeline events, and the workflow
+// correlation ID (when present) plus status.
+type githubIssuePRLinks struct {
+	Issue          string   `json:"issue"`
+	Title          string   `json:"title,omitempty"`
+	CorrelationID  string   `json:"correlation_id,omitempty"`
+	WorkflowStatus string   `json:"workflow_status,omitempty"`
+	PRs            []prLink `json:"prs"`
+}
+
+type githubPRLinksResult struct {
+	Scope  string               `json:"scope"` // "issue" | "wave"
+	Issues []githubIssuePRLinks `json:"issues"`
+	Count  int                  `json:"count"`
+}
+
+func (s *Server) toolGitHubPRLinks(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args githubPRLinksArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if s.deps.GitHub == nil {
+		return nil, fmt.Errorf("GITHUB_TOKEN is not set — rick_github_pr_links requires a configured GitHub client")
+	}
+
+	// Single-issue shape: `issue = "owner/repo#N"`.
+	if args.Issue != "" {
+		owner, repo, num, err := parseGHParent(args.Issue)
+		if err != nil {
+			return nil, fmt.Errorf("invalid issue ref: %w", err)
+		}
+		row, err := s.collectIssuePRLinks(ctx, owner, repo, num)
+		if err != nil {
+			return nil, err
+		}
+		return githubPRLinksResult{Scope: "issue", Issues: []githubIssuePRLinks{row}, Count: 1}, nil
+	}
+
+	// Wave shape: delegate to wave planning to enumerate children, then look up
+	// PRs + workflow correlation for each.
+	src, err := parseWaveSource(wavePlanArgs{Epic: args.Epic, Source: args.Source})
+	if err != nil {
+		return nil, err
+	}
+	plan, err := s.computeWavePlanForSource(ctx, src)
+	if err != nil {
+		return nil, fmt.Errorf("compute wave plan: %w", err)
+	}
+	result := githubPRLinksResult{Scope: "wave"}
+	for _, wave := range plan.Waves {
+		if args.Wave != nil && wave.Wave != *args.Wave {
+			continue
+		}
+		for _, ticket := range wave.Tickets {
+			if ticket.IDKind != "github" {
+				continue
+			}
+			owner, repo, num := splitGHID(ticket.ID)
+			if owner == "" {
+				continue
+			}
+			row, collectErr := s.collectIssuePRLinks(ctx, owner, repo, num)
+			if collectErr != nil {
+				// Non-fatal — record the issue with an empty PR list and skip.
+				row = githubIssuePRLinks{Issue: ticket.ID, Title: ticket.Summary}
+			}
+			if row.Title == "" {
+				row.Title = ticket.Summary
+			}
+
+			tagKey, tagValue := waveStatusTag(ticket)
+			if corrs, tagErr := s.deps.Store.LoadByTag(ctx, tagKey, tagValue); tagErr == nil && len(corrs) > 0 {
+				row.CorrelationID = corrs[len(corrs)-1]
+				if ws := s.deps.Workflows; ws != nil {
+					for _, w := range ws.All() {
+						if w.AggregateID == row.CorrelationID {
+							row.WorkflowStatus = w.Status
+							break
+						}
+					}
+				}
+			}
+			result.Issues = append(result.Issues, row)
+		}
+	}
+	result.Count = len(result.Issues)
+	return result, nil
+}
+
+// collectIssuePRLinks walks the issue timeline for cross-referenced PRs.
+// Returns a populated row regardless of whether any PRs were found so the
+// caller can still surface the issue in the result set.
+func (s *Server) collectIssuePRLinks(ctx context.Context, owner, repo string, number int) (githubIssuePRLinks, error) {
+	id := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	row := githubIssuePRLinks{Issue: id, PRs: []prLink{}}
+
+	issue, err := s.deps.GitHub.GetIssue(ctx, owner, repo, number)
+	if err == nil && issue != nil {
+		row.Title = issue.Title
+	}
+
+	events, err := s.deps.GitHub.GetIssueTimeline(ctx, owner, repo, number)
+	if err != nil {
+		return row, fmt.Errorf("fetch timeline for %s: %w", id, err)
+	}
+	seen := make(map[string]bool)
+	for _, ev := range events {
+		if ev.Event != "cross-referenced" || ev.Source == nil || ev.Source.Issue == nil {
+			continue
+		}
+		src := ev.Source.Issue
+		if src.PullRequest == nil {
+			continue
+		}
+		prRepo := fmt.Sprintf("%s/%s", owner, repo) // default to parent repo
+		if src.HTMLURL != "" {
+			if o, r, _, ok := gh.ParsePRURL(src.HTMLURL); ok {
+				prRepo = fmt.Sprintf("%s/%s", o, r)
+			}
+		}
+		key := fmt.Sprintf("%s#%d", prRepo, src.Number)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		row.PRs = append(row.PRs, prLink{
+			Repo:   prRepo,
+			Number: src.Number,
+			URL:    src.HTMLURL,
+			State:  src.State,
+			Title:  src.Title,
+		})
+	}
+	return row, nil
 }
 
 // --- Wave Cleanup ---
@@ -1580,6 +2157,37 @@ func extractRepo(labels []string, summary string) string {
 		return strings.TrimSpace(summary[:idx])
 	}
 	return ""
+}
+
+// issueCache dedupes GetIssue calls within a single rick_wave_plan invocation.
+// body_refs and task_list discovery modes can reference the same issue multiple
+// times across discovery + dependency passes; the cache turns those repeated
+// calls into a single fetch. Not safe for concurrent use — the planner is
+// single-goroutine per invocation.
+type issueCache struct {
+	issues map[string]*gh.Issue
+}
+
+func newIssueCache() *issueCache { return &issueCache{issues: make(map[string]*gh.Issue)} }
+
+// Get returns a cached issue or fetches it. Negative lookups are not cached —
+// a failed fetch is retried on the next call because GitHub errors are usually
+// transient (rate limit, 5xx). Positive lookups are memoized for the rest of
+// the invocation.
+func (c *issueCache) Get(ctx context.Context, client *gh.Client, owner, repo string, number int) (*gh.Issue, error) {
+	if c == nil {
+		return client.GetIssue(ctx, owner, repo, number)
+	}
+	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
+	if iss, ok := c.issues[key]; ok {
+		return iss, nil
+	}
+	iss, err := client.GetIssue(ctx, owner, repo, number)
+	if err != nil {
+		return nil, err
+	}
+	c.issues[key] = iss
+	return iss, nil
 }
 
 func unique(ss []string) []string {

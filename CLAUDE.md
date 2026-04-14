@@ -216,7 +216,7 @@ Four read-model projections (`internal/projection/`): workflow status, token usa
 
 ### MCP Server
 
-`internal/mcp/`: JSON-RPC 2.0 over stdio/HTTP with 47 tools across 7 categories. Used by Claude Desktop/Cursor and the agent UI.
+`internal/mcp/`: JSON-RPC 2.0 over stdio/HTTP with 48 tools across 7 categories. Used by Claude Desktop/Cursor and the agent UI.
 
 **Workflow tools** (16, `tools.go`): `rick_run_workflow`, `rick_workflow_status`, `rick_list_workflows`, `rick_list_events`, `rick_token_usage`, `rick_phase_timeline`, `rick_workflow_verdicts`, `rick_persona_output`, `rick_list_dead_letters`, `rick_cancel_workflow`, `rick_pause_workflow`, `rick_resume_workflow`, `rick_inject_guidance`, `rick_plan_btu`, `rick_approve_hint`, `rick_reject_hint`
 
@@ -228,7 +228,7 @@ Four read-model projections (`internal/projection/`): workflow status, token usa
 
 **Jira tools** (10, `tools_jira.go`): `rick_jira_read`, `rick_jira_write`, `rick_jira_transition`, `rick_jira_comment`, `rick_jira_epic_issues`, `rick_jira_search`, `rick_jira_link`, `rick_jira_delete_link`, `rick_jira_set_microservice`, `rick_jira_pr_links`. Requires `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN` env vars.
 
-**Wave tools** (4, `tools_wave.go`): `rick_wave_plan` (topological sort of parent children into parallel waves — accepts Jira epic via `{source:{type:"jira",epic:"PROJ-X"}}` or legacy `epic="PROJ-X"`, or GitHub parent via `{source:{type:"github",parent:"owner/repo#N",child_discovery:"sub_issues|task_list|body_refs|auto",dependency_source:"table|body_refs|labels|none",dag_options:{dag_map:{…}}}}`. `auto` discovery falls back sub_issues → task_list → body_refs. DAG per child is picked from `rick:*` labels → open-PR cross-reference via timeline → dag_map default. Opt-in `RICK_GITHUB_GRAPHQL=1` batches parent + sub-issues + timeline into one query.), `rick_wave_launch` (batch-start per-child workflows — honors per-ticket `dag_params` from the plan), `rick_wave_status` (monitor wave progress via `ticket` or `source` tag lookup), `rick_wave_cleanup` (remove wave workspaces — matches Jira keys and `-gh<num>-` GitHub suffix).
+**Wave tools** (5, `tools_wave.go`): `rick_wave_plan` (topological sort of parent children into parallel waves — accepts Jira epic via `{source:{type:"jira",epic:"PROJ-X"}}` or legacy `epic="PROJ-X"`, a GitHub parent via `{source:{type:"github",parent:"owner/repo#N",child_discovery:"sub_issues|task_list|body_refs|auto",dependency_source:"table|body_refs|labels|none",dag_options:{dag_map:{…}},allow_cross_repo:true}}`, or a GitHub Projects V2 board via `{source:{type:"github",project:"owner/N",dependency_source:"project_field|body_refs|labels|none"}}`. `auto` discovery falls back sub_issues → task_list → body_refs. DAG per child is picked from `rick:*` labels → open-PR cross-reference via timeline → dag_map default. `allow_cross_repo` retains sub-issues/body-refs that point at a different repo than the parent. Projects V2 reads issues from a board and prefers a "Depends on" text field for dependencies; requires token scope `read:project`. Opt-in `RICK_GITHUB_GRAPHQL=1` batches parent + sub-issues + timeline into one query. Caches `GetIssue` calls per invocation so body_refs / task_list / body_refs dependency modes dedupe fetches.), `rick_wave_launch` (batch-start per-child workflows — honors per-ticket `dag_params` from the plan), `rick_wave_status` (monitor wave progress via `ticket` or `source` tag lookup — also marks a GitHub child `done` when a linked PR is merged via timeline cross-reference, even if the issue is still open), `rick_github_pr_links` (symmetrical to `rick_jira_pr_links` — accepts a single `issue` or a wave source and returns linked PRs plus workflow correlation per child), `rick_wave_cleanup` (remove wave workspaces — matches Jira keys and `-gh<num>-` GitHub suffix).
 
 **Observability tools** (7, `tools_observability.go`): `rick_search_workflows` (find by ticket/source/repo tag), `rick_retry_workflow` (restart failed from checkpoint), `rick_workflow_output` (consolidated all-phase output), `rick_diff` (git diff from workspace), `rick_pr_diff` (GitHub PR diff by repo + PR number, no workflow needed), `rick_create_pr` (push + gh pr create), `rick_project_sync` (Mermaid dependency diagram from epic).
 
@@ -521,7 +521,7 @@ Every directory has a `CLAUDE.md` with a focused file map and the local rules. W
 │   ├── jira/                       → internal/jira/CLAUDE.md
 │   ├── jiraplanner/                → internal/jiraplanner/CLAUDE.md
 │   ├── jirapoller/                 → internal/jirapoller/CLAUDE.md
-│   ├── mcp/                        → internal/mcp/CLAUDE.md      (47 tools)
+│   ├── mcp/                        → internal/mcp/CLAUDE.md      (48 tools)
 │   ├── observe/                    → internal/observe/CLAUDE.md  (NB: not yet wired in)
 │   ├── persona/                    → internal/persona/CLAUDE.md
 │   │   ├── phases/                 → internal/persona/phases/CLAUDE.md   (per-phase user prompts)

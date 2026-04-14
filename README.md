@@ -37,7 +37,7 @@ When a reviewer or QA persona renders a failing verdict, the engine emits `Feedb
 - **Built-in workflows** — `workspace-dev`, `jira-dev`, `pr-review`, `pr-feedback`, `ci-fix`, `plan-btu`, `plan-jira`, `task-creator`, `jira-qa-steps`, and more.
 - **Feedback loops** — Failing review verdicts re-trigger the developer automatically. Max iterations and escalation-on-limit keep loops bounded.
 - **Hint system** — Two-phase dispatch: handlers can emit a lightweight pre-check (`Hint`) for human review before full execution. Auto-approve above a confidence threshold, or pause for operator input.
-- **MCP server** — 47 tools across workflow management, jobs, workspaces, Jira, Confluence, wave orchestration, and observability. Works with Claude Desktop, Cursor, or any MCP-compatible client.
+- **MCP server** — 48 tools across workflow management, jobs, workspaces, Jira, Confluence, wave orchestration, and observability. Works with Claude Desktop, Cursor, or any MCP-compatible client.
 - **gRPC service discovery** — External systems register as handlers via bidirectional streaming. The stream lifecycle is the service discovery — open registers, close deregisters. Reconnecting client with exponential backoff included.
 - **Dynamic workflow registration** — External systems can compose custom workflows from any combination of local and gRPC-connected handlers at runtime, no code changes needed.
 - **Agent UI** — Desktop application (Wails + Svelte 5) with chat, workflow dashboard, and real-time event stream. Backed by a Gemini ADK operator that calls Rick's MCP tools.

@@ -79,7 +79,8 @@ func (c *Client) GetPR(ctx context.Context, owner, repo string, prNumber int) (*
 type PullRequest struct {
 	Number  int    `json:"number"`
 	Title   string `json:"title"`
-	State   string `json:"state"` // "open", "closed"
+	State   string `json:"state"`  // "open", "closed"
+	Merged  bool   `json:"merged"` // true when state=="closed" and the PR was merged (not just closed)
 	HTMLURL string `json:"html_url"`
 	Head    PRRef  `json:"head"`
 	Base    PRRef  `json:"base"`
