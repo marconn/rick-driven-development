@@ -85,6 +85,7 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 		Builder:        builder,
 		Jira:           jira.NewClientFromEnv(),
 		Confluence:     confluence.NewClientFromEnv(),
+		GitHub:         newGitHubClient(),
 		Estimation:     openEstimationStore(logger),
 		MsMap:          loadMicroserviceMap(logger),
 		Logger:         logger,
@@ -152,6 +153,7 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 		Backend:        be,
 		Jira:           deps.Jira,
 		Confluence:     deps.Confluence,
+		GitHub:         deps.GitHub,
 	}
 
 	server := mcp.NewServer(mcpDeps, logger)

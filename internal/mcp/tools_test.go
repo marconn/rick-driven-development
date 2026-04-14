@@ -679,7 +679,7 @@ func TestToolWavePlan_MissingEpic(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing epic")
 	}
-	if !strings.Contains(err.Error(), "epic is required") {
+	if !strings.Contains(err.Error(), "'epic' or 'source' is required") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

@@ -215,6 +215,7 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 		Backend:        be,
 		Jira:           deps.Jira,
 		Confluence:     deps.Confluence,
+		GitHub:         ghClient,
 	}
 
 	server := mcp.NewServer(mcpDeps, logger)

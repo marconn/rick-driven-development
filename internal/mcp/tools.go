@@ -18,6 +18,7 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/event"
 	"github.com/marconn/rick-event-driven-development/internal/eventbus"
 	"github.com/marconn/rick-event-driven-development/internal/eventstore"
+	gh "github.com/marconn/rick-event-driven-development/internal/github"
 	"github.com/marconn/rick-event-driven-development/internal/jira"
 	"github.com/marconn/rick-event-driven-development/internal/projection"
 )
@@ -92,6 +93,7 @@ type Deps struct {
 	Backend    backend.Backend
 	Jira       *jira.Client
 	Confluence *confluence.Client
+	GitHub     *gh.Client
 }
 
 func (s *Server) registerBuiltinTools() { //nolint:funlen // tool registration is intentionally verbose

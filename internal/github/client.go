@@ -346,6 +346,94 @@ func (c *Client) GetIssue(ctx context.Context, owner, repo string, number int) (
 	return &issue, nil
 }
 
+// TimelineEvent is a minimal projection of GitHub's issue timeline used for
+// discovering PRs that reference an issue via "Closes/Fixes/Resolves" keywords.
+// Only the two event types we care about (cross-referenced and connected) are
+// decoded; other events pass through as the unknown Event string.
+type TimelineEvent struct {
+	Event  string              `json:"event"`
+	Source *TimelineEventSrc   `json:"source,omitempty"`
+	Subject *TimelineEventRef  `json:"subject,omitempty"`
+}
+
+// TimelineEventSrc is the "cross-referenced" payload; Issue holds the PR that
+// mentioned this issue (GitHub models PRs as issues with PullRequest!=nil).
+type TimelineEventSrc struct {
+	Type  string `json:"type"`
+	Issue *Issue `json:"issue,omitempty"`
+}
+
+// TimelineEventRef is the "connected" payload (sub-issue/linked-PR events).
+type TimelineEventRef struct {
+	Issue *Issue `json:"issue,omitempty"`
+}
+
+// GetIssueTimeline fetches the issue timeline, which includes cross-referenced
+// events from PRs that link the issue via Closes/Fixes/Resolves keywords.
+// Used by the wave planner to route children to pr-feedback when an open PR
+// already exists.
+func (c *Client) GetIssueTimeline(ctx context.Context, owner, repo string, number int) ([]TimelineEvent, error) {
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/timeline", owner, repo, number)
+	pages, err := c.getPaginated(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("github: issue timeline %s/%s#%d: %w", owner, repo, number, err)
+	}
+	events := make([]TimelineEvent, 0, len(pages))
+	for _, raw := range pages {
+		var e TimelineEvent
+		if err := json.Unmarshal(raw, &e); err != nil {
+			continue
+		}
+		events = append(events, e)
+	}
+	return events, nil
+}
+
+// SubIssue is a child referenced via GitHub's native sub-issues endpoint.
+// The API returns full issue bodies; we keep only the fields wave planning uses.
+type SubIssue struct {
+	Number  int          `json:"number"`
+	Title   string       `json:"title"`
+	Body    string       `json:"body"`
+	State   string       `json:"state"`
+	HTMLURL string       `json:"html_url"`
+	Labels  []IssueLabel `json:"labels"`
+	// Repository is populated when the sub-issue lives in a different repo
+	// than the parent; otherwise the API returns it but we resolve the fallback
+	// at the call site so callers can treat Repo as "" → same as parent.
+	Repository *struct {
+		FullName string `json:"full_name"`
+	} `json:"repository,omitempty"`
+	PullRequest *struct{} `json:"pull_request,omitempty"`
+}
+
+// GetSubIssues fetches the sub-issues of a parent issue using GitHub's native
+// sub-issues endpoint. GA since 2025. Returns an empty slice (no error) when
+// the parent has no sub-issues. When the caller's token lacks scope, the API
+// responds with 403/404 — surface that with a scope hint.
+func (c *Client) GetSubIssues(ctx context.Context, owner, repo string, number int) ([]SubIssue, error) {
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/sub_issues", owner, repo, number)
+	pages, err := c.getPaginated(ctx, path)
+	if err != nil {
+		// Preserve the underlying HTTP error so callers can distinguish
+		// missing-scope from other failures (see spec §9 "Private repo without
+		// token scope").
+		if strings.Contains(err.Error(), "HTTP 403") || strings.Contains(err.Error(), "HTTP 404") {
+			return nil, fmt.Errorf("github: get sub-issues %s/%s#%d: %w (token likely missing issues:read scope or sub-issues not enabled on the repo)", owner, repo, number, err)
+		}
+		return nil, fmt.Errorf("github: get sub-issues %s/%s#%d: %w", owner, repo, number, err)
+	}
+	subs := make([]SubIssue, 0, len(pages))
+	for _, raw := range pages {
+		var s SubIssue
+		if unmarshalErr := json.Unmarshal(raw, &s); unmarshalErr != nil {
+			return nil, fmt.Errorf("github: unmarshal sub-issue: %w", unmarshalErr)
+		}
+		subs = append(subs, s)
+	}
+	return subs, nil
+}
+
 // nextPagePath extracts the path for rel="next" from a GitHub Link header.
 // Returns empty string if no next page.
 // Input example: <https://api.github.com/repos/owner/repo/pulls/1/reviews?page=2>; rel="next"
