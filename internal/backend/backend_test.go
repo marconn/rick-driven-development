@@ -33,6 +33,16 @@ func TestNew(t *testing.T) {
 		}
 	})
 
+	t.Run("codex", func(t *testing.T) {
+		b, err := New("codex")
+		if err != nil {
+			t.Fatalf("New(codex): %v", err)
+		}
+		if b.Name() != "codex" {
+			t.Errorf("want codex, got %s", b.Name())
+		}
+	})
+
 	t.Run("unknown", func(t *testing.T) {
 		_, err := New("openai")
 		if err == nil {
@@ -189,6 +199,70 @@ func TestGeminiBuildArgs(t *testing.T) {
 		if stdin == "" {
 			t.Error("expected stdin for large prompt")
 		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Codex buildArgs
+// ---------------------------------------------------------------------------
+
+func TestCodexBuildArgs(t *testing.T) {
+	c := NewCodex("codex")
+
+	t.Run("basic_combines_prompts", func(t *testing.T) {
+		args, stdin := c.buildArgs(Request{
+			SystemPrompt: "You are an expert.",
+			UserPrompt:   "Hello",
+		})
+		assertContains(t, args, "exec")
+		assertContains(t, args, "--json")
+		if stdin != "" {
+			t.Error("unexpected stdin prompt for small input")
+		}
+		// System prompt should be embedded in the last arg or stdin.
+		found := false
+		for _, a := range args {
+			if strings.Contains(a, "<system_instructions>") {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("system prompt not embedded in args")
+		}
+	})
+
+	t.Run("session_resume", func(t *testing.T) {
+		args, _ := c.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+			SessionID:    "abc-123",
+		})
+		assertContains(t, args, "exec")
+		assertContains(t, args, "resume")
+		assertContains(t, args, "abc-123")
+	})
+
+	t.Run("session_continue_latest", func(t *testing.T) {
+		args, _ := c.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+			SessionID:    "latest",
+		})
+		assertContains(t, args, "exec")
+		assertContains(t, args, "resume")
+		assertContains(t, args, "--last")
+	})
+
+	t.Run("yolo_and_model", func(t *testing.T) {
+		args, _ := c.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+			Yolo:         true,
+			Model:        "gpt-5",
+		})
+		assertContains(t, args, "--dangerously-bypass-approvals-and-sandbox")
+		assertContains(t, args, "--model")
+		assertContains(t, args, "gpt-5")
 	})
 }
 
@@ -382,6 +456,36 @@ func TestStreamWriterGemini(t *testing.T) {
 
 	if got := buf.String(); got != "Hello world!" {
 		t.Errorf("want %q, got %q", "Hello world!", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Stream parsing — Codex
+// ---------------------------------------------------------------------------
+
+func TestStreamWriterCodex(t *testing.T) {
+	var buf bytes.Buffer
+	ext := NewCodexExtractor()
+	sw := NewStreamWriter(&buf, ext.ExtractFn())
+
+	events := []string{
+		`{"type":"thread.started","thread_id":"123"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"Hello Codex!"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}`,
+	}
+	for _, line := range events {
+		if _, err := sw.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	_ = sw.Close()
+
+	if got := buf.String(); got != "Hello Codex!" {
+		t.Errorf("want %q, got %q", "Hello Codex!", got)
+	}
+	if got := ext.TokensUsed(); got != 15 {
+		t.Errorf("want tokens 15, got %d", got)
 	}
 }
 

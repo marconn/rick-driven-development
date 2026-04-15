@@ -1,15 +1,17 @@
 # package backend
 
-Wraps `claude` and `gemini` CLI binaries as a uniform `Backend` interface, parsing their NDJSON `stream-json` output to capture text and stop reasons.
+Wraps `claude`, `gemini`, and `codex` CLI binaries as a uniform `Backend` interface, parsing their NDJSON `stream-json` output to capture text and stop reasons.
 
 ## Files
 - `backend.go` — `Backend` interface, `Request`/`Response` types, `maxArgSize` (128KB) prompt-via-stdin threshold.
-- `factory.go` — `New(name)` constructor; honors `RICK_CLAUDE_BIN` / `RICK_GEMINI_BIN` env overrides.
+- `factory.go` — `New(name)` constructor; honors `RICK_CLAUDE_BIN`, `RICK_GEMINI_BIN`, and `RICK_CODEX_BIN` env overrides.
 - `claude.go` — `Claude` driver: `buildArgs` for `-p`/`--system-prompt`/`--continue`/`--resume`/`--mcp-config`/`--dangerously-skip-permissions`; clears `CLAUDECODE` env to avoid nested-session refusal.
 - `gemini.go` — `Gemini` driver: combines system + user prompt into `<system_instructions>` XML wrapper (gemini CLI has no system-prompt flag).
+- `codex.go` — `Codex` driver: uses `exec` and `exec resume` subcommands with `--json`; wraps system prompt in XML tags like Gemini.
 - `stream.go` — `StreamWriter` (io.Writer) buffers + splits NDJSON lines, calls `ExtractFn` per line, optional `CheckResultFn` via `WithResultCheck`.
 - `stream_claude.go` — `ExtractClaudeText` / `NewClaudePrintExtractor` / `ClaudeCheckResult`; handles both legacy flat events and `stream_event` envelope from `--include-partial-messages`.
 - `stream_gemini.go` — `ExtractGeminiText` / `GeminiCheckResult` (gemini exposes no stop_reason yet, returns "").
+- `stream_codex.go` — `NewCodexExtractor`; handles `item.completed` events for text extraction and `turn.completed` for token usage.
 - `structured.go` — `ExtractJSON(output)`: pulls JSON from fenced code blocks, then falls back to scanning for first valid `{...}`/`[...]` in raw text.
 
 ## Key types

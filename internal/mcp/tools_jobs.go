@@ -30,7 +30,7 @@ func (s *Server) registerJobTools() {
 					},
 					"backend": map[string]any{
 						"type":        "string",
-						"enum":        []string{"claude", "gemini"},
+						"enum":        []string{"claude", "gemini", "codex"},
 						"description": "AI backend. Defaults to server's configured backend.",
 					},
 					"model": map[string]any{
@@ -77,7 +77,7 @@ func (s *Server) registerJobTools() {
 					},
 					"backend": map[string]any{
 						"type":        "string",
-						"enum":        []string{"claude", "gemini"},
+						"enum":        []string{"claude", "gemini", "codex"},
 						"description": "AI backend. Defaults to server's configured backend.",
 					},
 					"model": map[string]any{
