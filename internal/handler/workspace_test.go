@@ -37,6 +37,22 @@ func setupTestGitRepo(t *testing.T, basePath, name string) {
 	}
 }
 
+func setupTestGitBranch(t *testing.T, tmp, repo, branch string) {
+	t.Helper()
+	repoPath := filepath.Join(tmp, repo)
+	for _, args := range [][]string{
+		{"checkout", "-b", branch},
+		{"commit", "--allow-empty", "-m", "branch commit"},
+		{"checkout", "main"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoPath
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s (%v)", args, out, err)
+		}
+	}
+}
+
 // --- WorkspaceHandler tests ---
 
 func TestNewWorkspace(t *testing.T) {
@@ -272,6 +288,69 @@ func TestWorkspaceHandlerReadsTicketFromGithubEnrichment(t *testing.T) {
 	}
 	if payload.Branch != "issue-641" {
 		t.Errorf("branch=%q, want issue-641", payload.Branch)
+	}
+}
+
+// TestWorkspaceHandlerReadsBranchFromGithubEnrichment ensures that for PR-based
+// workflows (like pr-feedback), the workspace handler picks up the "branch"
+// enrichment item and treats it as RepoBranch so the actual PR branch is
+// checked out instead of creating a new one.
+func TestWorkspaceHandlerReadsBranchFromGithubEnrichment(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("RICK_REPOS_PATH", tmp)
+	setupTestGitRepo(t, tmp, "huli")
+	setupTestGitBranch(t, tmp, "huli", "feature/fix-bug")
+
+	store := newMockStore()
+
+	// Source set, but no explicit repo_branch in WorkflowRequested.
+	reqPayload := event.MustMarshal(event.WorkflowRequestedPayload{
+		Prompt:     "address PR comments",
+		WorkflowID: "pr-feedback",
+		Source:     "gh:hulilabs/huli#670",
+		Repo:       "huli",
+		Isolate:    false,
+	})
+	reqEvt := event.New(event.WorkflowRequested, 1, reqPayload).
+		WithAggregate("wf-pr", 1).
+		WithCorrelation("corr-pr")
+
+	// github-pr-fetcher enrichment provides the PR branch.
+	enrichPayload := event.MustMarshal(event.ContextEnrichmentPayload{
+		Source:  "github-pr-fetcher",
+		Kind:    "pr-reviews",
+		Summary: "PR feedback...",
+		Items: []event.EnrichmentItem{
+			{Name: "repo", Reason: "hulilabs/huli"},
+			{Name: "branch", Reason: "feature/fix-bug"},
+		},
+	})
+	enrichEvt := event.New(event.ContextEnrichment, 1, enrichPayload).
+		WithAggregate("wf-pr:persona:github-pr-fetcher", 1).
+		WithCorrelation("corr-pr")
+
+	store.correlationEvents["corr-pr"] = []event.Envelope{reqEvt, enrichEvt}
+
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).
+		WithAggregate("wf-pr", 3).
+		WithCorrelation("corr-pr")
+
+	h := &WorkspaceHandler{store: store, name: "workspace"}
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(got))
+	}
+
+	var payload event.WorkspaceReadyPayload
+	if err := json.Unmarshal(got[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Branch should match the enrichment "branch" value.
+	if payload.Branch != "feature/fix-bug" {
+		t.Errorf("branch=%q, want feature/fix-bug", payload.Branch)
 	}
 }
 

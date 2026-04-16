@@ -169,9 +169,9 @@ func PRFeedbackWorkflowDef() WorkflowDef {
 		ID:       "pr-feedback",
 		Required: []string{"workspace", "github-pr-fetcher", "feedback-analyzer", "context-snapshot", "developer", "reviewer", "qa", "quality-gate", "committer"},
 		Graph: map[string][]string{
-			"workspace":         {},
 			"github-pr-fetcher": {},
-			"feedback-analyzer": {"workspace", "github-pr-fetcher"},
+			"workspace":         {"github-pr-fetcher"},
+			"feedback-analyzer": {"workspace"},
 			"context-snapshot":  {"feedback-analyzer"},
 			"developer":         {"context-snapshot"},
 			"reviewer":          {"developer"},

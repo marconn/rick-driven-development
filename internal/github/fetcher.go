@@ -85,14 +85,18 @@ func (f *FetcherHandler) Handle(ctx context.Context, env event.Envelope) ([]even
 		slog.Int("pr", prNumber),
 	)
 
-	feedback, err := f.FetchPRFeedback(ctx, owner, repo, prNumber)
+	pr, feedback, err := f.FetchPRFeedback(ctx, owner, repo, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("fetch PR feedback: %w", err)
 	}
 
 	enrichment := event.ContextEnrichmentPayload{
-		Source:  "github-pr-fetcher",
-		Kind:    "pr-reviews",
+		Source: "github-pr-fetcher",
+		Kind:   "pr-reviews",
+		Items: []event.EnrichmentItem{
+			{Name: "branch", Reason: pr.Head.Ref},
+			{Name: "repo", Reason: pr.Head.Repo.FullName},
+		},
 		Summary: feedback,
 	}
 	return []event.Envelope{
@@ -125,20 +129,20 @@ func (f *FetcherHandler) resolveSource(ctx context.Context, env event.Envelope) 
 
 // FetchPRFeedback fetches reviews, inline comments, and diff for a PR,
 // formatting them as human-readable markdown.
-func (f *FetcherHandler) FetchPRFeedback(ctx context.Context, owner, repo string, prNumber int) (string, error) {
+func (f *FetcherHandler) FetchPRFeedback(ctx context.Context, owner, repo string, prNumber int) (*PullRequest, string, error) {
 	pr, err := f.gh.GetPR(ctx, owner, repo, prNumber)
 	if err != nil {
-		return "", fmt.Errorf("get PR: %w", err)
+		return nil, "", fmt.Errorf("get PR: %w", err)
 	}
 
 	reviews, err := f.gh.GetPRReviews(ctx, owner, repo, prNumber)
 	if err != nil {
-		return "", fmt.Errorf("get reviews: %w", err)
+		return nil, "", fmt.Errorf("get reviews: %w", err)
 	}
 
 	comments, err := f.gh.GetPRReviewComments(ctx, owner, repo, prNumber)
 	if err != nil {
-		return "", fmt.Errorf("get review comments: %w", err)
+		return nil, "", fmt.Errorf("get review comments: %w", err)
 	}
 
 	diff, err := f.gh.GetPRDiff(ctx, owner, repo, prNumber)
@@ -150,7 +154,7 @@ func (f *FetcherHandler) FetchPRFeedback(ctx context.Context, owner, repo string
 		diff = ""
 	}
 
-	return formatPRFeedback(pr, reviews, comments, diff), nil
+	return pr, formatPRFeedback(pr, reviews, comments, diff), nil
 }
 
 func formatPRFeedback(pr *PullRequest, reviews []Review, comments []ReviewComment, diff string) string {

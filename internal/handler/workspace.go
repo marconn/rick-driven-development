@@ -105,7 +105,7 @@ func (h *WorkspaceHandler) loadWorkspaceParams(ctx context.Context, correlationI
 	}
 
 	var params event.WorkflowRequestedPayload
-	var enrichmentRepo, enrichmentTicket string
+	var enrichmentRepo, enrichmentTicket, enrichmentBranch string
 
 	for _, e := range events {
 		switch e.Type {
@@ -124,6 +124,8 @@ func (h *WorkspaceHandler) loadWorkspaceParams(ctx context.Context, correlationI
 					enrichmentRepo = item.Reason
 				case "ticket":
 					enrichmentTicket = item.Reason
+				case "branch":
+					enrichmentBranch = item.Reason
 				}
 			}
 		}
@@ -134,6 +136,9 @@ func (h *WorkspaceHandler) loadWorkspaceParams(ctx context.Context, correlationI
 	// since callers pass only source=gh:owner/repo#N — the ticket field is empty.
 	if params.Repo == "" && enrichmentRepo != "" {
 		params.Repo = enrichmentRepo
+	}
+	if params.RepoBranch == "" && enrichmentBranch != "" {
+		params.RepoBranch = enrichmentBranch
 	}
 	if params.Ticket == "" && params.RepoBranch == "" && enrichmentTicket != "" {
 		params.Ticket = enrichmentTicket
