@@ -54,6 +54,9 @@ The develop phase produced the following changes:
 5. Review the staged diff (`git diff --cached --stat`) and write a commit message: `{{.Ticket}}: <imperative summary>`
 6. Commit: `git commit -m "<message>"`
 7. Push: `git push -u origin {{.Ticket}}`
-8. Check if a PR exists: `gh pr view {{.Ticket}}` — if none, create one with `gh pr create --base {{.BaseBranch}} --head {{.Ticket}}`
+8. Check if a PR exists: `gh pr view {{.Ticket}}`
+   - If none exists, create one: `gh pr create --base {{.BaseBranch}} --head {{.Ticket}}`
+   - If one already exists, post a comment summarizing what was addressed: `gh pr comment {{.Ticket}} --body "<summary>"`
+   - **CRITICAL**: When writing the summary comment, DO NOT use the `@` symbol to tag people or bots (e.g., write `botreviewer` instead of `@botreviewer`). This prevents unwanted notifications.
 
 Report each step's result concisely.

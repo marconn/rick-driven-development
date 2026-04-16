@@ -145,6 +145,11 @@ func (f *FetcherHandler) FetchPRFeedback(ctx context.Context, owner, repo string
 		return nil, "", fmt.Errorf("get review comments: %w", err)
 	}
 
+	issueComments, err := f.gh.GetIssueComments(ctx, owner, repo, prNumber)
+	if err != nil {
+		return nil, "", fmt.Errorf("get issue comments: %w", err)
+	}
+
 	diff, err := f.gh.GetPRDiff(ctx, owner, repo, prNumber)
 	if err != nil {
 		// Non-fatal: diff is supplementary.
@@ -154,13 +159,22 @@ func (f *FetcherHandler) FetchPRFeedback(ctx context.Context, owner, repo string
 		diff = ""
 	}
 
-	return pr, formatPRFeedback(pr, reviews, comments, diff), nil
+	return pr, formatPRFeedback(pr, reviews, comments, issueComments, diff), nil
 }
 
-func formatPRFeedback(pr *PullRequest, reviews []Review, comments []ReviewComment, diff string) string {
+func formatPRFeedback(pr *PullRequest, reviews []Review, comments []ReviewComment, issueComments []IssueComment, diff string) string {
 	var b strings.Builder
 
 	b.WriteString(fmt.Sprintf("## PR #%d: %s\n\n", pr.Number, pr.Title))
+
+	// Issue comments (standard comments).
+	if len(issueComments) > 0 {
+		b.WriteString("### Issue Comments\n\n")
+		for _, ic := range issueComments {
+			b.WriteString(fmt.Sprintf("**@%s**:\n", ic.User.Login))
+			b.WriteString(fmt.Sprintf("> %s\n\n", strings.ReplaceAll(ic.Body, "\n", "\n> ")))
+		}
+	}
 
 	// Reviews (top-level, body-only).
 	hasReviews := false

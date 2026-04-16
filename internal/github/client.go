@@ -203,6 +203,34 @@ func (c *Client) GetPRReviewComments(ctx context.Context, owner, repo string, pr
 	return comments, nil
 }
 
+// IssueComment represents a standard issue comment.
+type IssueComment struct {
+	ID        int    `json:"id"`
+	User      User   `json:"user"`
+	Body      string `json:"body"`
+	HTMLURL   string `json:"html_url"`
+	CreatedAt string `json:"created_at"`
+}
+
+// GetIssueComments fetches all standard comments on an issue/PR.
+// GET /repos/{owner}/{repo}/issues/{issue_number}/comments
+func (c *Client) GetIssueComments(ctx context.Context, owner, repo string, number int) ([]IssueComment, error) {
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number)
+	pages, err := c.getPaginated(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("github: get issue comments %s/%s#%d: %w", owner, repo, number, err)
+	}
+	comments := make([]IssueComment, 0, len(pages))
+	for _, raw := range pages {
+		var ic IssueComment
+		if err := json.Unmarshal(raw, &ic); err != nil {
+			return nil, fmt.Errorf("github: unmarshal issue comment: %w", err)
+		}
+		comments = append(comments, ic)
+	}
+	return comments, nil
+}
+
 // GetPRDiff fetches the PR diff as unified diff text.
 // GET /repos/{owner}/{repo}/pulls/{pr} with Accept: application/vnd.github.diff
 func (c *Client) GetPRDiff(ctx context.Context, owner, repo string, prNumber int) (string, error) {

@@ -14,7 +14,7 @@ You handle git operations with surgical precision:
 * **Conflict Resolution**: If rebase produces conflicts, resolve them by preserving the intent of the local changes while respecting what's already on remote. If conflicts span more than 3 files or are semantically ambiguous, abort the rebase and report clearly.
 * **Commit Hygiene**: One commit per logical change. Message format: `<ticket>: <imperative verb> <what changed>`. Add a bullet-point body for multi-file changes. No "WIP", no "fix", no "update" — be specific about what changed and why.
 * **Push Safety**: Always push to the feature branch, never to main/master directly. Never force push.
-* **PR Creation**: If no PR exists for the branch, create one via `gh pr create`. If one already exists, skip. PR title matches the commit subject line.
+* **PR Creation & Updates**: If no PR exists for the branch, create one via `gh pr create`. If one already exists, post a comment summarizing what was addressed via `gh pr comment`. When summarizing, **DO NOT** use the `@` symbol to tag people or bots (e.g., write `botreviewer` instead of `@botreviewer`) to avoid triggering notifications. PR title matches the commit subject line.
 
 ---
 
@@ -27,7 +27,9 @@ You handle git operations with surgical precision:
 5. Review the staged diff (`git diff --cached --stat`), write a precise commit message
 6. `git commit -m "<message>"`
 7. `git push -u origin <branch>` — if rejected, diagnose why and retry once after rebase
-8. Check for existing PR: `gh pr view <branch>` — if none exists, `gh pr create`
+8. Check for existing PR: `gh pr view <branch>`
+   - If none exists: `gh pr create`
+   - If one exists: `gh pr comment <branch> --body "<summary of addressed feedback>"` (Ensure NO `@` symbols are used when mentioning users/bots)
 
 ---
 
