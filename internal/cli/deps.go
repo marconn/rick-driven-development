@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/marconn/rick-event-driven-development/internal/backend"
 	"github.com/marconn/rick-event-driven-development/internal/estimation"
 	"github.com/marconn/rick-event-driven-development/internal/eventbus"
 	gh "github.com/marconn/rick-event-driven-development/internal/github"
@@ -36,6 +37,29 @@ func parseBackendTimeout(logger *slog.Logger) time.Duration {
 		return handler.DefaultBackendTimeout
 	}
 	return d
+}
+
+// newReviewBackend builds the backend used by all review-phase handlers.
+// Reads RICK_REVIEW_BACKENDS (comma-separated list in rotation order) and
+// falls back to backend.DefaultReviewBackends when unset.
+//
+// Parse/validation errors fall back to gemini (prior default) rather than
+// failing startup — review handlers are critical and we'd rather run with
+// a single backend than refuse to boot. The fallback is logged loudly.
+func newReviewBackend(logger *slog.Logger) backend.Backend {
+	raw := os.Getenv("RICK_REVIEW_BACKENDS")
+	names := backend.ParseReviewBackendsEnv(raw)
+	be, err := backend.NewReviewBackend(names)
+	if err == nil {
+		logger.Info("review backend selected", slog.String("name", be.Name()))
+		return be
+	}
+	logger.Warn("RICK_REVIEW_BACKENDS invalid, falling back to gemini",
+		slog.String("value", raw),
+		slog.Any("error", err),
+	)
+	fallback, _ := backend.New("gemini")
+	return fallback
 }
 
 // openEstimationStore opens the estimation SQLite DB.

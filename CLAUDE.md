@@ -87,8 +87,9 @@ Set in `~/.config/rick/env` or shell.
 | `RICK_DISABLE_QUALITY_GATE` | Strip quality-gate from all DAGs. Use on VM-less machines. |
 | `RICK_MAX_WORKFLOWS` | Concurrent workflow cap (0 = unlimited). Excess requests queue. |
 | `RICK_REPOS_PATH` | Root for isolated workspaces + repo clones. Required by workspace/wave tools. |
-| `RICK_CLAUDE_BIN` / `RICK_GEMINI_BIN` | CLI binary paths. |
+| `RICK_CLAUDE_BIN` / `RICK_GEMINI_BIN` / `RICK_CODEX_BIN` | CLI binary paths. |
 | `RICK_MODEL` | Override default LLM model. |
+| `RICK_REVIEW_BACKENDS` | Comma-separated rotation for review-phase handlers (default `claude,gemini,codex`). Set to a subset to limit to installed CLIs, or one name to disable rotation. |
 | `RICK_SERVER_URL` | Agent UI → rick-server URL. |
 | `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN` | Jira integration. |
 | `CONFLUENCE_URL`, `CONFLUENCE_EMAIL`, `CONFLUENCE_TOKEN` | Confluence integration. |

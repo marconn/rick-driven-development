@@ -98,8 +98,9 @@ func runWorkflow(ctx context.Context, opts *runOpts, args []string) error {
 		return err
 	}
 
-	// For review workflows, we always prefer Gemini.
-	reviewBe, _ := backend.New("gemini")
+	// Review-phase handlers use a configurable rotation (default: claude,
+	// gemini, codex). Override via RICK_REVIEW_BACKENDS=a,b,c.
+	reviewBe := newReviewBackend(logger)
 
 	// Create persona system
 	personas := persona.DefaultRegistry()

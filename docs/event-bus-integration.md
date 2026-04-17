@@ -188,7 +188,7 @@ type PersonaFailedPayload struct {
 ```go
 type AIRequestPayload struct {
     Phase      string `json:"phase"`
-    Backend    string `json:"backend"`     // "claude", "gemini"
+    Backend    string `json:"backend"`     // "claude", "gemini", "codex", or a wrapper name like "round-robin(claude,gemini,codex)" for review-phase handlers (the inner per-call pick is not recorded in the payload today)
     Persona    string `json:"persona"`
     PromptHash string `json:"prompt_hash"` // SHA-256 prefix (not the full prompt)
 }

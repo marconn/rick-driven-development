@@ -4,7 +4,8 @@ Wraps `claude`, `gemini`, and `codex` CLI binaries as a uniform `Backend` interf
 
 ## Files
 - `backend.go` — `Backend` interface, `Request`/`Response` types, `maxArgSize` (128KB) prompt-via-stdin threshold.
-- `factory.go` — `New(name)` constructor; honors `RICK_CLAUDE_BIN`, `RICK_GEMINI_BIN`, and `RICK_CODEX_BIN` env overrides.
+- `factory.go` — `New(name)` single-backend constructor; honors `RICK_CLAUDE_BIN`, `RICK_GEMINI_BIN`, `RICK_CODEX_BIN` env overrides. Also exports `NewReviewBackend(names)` which returns a raw backend for len=1 and a `RoundRobin` for len≥2, plus `ParseReviewBackendsEnv` for `RICK_REVIEW_BACKENDS` handling.
+- `round_robin.go` — `RoundRobin` backend: atomic-counter rotation across N backends. Per-`Run` selection, not per-handler. `Name()` returns `round-robin(a,b,c)`. Known gap: `AIRequestSent`/`AIResponseReceived` record the composite name, not the chosen inner backend — per-call attribution requires subprocess logs today.
 - `claude.go` — `Claude` driver: `buildArgs` for `-p`/`--system-prompt`/`--continue`/`--resume`/`--mcp-config`/`--dangerously-skip-permissions`; clears `CLAUDECODE` env to avoid nested-session refusal.
 - `gemini.go` — `Gemini` driver: combines system + user prompt into `<system_instructions>` XML wrapper (gemini CLI has no system-prompt flag).
 - `codex.go` — `Codex` driver: uses `exec` and `exec resume` subcommands with `--json`; wraps system prompt in XML tags like Gemini.

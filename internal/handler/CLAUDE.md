@@ -67,7 +67,7 @@ These handlers do **not** live in this package — they're defined in `internal/
 - `../engine` — `PersonaRunner` is the sole dispatcher; `WorkflowDef.Graph` defines topology
 - `../event` — `Envelope`, `Type`, payload structs (`VerdictPayload`, `ContextEnrichmentPayload`, etc.)
 - `../eventstore` — `LoadByCorrelation` is how handlers reconstruct workflow context
-- `../backend` — `claude` / `gemini` CLI subprocess wrappers
+- `../backend` — `claude` / `gemini` / `codex` CLI subprocess wrappers; review-phase handlers use the `RoundRobin` rotation built via `backend.NewReviewBackend` (configurable through `RICK_REVIEW_BACKENDS`).
 - `../persona` — `PromptBuilder` and persona registry for system prompts
 - `../planning`, `../jiraplanner` — the BTU/Jira planning handlers registered alongside this package
 - `../jira`, `../confluence`, `../github`, `../workspace` — external system clients

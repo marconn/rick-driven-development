@@ -39,7 +39,11 @@ type Deps struct {
 	WorkDir    string // working directory for AI backend execution
 	Yolo       bool   // skip AI backend permission checks
 	// ReviewBackend is the backend used for review-related handlers (e.g.,
-	// reviewer, qa, pr-consolidator). When nil, defaults to a Gemini backend.
+	// reviewer, qa, pr-consolidator, pr-category reviewers, feedback-analyzer,
+	// pr-replier, pr-summarizer, qa-analyzer). Callers should build this via
+	// backend.NewReviewBackend() so the rotation can be configured through
+	// RICK_REVIEW_BACKENDS. When nil, the legacy single-backend fallback is
+	// used (d.Backend if it's already gemini, otherwise a bare gemini driver).
 	ReviewBackend backend.Backend
 	// BackendTimeout caps how long AIHandler.backend.Run may block.
 	// Zero falls back to handler.DefaultBackendTimeout. Set explicitly via
