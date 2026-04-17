@@ -5,7 +5,15 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// defaultStallTimeout is applied when RICK_BACKEND_STALL_TIMEOUT is unset.
+// 2 minutes is long enough for any modern LLM CLI to emit its first token
+// under normal load — if a subprocess sits silent for that long, it's
+// almost certainly wedged and should be killed so the concurrency slot can
+// be reclaimed well before the wall-clock timeout fires.
+const defaultStallTimeout = 2 * time.Minute
 
 // New creates a backend by name. Valid names: "claude", "gemini", "codex".
 // Backend binary paths can be overridden via RICK_CLAUDE_BIN, RICK_GEMINI_BIN,
@@ -32,31 +40,56 @@ func NewWithRecorder(name string, recorder Recorder) (Backend, error) {
 }
 
 func newRaw(name string) (Backend, error) {
+	stall := stallTimeoutFromEnv()
 	switch name {
 	case "claude":
 		bin := os.Getenv("RICK_CLAUDE_BIN")
 		if bin == "" {
 			bin = "claude"
 		}
-		return NewClaude(bin), nil
+		c := NewClaude(bin)
+		c.stallTimeout = stall
+		return c, nil
 
 	case "gemini":
 		bin := os.Getenv("RICK_GEMINI_BIN")
 		if bin == "" {
 			bin = "gemini"
 		}
-		return NewGemini(bin), nil
+		g := NewGemini(bin)
+		g.stallTimeout = stall
+		return g, nil
 
 	case "codex":
 		bin := os.Getenv("RICK_CODEX_BIN")
 		if bin == "" {
 			bin = "codex"
 		}
-		return NewCodex(bin), nil
+		c := NewCodex(bin)
+		c.stallTimeout = stall
+		return c, nil
 
 	default:
 		return nil, fmt.Errorf("unknown backend: %s (valid: claude, gemini, codex)", name)
 	}
+}
+
+// stallTimeoutFromEnv reads RICK_BACKEND_STALL_TIMEOUT. Unset → default (2m);
+// "0" → disabled (idle watchdog off, only the wall-clock timeout applies);
+// unparseable → default with no noise. Negative values are treated as 0.
+func stallTimeoutFromEnv() time.Duration {
+	raw := os.Getenv("RICK_BACKEND_STALL_TIMEOUT")
+	if raw == "" {
+		return defaultStallTimeout
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return defaultStallTimeout
+	}
+	if d < 0 {
+		return 0
+	}
+	return d
 }
 
 // concurrencyLimitFor returns the configured concurrency cap for a backend

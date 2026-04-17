@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -14,7 +15,8 @@ import (
 // Since the gemini CLI has no --system-prompt flag, the system prompt
 // is prepended to the user prompt wrapped in XML tags.
 type Gemini struct {
-	binaryPath string
+	binaryPath   string
+	stallTimeout time.Duration // 0 = no idle watchdog (default)
 }
 
 // NewGemini creates a Gemini backend. binaryPath is the path to the `gemini` CLI binary.
@@ -67,7 +69,10 @@ func (g *Gemini) Run(ctx context.Context, req Request) (*Response, error) {
 	start := time.Now()
 	args, stdinPrompt := g.buildArgs(req)
 
-	cmd := exec.CommandContext(ctx, g.binaryPath, args...)
+	watchCtx, progress, stopWatch := WithIdleTimeout(ctx, g.stallTimeout)
+	defer stopWatch()
+
+	cmd := exec.CommandContext(watchCtx, g.binaryPath, args...)
 	cmd.Dir = req.WorkDir
 
 	var captured bytes.Buffer
@@ -77,7 +82,7 @@ func (g *Gemini) Run(ctx context.Context, req Request) (*Response, error) {
 	}
 
 	sw := NewStreamWriter(inner, ExtractGeminiText, WithResultCheck(GeminiCheckResult))
-	cmd.Stdout = sw
+	cmd.Stdout = newProgressWriter(sw, progress)
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -88,6 +93,9 @@ func (g *Gemini) Run(ctx context.Context, req Request) (*Response, error) {
 
 	if err := cmd.Run(); err != nil {
 		_ = sw.Close()
+		if errors.Is(context.Cause(watchCtx), ErrIdleTimeout) {
+			return nil, fmt.Errorf("gemini: %w (after %s, stall=%s)", ErrIdleTimeout, time.Since(start), g.stallTimeout)
+		}
 		// Surface the context error when the deadline tripped so the caller
 		// sees the timeout, not the SIGKILL exit status.
 		if ctxErr := ctx.Err(); ctxErr != nil {

@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -12,7 +13,8 @@ import (
 
 // Codex shells out to the Codex CLI binary.
 type Codex struct {
-	binaryPath string
+	binaryPath   string
+	stallTimeout time.Duration // 0 = no idle watchdog (default)
 }
 
 // NewCodex creates a Codex backend. binaryPath is the path to the `codex` CLI binary.
@@ -71,7 +73,10 @@ func (c *Codex) Run(ctx context.Context, req Request) (*Response, error) {
 	start := time.Now()
 	args, stdinPrompt := c.buildArgs(req)
 
-	cmd := exec.CommandContext(ctx, c.binaryPath, args...)
+	watchCtx, progress, stopWatch := WithIdleTimeout(ctx, c.stallTimeout)
+	defer stopWatch()
+
+	cmd := exec.CommandContext(watchCtx, c.binaryPath, args...)
 	cmd.Dir = req.WorkDir
 
 	// Capture output via stream parser.
@@ -83,7 +88,7 @@ func (c *Codex) Run(ctx context.Context, req Request) (*Response, error) {
 
 	extractor := NewCodexExtractor()
 	sw := NewStreamWriter(inner, extractor.ExtractFn()) // CodexCheckResult could be added if needed
-	cmd.Stdout = sw
+	cmd.Stdout = newProgressWriter(sw, progress)
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -94,6 +99,9 @@ func (c *Codex) Run(ctx context.Context, req Request) (*Response, error) {
 
 	if err := cmd.Run(); err != nil {
 		_ = sw.Close()
+		if errors.Is(context.Cause(watchCtx), ErrIdleTimeout) {
+			return nil, fmt.Errorf("codex: %w (after %s, stall=%s)", ErrIdleTimeout, time.Since(start), c.stallTimeout)
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, fmt.Errorf("codex: %w (after %s)", ctxErr, time.Since(start))
 		}

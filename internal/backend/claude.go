@@ -3,6 +3,7 @@ package backend
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,7 +14,8 @@ import (
 
 // Claude shells out to the Claude CLI binary.
 type Claude struct {
-	binaryPath string
+	binaryPath   string
+	stallTimeout time.Duration // 0 = no idle watchdog (default)
 }
 
 // NewClaude creates a Claude backend. binaryPath is the path to the `claude` CLI binary.
@@ -87,7 +89,14 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 	start := time.Now()
 	args, stdinPrompt := c.buildArgs(req)
 
-	cmd := exec.CommandContext(ctx, c.binaryPath, args...)
+	// Idle watchdog: kills the subprocess fast when it stops producing any
+	// output. Complements the caller's wall-clock timeout — a wedged CLI now
+	// dies in ~stallTimeout instead of tying up a concurrency slot for the
+	// full backend-timeout budget.
+	watchCtx, progress, stopWatch := WithIdleTimeout(ctx, c.stallTimeout)
+	defer stopWatch()
+
+	cmd := exec.CommandContext(watchCtx, c.binaryPath, args...)
 	cmd.Dir = req.WorkDir
 
 	// Clear CLAUDECODE env var so the subprocess doesn't refuse to start
@@ -103,7 +112,7 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 
 	extractor := NewClaudePrintExtractor()
 	sw := NewStreamWriter(inner, extractor.ExtractFn(), WithResultCheck(ClaudeCheckResult))
-	cmd.Stdout = sw
+	cmd.Stdout = newProgressWriter(sw, progress)
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
@@ -116,6 +125,9 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 
 	if err := cmd.Run(); err != nil {
 		_ = sw.Close()
+		if errors.Is(context.Cause(watchCtx), ErrIdleTimeout) {
+			return nil, fmt.Errorf("claude: %w (after %s, stall=%s)", ErrIdleTimeout, time.Since(start), c.stallTimeout)
+		}
 		// Prefer the context error when the deadline tripped — otherwise the
 		// caller sees "claude: signal: killed", which is the symptom (we
 		// SIGKILL'd the child) not the root cause (we timed out).
