@@ -16,6 +16,13 @@
   let tokens = $derived(dashboardStore.tokens)
 
   let shortId = $derived(workflow.aggregate_id.substring(0, 8))
+  // pending_hints_count comes from the list endpoint (no detail fetch needed).
+  // pending_hints (full data) only available after detail fetch.
+  let pendingHintsCount = $derived(
+    isSelected && detail?.pending_hints?.length
+      ? detail.pending_hints.length
+      : (workflow.pending_hints_count ?? 0)
+  )
   let pendingHints = $derived(isSelected && detail?.pending_hints?.length ? detail.pending_hints : [])
   let verdicts = $derived(dashboardStore.verdicts)
 
@@ -77,6 +84,15 @@
     workflow.status === 'completed' || workflow.status === 'failed' || workflow.status === 'cancelled'
   )
 
+  // Auto-expand when workflow has pending hints and no other card is selected.
+  // This brings hint-paused workflows to the operator's attention without
+  // clobbering an already-open card.
+  $effect(() => {
+    if (pendingHintsCount > 0 && !isSelected && !dashboardStore.selectedWorkflowId) {
+      dashboardStore.selectWorkflow(workflow.aggregate_id)
+    }
+  })
+
   function toggleDetail() {
     if (isSelected) {
       dashboardStore.clearSelection()
@@ -94,9 +110,9 @@
       <span class="text-base font-mono text-gray-400">{shortId}</span>
       <span class="text-base text-gray-500">{workflow.workflow_id}</span>
       <span class="text-base font-medium {statusBadge}">{workflow.status}</span>
-      {#if pendingHints.length > 0}
+      {#if pendingHintsCount > 0}
         <span class="text-base text-teal-600 animate-pulse">
-          {pendingHints.length} hint{pendingHints.length > 1 ? 's' : ''}
+          {pendingHintsCount} hint{pendingHintsCount > 1 ? 's' : ''} pending
         </span>
       {/if}
       {#if verdictSummary}
@@ -138,7 +154,14 @@
       {isSelected ? 'Hide details' : 'Show details'}
     </button>
 
-    {#if isSelected && tokens}
+    {#if !isSelected && pendingHintsCount > 0}
+      <button
+        onclick={toggleDetail}
+        class="px-3 py-1 text-sm font-medium rounded-lg bg-teal-600 text-white hover:bg-teal-500 transition-colors"
+      >
+        Review {pendingHintsCount} hint{pendingHintsCount > 1 ? 's' : ''}
+      </button>
+    {:else if isSelected && tokens}
       <span class="text-base text-gray-400">
         Tokens: {tokens.total.toLocaleString()}
       </span>

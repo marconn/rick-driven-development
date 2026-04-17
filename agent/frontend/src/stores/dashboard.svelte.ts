@@ -8,6 +8,7 @@ export interface WorkflowSummary {
   fail_reason?: string
   started_at?: string
   completed_at?: string
+  pending_hints_count?: number
 }
 
 export interface WorkflowDetail {
@@ -106,6 +107,10 @@ let detailTimer: ReturnType<typeof setInterval> | null = null
 let activeCount = $derived(workflows.filter(w => w.status === 'running').length)
 let failedCount = $derived(workflows.filter(w => w.status === 'failed').length)
 let pausedCount = $derived(workflows.filter(w => w.status === 'paused').length)
+// Workflows paused specifically awaiting hint review (have pending hints).
+let hintPendingCount = $derived(
+  workflows.filter(w => w.status === 'paused' && (w.pending_hints_count ?? 0) > 0).length
+)
 
 // Sort: paused (approval-pending) first, then running, then the rest.
 // Tiebreak by aggregate_id for stable ordering across poll cycles.
@@ -319,6 +324,7 @@ export const dashboardStore = {
   get activeCount() { return activeCount },
   get failedCount() { return failedCount },
   get pausedCount() { return pausedCount },
+  get hintPendingCount() { return hintPendingCount },
   get verdicts() { return verdicts },
   get personaOutputs() { return personaOutputs },
   get outputModalPersona() { return outputModalPersona },

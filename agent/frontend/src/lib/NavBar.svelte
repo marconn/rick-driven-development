@@ -11,17 +11,20 @@
   let activeCount = $derived(dashboardStore.activeCount)
   let failedCount = $derived(dashboardStore.failedCount)
   let pausedCount = $derived(dashboardStore.pausedCount)
+  let hintPendingCount = $derived(dashboardStore.hintPendingCount)
 
   let healthText = $derived.by(() => {
     const parts: string[] = []
     if (activeCount > 0) parts.push(`${activeCount} running`)
     if (failedCount > 0) parts.push(`${failedCount} failed`)
-    if (pausedCount > 0) parts.push(`${pausedCount} paused`)
+    if (hintPendingCount > 0) parts.push(`${hintPendingCount} awaiting review`)
+    else if (pausedCount > 0) parts.push(`${pausedCount} paused`)
     return parts.length > 0 ? parts.join(' · ') : 'idle'
   })
 
   let healthColor = $derived.by(() => {
     if (failedCount > 0) return 'text-red-500'
+    if (hintPendingCount > 0) return 'text-teal-600'
     if (activeCount > 0) return 'text-emerald-600'
     if (pausedCount > 0) return 'text-amber-500'
     return 'text-gray-400'

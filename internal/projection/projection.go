@@ -125,16 +125,17 @@ func (r *Runner) Position() int64 {
 
 // WorkflowStatus represents the current state of a workflow.
 type WorkflowStatus struct {
-	AggregateID string
-	WorkflowID  string
-	Status      string // requested, running, completed, failed, cancelled
-	Prompt      string
-	Source      string
-	Ticket      string
-	Phases      []string
-	StartedAt   time.Time
-	CompletedAt time.Time
-	FailReason  string
+	AggregateID      string
+	WorkflowID       string
+	Status           string // requested, running, completed, failed, cancelled
+	Prompt           string
+	Source           string
+	Ticket           string
+	Phases           []string
+	StartedAt        time.Time
+	CompletedAt      time.Time
+	FailReason       string
+	PendingHintsCount int // count of HintEmitted without matching HintApproved/HintRejected
 }
 
 // TokenUsage tracks token consumption for a workflow.

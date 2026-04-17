@@ -10,12 +10,13 @@ import (
 
 // WorkflowSummary mirrors the rick_list_workflows tool response.
 type WorkflowSummary struct {
-	AggregateID string `json:"aggregate_id"`
-	WorkflowID  string `json:"workflow_id"`
-	Status      string `json:"status"`
-	FailReason  string `json:"fail_reason,omitempty"`
-	StartedAt   string `json:"started_at,omitempty"`
-	CompletedAt string `json:"completed_at,omitempty"`
+	AggregateID       string `json:"aggregate_id"`
+	WorkflowID        string `json:"workflow_id"`
+	Status            string `json:"status"`
+	FailReason        string `json:"fail_reason,omitempty"`
+	StartedAt         string `json:"started_at,omitempty"`
+	CompletedAt       string `json:"completed_at,omitempty"`
+	PendingHintsCount int    `json:"pending_hints_count,omitempty"`
 }
 
 // EventEntry mirrors the rick_list_events tool response.

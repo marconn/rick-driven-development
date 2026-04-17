@@ -718,15 +718,16 @@ type dagSummary struct {
 }
 
 type workflowSummary struct {
-	AggregateID string `json:"aggregate_id"`
-	WorkflowID  string `json:"workflow_id"`
-	Status      string `json:"status"`
-	Prompt      string `json:"prompt,omitempty"`
-	Source      string `json:"source,omitempty"`
-	Ticket      string `json:"ticket,omitempty"`
-	FailReason  string `json:"fail_reason,omitempty"`
-	StartedAt   string `json:"started_at,omitempty"`
-	CompletedAt string `json:"completed_at,omitempty"`
+	AggregateID       string `json:"aggregate_id"`
+	WorkflowID        string `json:"workflow_id"`
+	Status            string `json:"status"`
+	Prompt            string `json:"prompt,omitempty"`
+	Source            string `json:"source,omitempty"`
+	Ticket            string `json:"ticket,omitempty"`
+	FailReason        string `json:"fail_reason,omitempty"`
+	StartedAt         string `json:"started_at,omitempty"`
+	CompletedAt       string `json:"completed_at,omitempty"`
+	PendingHintsCount int    `json:"pending_hints_count,omitempty"`
 }
 
 // findPendingHints scans correlation events for HintEmitted without matching
@@ -799,13 +800,14 @@ func (s *Server) toolListWorkflows(_ context.Context, _ json.RawMessage) (any, e
 	summaries := make([]workflowSummary, 0, len(all))
 	for _, ws := range all {
 		summary := workflowSummary{
-			AggregateID: ws.AggregateID,
-			WorkflowID:  ws.WorkflowID,
-			Status:      ws.Status,
-			Prompt:      ws.Prompt,
-			Source:      ws.Source,
-			Ticket:      ws.Ticket,
-			FailReason:  ws.FailReason,
+			AggregateID:       ws.AggregateID,
+			WorkflowID:        ws.WorkflowID,
+			Status:            ws.Status,
+			Prompt:            ws.Prompt,
+			Source:            ws.Source,
+			Ticket:            ws.Ticket,
+			FailReason:        ws.FailReason,
+			PendingHintsCount: ws.PendingHintsCount,
 		}
 		if !ws.StartedAt.IsZero() {
 			summary.StartedAt = ws.StartedAt.UTC().Format("2006-01-02T15:04:05Z")

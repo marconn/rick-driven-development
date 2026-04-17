@@ -852,6 +852,100 @@ func TestTokenUsageProjection_ForWorkflow_MultipleCorrelations(t *testing.T) {
 	}
 }
 
+// --- WorkflowStatusProjection hint count ---
+
+func makeHintEnvelope(t event.Type, corrID, persona string) event.Envelope {
+	var payload any
+	switch t {
+	case event.HintEmitted:
+		payload = event.HintEmittedPayload{Persona: persona, Confidence: 0.5, Plan: "plan"}
+	case event.HintApproved:
+		payload = event.HintApprovedPayload{Persona: persona}
+	case event.HintRejected:
+		payload = event.HintRejectedPayload{Persona: persona, Action: "skip"}
+	}
+	data, _ := json.Marshal(payload)
+	return event.Envelope{
+		ID:            event.NewID(),
+		Type:          t,
+		AggregateID:   corrID + ":persona:" + persona,
+		Version:       1,
+		SchemaVersion: 1,
+		Timestamp:     makeEnvelope(t, "", 1, nil).Timestamp,
+		CorrelationID: corrID,
+		Source:        "test",
+		Payload:       data,
+	}
+}
+
+func TestWorkflowStatusProjection_PendingHintsCount_EmitAndApprove(t *testing.T) {
+	proj := NewWorkflowStatusProjection()
+	ctx := context.Background()
+
+	// Bootstrap the workflow so Get() works.
+	_ = proj.Handle(ctx, makeEnvelope(event.WorkflowRequested, "wf-h", 1,
+		event.WorkflowRequestedPayload{Prompt: "test", WorkflowID: "plan-btu"}))
+
+	// Architect emits a hint.
+	_ = proj.Handle(ctx, makeHintEnvelope(event.HintEmitted, "wf-h", "plan-architect"))
+
+	ws, _ := proj.Get("wf-h")
+	if ws.PendingHintsCount != 1 {
+		t.Errorf("expected 1 pending hint after HintEmitted, got %d", ws.PendingHintsCount)
+	}
+
+	// Operator approves it.
+	_ = proj.Handle(ctx, makeHintEnvelope(event.HintApproved, "wf-h", "plan-architect"))
+
+	ws, _ = proj.Get("wf-h")
+	if ws.PendingHintsCount != 0 {
+		t.Errorf("expected 0 pending hints after HintApproved, got %d", ws.PendingHintsCount)
+	}
+}
+
+func TestWorkflowStatusProjection_PendingHintsCount_MultiplePersonas(t *testing.T) {
+	proj := NewWorkflowStatusProjection()
+	ctx := context.Background()
+
+	_ = proj.Handle(ctx, makeEnvelope(event.WorkflowRequested, "wf-m", 1,
+		event.WorkflowRequestedPayload{Prompt: "test", WorkflowID: "plan-btu"}))
+
+	// Two personas emit hints.
+	_ = proj.Handle(ctx, makeHintEnvelope(event.HintEmitted, "wf-m", "plan-architect"))
+	_ = proj.Handle(ctx, makeHintEnvelope(event.HintEmitted, "wf-m", "estimator"))
+
+	ws, _ := proj.Get("wf-m")
+	if ws.PendingHintsCount != 2 {
+		t.Errorf("expected 2 pending hints, got %d", ws.PendingHintsCount)
+	}
+
+	// Reject one, approve another.
+	_ = proj.Handle(ctx, makeHintEnvelope(event.HintRejected, "wf-m", "plan-architect"))
+	_ = proj.Handle(ctx, makeHintEnvelope(event.HintApproved, "wf-m", "estimator"))
+
+	ws, _ = proj.Get("wf-m")
+	if ws.PendingHintsCount != 0 {
+		t.Errorf("expected 0 pending hints after all resolved, got %d", ws.PendingHintsCount)
+	}
+}
+
+func TestWorkflowStatusProjection_PendingHintsCount_SamePersonaIdempotent(t *testing.T) {
+	proj := NewWorkflowStatusProjection()
+	ctx := context.Background()
+
+	_ = proj.Handle(ctx, makeEnvelope(event.WorkflowRequested, "wf-i", 1,
+		event.WorkflowRequestedPayload{Prompt: "test", WorkflowID: "plan-btu"}))
+
+	// Same persona emits hint twice (retry scenario).
+	_ = proj.Handle(ctx, makeHintEnvelope(event.HintEmitted, "wf-i", "plan-architect"))
+	_ = proj.Handle(ctx, makeHintEnvelope(event.HintEmitted, "wf-i", "plan-architect"))
+
+	ws, _ := proj.Get("wf-i")
+	if ws.PendingHintsCount != 1 {
+		t.Errorf("expected 1 pending hint (idempotent set), got %d", ws.PendingHintsCount)
+	}
+}
+
 // --- Interface compliance ---
 
 func TestWorkflowStatusProjection_ImplementsProjector(t *testing.T) {
