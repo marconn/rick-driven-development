@@ -23,18 +23,31 @@ import (
 // Setting it to "0" disables the timeout entirely (legacy behavior — only
 // useful for debugging long-running AI runs).
 func parseBackendTimeout(logger *slog.Logger) time.Duration {
-	v := os.Getenv("RICK_BACKEND_TIMEOUT")
+	return parseTimeoutEnv(logger, "RICK_BACKEND_TIMEOUT", handler.DefaultBackendTimeout)
+}
+
+// parseReviewBackendTimeout reads RICK_REVIEW_BACKEND_TIMEOUT from the
+// environment. Falls back to handler.DefaultReviewBackendTimeout when unset
+// or unparseable. Applies to reviewer/qa/feedback/committer/pr-category
+// handlers — the developer phase uses the separate RICK_BACKEND_TIMEOUT.
+func parseReviewBackendTimeout(logger *slog.Logger) time.Duration {
+	return parseTimeoutEnv(logger, "RICK_REVIEW_BACKEND_TIMEOUT", handler.DefaultReviewBackendTimeout)
+}
+
+func parseTimeoutEnv(logger *slog.Logger, name string, fallback time.Duration) time.Duration {
+	v := os.Getenv(name)
 	if v == "" {
-		return handler.DefaultBackendTimeout
+		return fallback
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
-		logger.Warn("RICK_BACKEND_TIMEOUT unparseable, using default",
+		logger.Warn("timeout env var unparseable, using default",
+			slog.String("var", name),
 			slog.String("value", v),
-			slog.Duration("default", handler.DefaultBackendTimeout),
+			slog.Duration("default", fallback),
 			slog.Any("error", err),
 		)
-		return handler.DefaultBackendTimeout
+		return fallback
 	}
 	return d
 }

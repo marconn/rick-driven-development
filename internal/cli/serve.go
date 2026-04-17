@@ -113,7 +113,8 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 		Logger:         logger,
 		WorkDir:        opts.workDir,
 		Yolo:           opts.yolo,
-		BackendTimeout: parseBackendTimeout(logger),
+		BackendTimeout:       parseBackendTimeout(logger),
+		ReviewBackendTimeout: parseReviewBackendTimeout(logger),
 	}
 	if err := handler.RegisterAll(reg, deps); err != nil {
 		return fmt.Errorf("register handlers: %w", err)

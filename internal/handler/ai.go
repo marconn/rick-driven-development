@@ -148,6 +148,15 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		defer cancel()
 	}
 
+	// Pin this persona to a specific inner backend when the underlying
+	// backend is a RoundRobin. Keeps reviewer/qa on the same CLI across
+	// all iterations of a feedback loop so the developer isn't chasing
+	// three different backends' opinions on three different runs.
+	// Harmless for non-rotating backends — the key is simply ignored.
+	if env.CorrelationID != "" {
+		backendCtx = backend.WithStickyKey(backendCtx, env.CorrelationID+":"+h.persona)
+	}
+
 	// Call backend
 	resp, err := h.backend.Run(backendCtx, backend.Request{
 		SystemPrompt: systemPrompt,

@@ -90,6 +90,8 @@ Set in `~/.config/rick/env` or shell.
 | `RICK_CLAUDE_BIN` / `RICK_GEMINI_BIN` / `RICK_CODEX_BIN` | CLI binary paths. |
 | `RICK_MODEL` | Override default LLM model. |
 | `RICK_REVIEW_BACKENDS` | Comma-separated rotation for review-phase handlers (default `claude,gemini,codex`). Set to a subset to limit to installed CLIs, or one name to disable rotation. |
+| `RICK_BACKEND_TIMEOUT` | Wall-clock cap on developer-phase backend calls (default `20m`). `0` disables. |
+| `RICK_REVIEW_BACKEND_TIMEOUT` | Wall-clock cap on review/commit/feedback-phase backend calls (default `15m`). `0` disables. |
 | `RICK_SERVER_URL` | Agent UI → rick-server URL. |
 | `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN` | Jira integration. |
 | `CONFLUENCE_URL`, `CONFLUENCE_EMAIL`, `CONFLUENCE_TOKEN` | Confluence integration. |

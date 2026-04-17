@@ -41,11 +41,23 @@ func NewRoundRobin(backends ...Backend) (*RoundRobin, error) {
 // process listing / CLI subprocess logs until the payload is extended.
 func (r *RoundRobin) Name() string { return r.name }
 
-// Run selects the next backend and delegates. Selection is per-call, not
-// per-handler: two concurrent review handlers will land on different
-// backends (provided len(backends) > 1).
+// Run selects a backend and delegates. When the context carries a sticky key
+// (see WithStickyKey), selection is deterministic based on the key — same key
+// always maps to the same backend. Otherwise selection is per-call via the
+// atomic counter: two concurrent review handlers land on different backends
+// (provided len(backends) > 1).
+//
+// Sticky selection exists so that reviewer/qa personas stay on one backend
+// across feedback-loop iterations, avoiding the "three iterations, three
+// different backends, three different sets of issues, developer never
+// converges" failure mode seen in production.
 func (r *RoundRobin) Run(ctx context.Context, req Request) (*Response, error) {
-	idx := (r.counter.Add(1) - 1) % uint64(len(r.backends))
+	var idx int
+	if key := stickyKey(ctx); key != "" {
+		idx = stickyIndex(key, len(r.backends))
+	} else {
+		idx = int((r.counter.Add(1) - 1) % uint64(len(r.backends)))
+	}
 	return r.backends[idx].Run(ctx, req)
 }
 

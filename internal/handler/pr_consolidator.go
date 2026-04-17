@@ -127,7 +127,11 @@ func (h *PRConsolidatorHandler) callAI(
 	// from the three review outputs. Tool access caused a double-post bug
 	// where Claude proactively ran `gh pr comment` AND the handler posted
 	// the output again.
-	resp, err := h.backend.Run(ctx, backend.Request{
+	backendCtx := ctx
+	if env.CorrelationID != "" {
+		backendCtx = backend.WithStickyKey(backendCtx, env.CorrelationID+":pr-consolidator")
+	}
+	resp, err := h.backend.Run(backendCtx, backend.Request{
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
 		WorkDir:      workDir,

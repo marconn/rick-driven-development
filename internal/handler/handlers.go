@@ -45,18 +45,34 @@ type Deps struct {
 	// RICK_REVIEW_BACKENDS. When nil, the legacy single-backend fallback is
 	// used (d.Backend if it's already gemini, otherwise a bare gemini driver).
 	ReviewBackend backend.Backend
-	// BackendTimeout caps how long AIHandler.backend.Run may block.
+	// BackendTimeout caps how long AIHandler.backend.Run may block for the
+	// developer phase (and any phase without a more specific override).
 	// Zero falls back to handler.DefaultBackendTimeout. Set explicitly via
 	// RICK_BACKEND_TIMEOUT in serve mode.
 	BackendTimeout time.Duration
+	// ReviewBackendTimeout caps review-phase handlers (reviewer, qa,
+	// feedback-analyzer, pr-* reviewers, qa-analyzer, pr-replier,
+	// pr-summarizer, pr-consolidator, committer). Shorter than the
+	// developer timeout because review/commit runs are typically <5 min —
+	// a hung reviewer should surface fast instead of blocking a workflow
+	// for 20 minutes. Zero falls back to handler.DefaultReviewBackendTimeout.
+	// Set via RICK_REVIEW_BACKEND_TIMEOUT.
+	ReviewBackendTimeout time.Duration
 }
 
-// DefaultBackendTimeout is the fallback hard cap on AI backend calls when
-// Deps.BackendTimeout is zero. Picked to be longer than any reasonable AI
-// run we've observed in practice (~5 min for the heaviest reviewer pass)
-// while still being short enough to surface a wedged subprocess in operator
-// time. Override via RICK_BACKEND_TIMEOUT or by setting Deps.BackendTimeout.
+// DefaultBackendTimeout is the fallback hard cap on the developer AI backend
+// call when Deps.BackendTimeout is zero. Picked to be longer than any
+// reasonable developer run we've observed (~10 min on heavy refactors) while
+// still being short enough to surface a wedged subprocess in operator time.
+// Override via RICK_BACKEND_TIMEOUT or by setting Deps.BackendTimeout.
 const DefaultBackendTimeout = 20 * time.Minute
+
+// DefaultReviewBackendTimeout caps review/commit/feedback handlers. Reviewer
+// and qa p99 observed at ~9 min in production; 15 min leaves ~60% headroom
+// above that while still surfacing a wedged CLI well under the 20-min
+// developer budget. Committer and pr-* category reviewers run even shorter
+// (under 7 min) but share this ceiling for simplicity.
+const DefaultReviewBackendTimeout = 15 * time.Minute
 
 // RegisterAll creates and registers all unique handlers. Each handler is
 // registered once — workflow DAGs control which handlers participate in
@@ -67,12 +83,16 @@ func RegisterAll(reg *Registry, d Deps) error {
 		logger = slog.Default()
 	}
 
-	// Resolve the backend timeout once: explicit Deps value wins, otherwise
-	// fall back to the package default. Zero stays zero only when callers
+	// Resolve the backend timeouts once: explicit Deps values win, otherwise
+	// fall back to the package defaults. Zero stays zero only when callers
 	// have already opted out (e.g., tests using mock backends).
 	backendTimeout := d.BackendTimeout
 	if backendTimeout == 0 && d.Bus != nil {
 		backendTimeout = DefaultBackendTimeout
+	}
+	reviewTimeout := d.ReviewBackendTimeout
+	if reviewTimeout == 0 && d.Bus != nil {
+		reviewTimeout = DefaultReviewBackendTimeout
 	}
 
 	// aiCfg builds an AIHandlerConfig with the shared deps wired in once,
@@ -112,10 +132,13 @@ func RegisterAll(reg *Registry, d Deps) error {
 	}
 	reviewBackend := resolveReviewBackend()
 
-	// reviewAiCfg ensures the gemini backend is used for review-related handlers.
+	// reviewAiCfg ensures the review backend is used for review-related
+	// handlers AND applies the shorter review timeout so wedged CLIs in
+	// the review phase don't block for the full developer budget.
 	reviewAiCfg := func(name, phase, personaName string) AIHandlerConfig {
 		cfg := aiCfg(name, phase, personaName)
 		cfg.Backend = reviewBackend
+		cfg.BackendTimeout = reviewTimeout
 		return cfg
 	}
 

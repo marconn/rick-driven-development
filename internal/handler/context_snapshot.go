@@ -23,12 +23,19 @@ const (
 	maxRecentCommits = 10
 )
 
-// Directories to always skip when walking the file tree.
+// Directories to always skip when walking the file tree. The Python
+// entries matter for polyglot repos: snapshotSchema extracts every `.proto`
+// under the workspace, and a pip-installed `venv/.../site-packages/google/
+// api/annotations.proto` adds zero signal while consuming the schema budget
+// with vendor boilerplate.
 var skipDirs = map[string]bool{
 	".git": true, "node_modules": true, "vendor": true,
 	"__pycache__": true, ".workflow": true, ".claude": true,
 	"dist": true, "build": true, ".next": true, ".nuxt": true,
 	"target": true, "coverage": true, ".idea": true, ".vscode": true,
+	"venv": true, ".venv": true, "virtualenv": true, ".virtualenv": true,
+	"site-packages": true, ".tox": true, ".mypy_cache": true,
+	".pytest_cache": true, ".ruff_cache": true, ".pyenv": true,
 }
 
 // ContextSnapshotHandler captures ground-truth codebase state as events.

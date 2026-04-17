@@ -96,7 +96,8 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 		Logger:         logger,
 		WorkDir:        opts.workDir,
 		Yolo:           opts.yolo,
-		BackendTimeout: parseBackendTimeout(logger),
+		BackendTimeout:       parseBackendTimeout(logger),
+		ReviewBackendTimeout: parseReviewBackendTimeout(logger),
 	}
 	if err := handler.RegisterAll(reg, deps); err != nil {
 		return fmt.Errorf("register handlers: %w", err)

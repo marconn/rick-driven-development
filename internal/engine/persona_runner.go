@@ -821,7 +821,21 @@ func (r *PersonaRunner) subscribePauseResume() {
 		}
 		r.pauser.markCancelled(corrID)
 		r.corrCtxs.cancel(corrID)
-		r.logger.Info("persona runner: workflow cancelled", slog.String("correlation", corrID))
+		// Surface source + reason so operators can tell an MCP/CLI-initiated
+		// cancel from an engine-initiated one (e.g., token-budget exceeded).
+		// Without these fields, "workflow cancelled" looks identical to
+		// "workflow silently stuck" in logs.
+		attrs := []slog.Attr{slog.String("correlation", corrID)}
+		var p event.WorkflowCancelledPayload
+		if err := json.Unmarshal(env.Payload, &p); err == nil {
+			if p.Source != "" {
+				attrs = append(attrs, slog.String("source", p.Source))
+			}
+			if p.Reason != "" {
+				attrs = append(attrs, slog.String("reason", p.Reason))
+			}
+		}
+		r.logger.LogAttrs(r.ctx, slog.LevelInfo, "persona runner: workflow cancelled", attrs...)
 		return nil
 	}, eventbus.WithName("persona-runner:cancel"))
 
