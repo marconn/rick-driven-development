@@ -17,6 +17,7 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/handler"
 	"github.com/marconn/rick-event-driven-development/internal/jira"
 	"github.com/marconn/rick-event-driven-development/internal/mcp"
+	"github.com/marconn/rick-event-driven-development/internal/observe"
 	"github.com/marconn/rick-event-driven-development/internal/persona"
 	"github.com/marconn/rick-event-driven-development/internal/projection"
 )
@@ -68,14 +69,16 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 	bus := eventbus.NewChannelBus(eventbus.WithLogger(logger))
 	defer func() { _ = bus.Close() }()
 
-	be, err := backend.New(opts.backendName)
+	saturation := observe.NewSaturation()
+
+	be, err := backend.NewWithRecorder(opts.backendName, saturation)
 	if err != nil {
 		return err
 	}
 
 	// Review-phase handlers use a configurable rotation (default: claude,
 	// gemini, codex). Override via RICK_REVIEW_BACKENDS=a,b,c.
-	reviewBe := newReviewBackend(logger)
+	reviewBe := newReviewBackend(logger, saturation)
 
 	personas := persona.DefaultRegistry()
 	builder := persona.NewPromptBuilder()

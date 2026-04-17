@@ -100,7 +100,8 @@ func runWorkflow(ctx context.Context, opts *runOpts, args []string) error {
 
 	// Review-phase handlers use a configurable rotation (default: claude,
 	// gemini, codex). Override via RICK_REVIEW_BACKENDS=a,b,c.
-	reviewBe := newReviewBackend(logger)
+	// run.go is deprecated; pass nil recorder rather than plumb observe here.
+	reviewBe := newReviewBackend(logger, nil)
 
 	// Create persona system
 	personas := persona.DefaultRegistry()

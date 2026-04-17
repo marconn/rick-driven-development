@@ -3,6 +3,7 @@ package backend
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -10,7 +11,27 @@ import (
 // Backend binary paths can be overridden via RICK_CLAUDE_BIN, RICK_GEMINI_BIN,
 // and RICK_CODEX_BIN environment variables; otherwise they default to the bare
 // binary name.
+//
+// When RICK_BACKEND_CONCURRENCY_<UPPER> is set to a positive integer, the
+// backend is wrapped in a concurrency limiter so no more than that many Run
+// calls execute in parallel against the same CLI. The unset / zero / negative
+// default is unlimited (historical behavior).
 func New(name string) (Backend, error) {
+	return NewWithRecorder(name, nil)
+}
+
+// NewWithRecorder is New plus an optional Recorder for observability. The
+// recorder only fires when a concurrency limit is configured — unlimited
+// backends skip it entirely.
+func NewWithRecorder(name string, recorder Recorder) (Backend, error) {
+	b, err := newRaw(name)
+	if err != nil {
+		return nil, err
+	}
+	return NewLimitedBackend(b, concurrencyLimitFor(name), recorder), nil
+}
+
+func newRaw(name string) (Backend, error) {
 	switch name {
 	case "claude":
 		bin := os.Getenv("RICK_CLAUDE_BIN")
@@ -38,6 +59,21 @@ func New(name string) (Backend, error) {
 	}
 }
 
+// concurrencyLimitFor returns the configured concurrency cap for a backend
+// name. Unset, zero, negative, or unparseable values mean unlimited. The env
+// var is RICK_BACKEND_CONCURRENCY_CLAUDE / _GEMINI / _CODEX.
+func concurrencyLimitFor(name string) int {
+	raw := os.Getenv("RICK_BACKEND_CONCURRENCY_" + strings.ToUpper(name))
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
 // DefaultReviewBackends is the fallback rotation order for review-phase
 // handlers when RICK_REVIEW_BACKENDS is unset.
 var DefaultReviewBackends = []string{"claude", "gemini", "codex"}
@@ -53,8 +89,16 @@ var DefaultReviewBackends = []string{"claude", "gemini", "codex"}
 //     caller-supplied order as the rotation order.
 //
 // Invalid or duplicate names are rejected. Names are lowercased and trimmed
-// before lookup.
+// before lookup. Each inner backend honors RICK_BACKEND_CONCURRENCY_<UPPER>
+// independently, so the aggregate review concurrency is the sum of per-CLI
+// caps.
 func NewReviewBackend(names []string) (Backend, error) {
+	return NewReviewBackendWithRecorder(names, nil)
+}
+
+// NewReviewBackendWithRecorder is NewReviewBackend plus an optional observer
+// attached to each inner limiter.
+func NewReviewBackendWithRecorder(names []string, recorder Recorder) (Backend, error) {
 	if len(names) == 0 {
 		names = DefaultReviewBackends
 	}
@@ -69,7 +113,7 @@ func NewReviewBackend(names []string) (Backend, error) {
 			return nil, fmt.Errorf("review backend %q listed more than once", n)
 		}
 		seen[n] = struct{}{}
-		b, err := New(n)
+		b, err := NewWithRecorder(n, recorder)
 		if err != nil {
 			return nil, fmt.Errorf("review backend: %w", err)
 		}

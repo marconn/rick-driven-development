@@ -23,6 +23,7 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/handler"
 	"github.com/marconn/rick-event-driven-development/internal/jira"
 	"github.com/marconn/rick-event-driven-development/internal/mcp"
+	"github.com/marconn/rick-event-driven-development/internal/observe"
 	"github.com/marconn/rick-event-driven-development/internal/persona"
 	"github.com/marconn/rick-event-driven-development/internal/projection"
 )
@@ -81,14 +82,20 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 	bus := eventbus.NewChannelBus(eventbus.WithLogger(logger))
 	defer func() { _ = bus.Close() }()
 
-	be, err := backend.New(opts.backendName)
+	// Saturation recorder tracks per-backend inflight + wait time so operators
+	// can see when RICK_BACKEND_CONCURRENCY_* caps are being hit. Shared by
+	// the primary developer backend and every inner backend of the review
+	// rotation.
+	saturation := observe.NewSaturation()
+
+	be, err := backend.NewWithRecorder(opts.backendName, saturation)
 	if err != nil {
 		return err
 	}
 
 	// Review-phase handlers use a configurable rotation (default: claude,
 	// gemini, codex). Override via RICK_REVIEW_BACKENDS=a,b,c.
-	reviewBe := newReviewBackend(logger)
+	reviewBe := newReviewBackend(logger, saturation)
 
 	personas := persona.DefaultRegistry()
 	builder := persona.NewPromptBuilder()
@@ -143,6 +150,12 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 
 	eng.Start()
 	defer eng.Stop()
+
+	// Periodic saturation dump: surfaces per-backend inflight, wait-time, and
+	// engine+runner load at a slow cadence so operators can correlate
+	// token-waste windows with concurrent-workflow pressure. Silent when
+	// everything is idle.
+	go logSaturation(ctx, logger, saturation, eng, personaRunner)
 
 	// Projections.
 	workflows := projection.NewWorkflowStatusProjection()

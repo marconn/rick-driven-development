@@ -15,7 +15,7 @@ REPORTER_BIN   := $(HOME)/.local/bin/rick-github-reporter
 JIRA_PLANNER_BIN := $(HOME)/.local/bin/rick-jira-planner
 PLANNING_BIN     := $(HOME)/.local/bin/rick-planning
 
-.PHONY: help build build-agent build-plugins lint test deploy deploy-agent deploy-plugins restart package clean
+.PHONY: help build build-agent build-plugins lint test test-race check deploy deploy-agent deploy-plugins restart package clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -45,7 +45,10 @@ lint: ## Run golangci-lint
 test: ## Run all tests
 	go test ./...
 
-check: lint test ## Lint + test
+test-race: ## Run all tests with the race detector
+	go test -race ./...
+
+check: lint test test-race ## Pre-commit gate: lint + tests + race — always run before committing
 
 # --- Deploy ---
 

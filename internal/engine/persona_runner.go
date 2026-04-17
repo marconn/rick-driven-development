@@ -205,6 +205,25 @@ func NewPersonaRunner(store eventstore.Store, bus eventbus.Bus, dispatcher Dispa
 	return r
 }
 
+// RunnerSnapshot reports dispatcher saturation for observability. Active is
+// the current number of handlers holding a semaphore slot; MaxActive is the
+// configured cap.
+type RunnerSnapshot struct {
+	Active    int32
+	MaxActive int32
+}
+
+// Snapshot returns a point-in-time read of runner load. Zero synchronization:
+// both fields are atomic reads / immutable-after-construction values. The
+// snapshot may be briefly inconsistent (Active read before a concurrent slot
+// acquire completes), which is acceptable for the intended telemetry use case.
+func (r *PersonaRunner) Snapshot() RunnerSnapshot {
+	return RunnerSnapshot{
+		Active:    r.active.Load(),
+		MaxActive: r.maxActive,
+	}
+}
+
 // acquireSlot blocks until a concurrency slot is available or the runner
 // context is cancelled. Returns false if the caller should abort (shutdown).
 func (r *PersonaRunner) acquireSlot(env event.Envelope, handlerName string) bool {

@@ -92,6 +92,37 @@ func (e *Engine) WarmThrottle(runningIDs []string) {
 	e.throttle.warmRunning(runningIDs)
 }
 
+// ThrottleSnapshot reports throttle state for observability. Safe to call
+// before Start() and while Start() is running. MaxConcurrent=0 means the
+// throttle is disabled (unlimited). When disabled, Running and Queued are
+// always zero — the engine doesn't track running workflows unless throttling
+// is active.
+type ThrottleSnapshot struct {
+	Enabled       bool
+	MaxConcurrent int
+	Running       int
+	Queued        int
+}
+
+// ThrottleSnapshot returns a value copy of the current throttle state. The
+// caller is the processLoop goroutine or anyone holding no throttle-related
+// lock; we read the counters without synchronization because the throttle is
+// owned exclusively by the processLoop. Values may be slightly stale but are
+// never torn — all fields are simple int reads.
+//
+// Returns Enabled=false when RICK_MAX_WORKFLOWS is unset/zero.
+func (e *Engine) ThrottleSnapshot() ThrottleSnapshot {
+	if e.throttle == nil {
+		return ThrottleSnapshot{}
+	}
+	return ThrottleSnapshot{
+		Enabled:       true,
+		MaxConcurrent: e.throttle.maxConcurrent,
+		Running:       e.throttle.runningCount(),
+		Queued:        e.throttle.queuedCount(),
+	}
+}
+
 // OnWorkflowRegistered sets a callback that fires whenever a workflow
 // definition is registered. Used by PersonaRunner to auto-scale chain depth.
 func (e *Engine) OnWorkflowRegistered(fn func(def WorkflowDef)) {

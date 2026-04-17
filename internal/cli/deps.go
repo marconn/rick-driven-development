@@ -56,13 +56,17 @@ func parseTimeoutEnv(logger *slog.Logger, name string, fallback time.Duration) t
 // Reads RICK_REVIEW_BACKENDS (comma-separated list in rotation order) and
 // falls back to backend.DefaultReviewBackends when unset.
 //
+// The passed recorder (may be nil) is attached to each inner backend's
+// concurrency limiter so observability hits both the primary developer
+// backend and the review rotation through the same collector.
+//
 // Parse/validation errors fall back to gemini (prior default) rather than
 // failing startup — review handlers are critical and we'd rather run with
 // a single backend than refuse to boot. The fallback is logged loudly.
-func newReviewBackend(logger *slog.Logger) backend.Backend {
+func newReviewBackend(logger *slog.Logger, recorder backend.Recorder) backend.Backend {
 	raw := os.Getenv("RICK_REVIEW_BACKENDS")
 	names := backend.ParseReviewBackendsEnv(raw)
-	be, err := backend.NewReviewBackend(names)
+	be, err := backend.NewReviewBackendWithRecorder(names, recorder)
 	if err == nil {
 		logger.Info("review backend selected", slog.String("name", be.Name()))
 		return be
@@ -71,7 +75,7 @@ func newReviewBackend(logger *slog.Logger) backend.Backend {
 		slog.String("value", raw),
 		slog.Any("error", err),
 	)
-	fallback, _ := backend.New("gemini")
+	fallback, _ := backend.NewWithRecorder("gemini", recorder)
 	return fallback
 }
 

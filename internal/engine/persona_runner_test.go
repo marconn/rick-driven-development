@@ -2260,3 +2260,21 @@ func TestFeedbackGeneratedRetriggersDeveloper(t *testing.T) {
 		t.Fatal("developer did NOT re-trigger on FeedbackGenerated — workflow would be stuck")
 	}
 }
+
+func TestPersonaRunnerSnapshot_ReportsCapAndActive(t *testing.T) {
+	runner, _, _, _ := newTestPersonaRunner(t, WithMaxActive(7))
+	snap := runner.Snapshot()
+	if snap.MaxActive != 7 {
+		t.Errorf("MaxActive = %d, want 7", snap.MaxActive)
+	}
+	if snap.Active != 0 {
+		t.Errorf("Active = %d, want 0 before any dispatch", snap.Active)
+	}
+	// Simulate an in-flight dispatch by directly bumping the counter —
+	// avoids spinning up a full handler harness just to read a gauge.
+	runner.active.Add(3)
+	snap = runner.Snapshot()
+	if snap.Active != 3 {
+		t.Errorf("Active = %d, want 3", snap.Active)
+	}
+}

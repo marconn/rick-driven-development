@@ -414,6 +414,38 @@ func TestEngineWarmThrottleNoOp(t *testing.T) {
 	eng.WarmThrottle([]string{"wf-1", "wf-2"})
 }
 
+func TestEngineThrottleSnapshot_Disabled(t *testing.T) {
+	eng, _, _ := newTestEngine(t)
+	snap := eng.ThrottleSnapshot()
+	if snap.Enabled || snap.MaxConcurrent != 0 || snap.Running != 0 || snap.Queued != 0 {
+		t.Errorf("unset throttle must snapshot as zero-enabled, got %+v", snap)
+	}
+}
+
+func TestEngineThrottleSnapshot_ReflectsState(t *testing.T) {
+	eng, _, _ := newTestEngine(t)
+	eng.SetMaxConcurrentWorkflows(3)
+	eng.WarmThrottle([]string{"wf-a", "wf-b"})
+	// Simulate a queued request bypassing processLoop for the test — the
+	// throttle is owned by that goroutine but we can poke it directly here
+	// because the test engine is not Started.
+	eng.throttle.enqueue(event.Envelope{AggregateID: "wf-queued"})
+
+	snap := eng.ThrottleSnapshot()
+	if !snap.Enabled {
+		t.Fatal("snapshot should report Enabled after SetMaxConcurrentWorkflows")
+	}
+	if snap.MaxConcurrent != 3 {
+		t.Errorf("MaxConcurrent = %d, want 3", snap.MaxConcurrent)
+	}
+	if snap.Running != 2 {
+		t.Errorf("Running = %d, want 2", snap.Running)
+	}
+	if snap.Queued != 1 {
+		t.Errorf("Queued = %d, want 1", snap.Queued)
+	}
+}
+
 // drain reads all pending events from the channel and optionally calls fn for each.
 func drain(ch <-chan event.Envelope, fn func(event.Envelope)) {
 	for {
