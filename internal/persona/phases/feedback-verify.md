@@ -39,6 +39,14 @@ For **Push-Back** items: were they left unchanged (correct) or inappropriately m
 
 For **Cosmetic** items: were any addressed? (Not required for PASS, but note if done.)
 
+## Output Constraints
+
+1. Verify against the original feedback only. Do not drift into a general review.
+2. Keep the response compact and issue-focused.
+3. Every FAIL item must name the original actionable concern that remains unresolved.
+4. Cite exact file/path and line when available.
+5. If an item was correctly pushed back on, do not fail it.
+
 ## Required Output Format
 
 Provide your verification report, then end with EXACTLY one of these lines:

@@ -30,6 +30,14 @@ Validate the implementation from a quality assurance perspective. Focus on testa
 10. **Integration**: Contract tests present? E2E coverage for critical paths?
 11. **Good Hygiene**: Code smells, dead code, magic numbers, poor naming, anti-patterns, excessive complexity?
 
+## Output Constraints
+
+1. Keep the response compact. No tables, no long testing strategy essays.
+2. Every FAIL finding must be grounded in the implementation, tests, or explicit workflow context above.
+3. Cite exact file/path and line when available.
+4. Prefer concrete missing scenarios over vague “add more tests”.
+5. Report only the highest-signal 1-5 issues that affect release confidence.
+
 ## Required Output Format
 
 Provide your detailed QA analysis, then end with EXACTLY one of these lines:
@@ -45,3 +53,6 @@ VERDICT: FAIL
 ```
 
 If FAIL, list specific quality issues that must be addressed as a numbered list after the verdict.
+Each item should be compact and actionable, ideally:
+
+`file:line` — missing validation / risk and why it matters

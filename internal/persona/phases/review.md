@@ -36,6 +36,14 @@ Review the implementation below against the architecture and requirements. Be th
 10. **Testing**: Missing tests for critical paths, edge cases, error paths?
 11. **Good Hygiene**: Code smells, dead code, magic numbers, poor naming, excessive complexity, anti-patterns?
 
+## Output Constraints
+
+1. Keep the response compact. No tables, no persona roleplay, no rewritten code.
+2. Every FAIL finding must be grounded in the implementation under review.
+3. Cite exact file/path and line when available.
+4. If a claim cannot be grounded, do not report it.
+5. Prefer the 1-5 highest-signal findings only.
+
 ## Required Output Format
 
 Provide your detailed review, then end with EXACTLY one of these lines:
@@ -51,3 +59,6 @@ VERDICT: FAIL
 ```
 
 If FAIL, list specific issues that must be fixed as a numbered list after the verdict.
+Each item should be compact and actionable, ideally:
+
+`file:line` — problem and why it matters

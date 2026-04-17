@@ -6,15 +6,15 @@ Embedded markdown **system prompts** that define each persona's identity, tone, 
 
 System prompts (one per persona, no template variables — pure identity text):
 
-- `researcher.md` — Interdimensional Research Scout: codebase exploration, prior art, constraint discovery
-- `architect.md` — Multi-Dimensional Architect: design briefs, trade-offs, kill-shot risk assessment
-- `developer.md` — Staff Engineer Implementor: writes the code, applies YAGNI, matches repo patterns
-- `reviewer.md` — PR Executioner: code review verdict (pass/fail with structured findings)
-- `qa.md` — Quality Enforcement Officer: behavioral/integration test verdict
-- `committer.md` — Release Engineer: commit message + git push instructions
-- `feedback-analyzer.md` — PR Feedback Triage Analyst: groups review comments into actionable buckets
-- `pr-consolidator.md` — PR Review Consolidator: merges architect/reviewer/qa output into a single PR comment
-- `qa-analyzer.md` — QA Steps Generator: turns ticket + diff into manual QA test scenarios
+- `researcher.md` — requirements and codebase researcher: extracts domain model, risks, unknowns, constraints
+- `architect.md` — Multi-Dimensional Architect: turns research into an executable design
+- `developer.md` — Staff Engineer Implementor: delivers minimal correct implementation aligned with repo patterns
+- `reviewer.md` — implementation reviewer: reports grounded high-signal defects only
+- `qa.md` — QA reviewer: evaluates release confidence, coverage, and validation gaps
+- `committer.md` — Release Engineer: safe git/push/PR execution
+- `feedback-analyzer.md` — PR Feedback Triage Analyst: categorizes review comments into actionable buckets
+- `pr-consolidator.md` — PR Review Consolidator: merges category-review output into one PR comment
+- `qa-analyzer.md` — QA scenario generator: turns ticket + diff into manual QA scenarios in Spanish
 
 ## Template variables
 

@@ -304,6 +304,138 @@ func TestReviewHandlerEventSource(t *testing.T) {
 	}
 }
 
+func TestReviewHandlerPRCategoryReviewFiltersUngroundedIssues(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-pr-category-filter"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "review this PR",
+		})).WithCorrelation(corrID),
+		event.New(event.ContextEnrichment, 1, event.MustMarshal(event.ContextEnrichmentPayload{
+			Source: "pr-jira-context",
+			Kind:   "pr-diff",
+			Summary: "## PR Changed Files\n\n- `Makefile`\n\n## PR Diff\n\n```diff\n" +
+				"diff --git a/Makefile b/Makefile\n" +
+				"--- a/Makefile\n" +
+				"+++ b/Makefile\n" +
+				"@@ -10,1 +10,1 @@ install:\n" +
+				"+\t@mise install\n" +
+				"```\n",
+		})).WithCorrelation(corrID),
+	}
+
+	mb := &mockBackend{
+		name: "gemini",
+		response: &backend.Response{
+			Output:   "This review is wrong.\n\nVERDICT: FAIL\n\n1. **Critical**: `Makefile` line 10 uses `mise.toml` as a command instead of `mise`.",
+			Duration: time.Second,
+		},
+	}
+
+	h := NewReviewHandler(ReviewHandlerConfig{
+		AIConfig: AIHandlerConfig{
+			Name:     "pr-testing",
+			Phase:    "pr-category-review",
+			Persona:  persona.PRTesting,
+			Backend:  mb,
+			Store:    store,
+			Personas: persona.DefaultRegistry(),
+			Builder:  persona.NewPromptBuilder(),
+		},
+		TargetPhase: "develop",
+	})
+
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "pr-jira-context",
+	})).WithCorrelation(corrID)
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	var verdict event.VerdictPayload
+	if err := json.Unmarshal(results[2].Payload, &verdict); err != nil {
+		t.Fatalf("unmarshal verdict: %v", err)
+	}
+	if verdict.Outcome != event.VerdictPass {
+		t.Fatalf("want pass after ungrounded issue is filtered, got %s", verdict.Outcome)
+	}
+	if len(verdict.Issues) != 0 {
+		t.Fatalf("want 0 grounded issues, got %d", len(verdict.Issues))
+	}
+
+	responseText := h.extractResponseText(results)
+	if !strings.Contains(responseText, "VERDICT: PASS") {
+		t.Fatalf("expected rewritten AI response to contain PASS verdict, got %q", responseText)
+	}
+}
+
+func TestReviewHandlerPRCategoryReviewKeepsGroundedIssues(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-pr-category-keep"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "review this PR",
+		})).WithCorrelation(corrID),
+		event.New(event.ContextEnrichment, 1, event.MustMarshal(event.ContextEnrichmentPayload{
+			Source: "pr-jira-context",
+			Kind:   "pr-diff",
+			Summary: "## PR Changed Files\n\n- `Makefile`\n\n## PR Diff\n\n```diff\n" +
+				"diff --git a/Makefile b/Makefile\n" +
+				"--- a/Makefile\n" +
+				"+++ b/Makefile\n" +
+				"@@ -10,1 +10,1 @@ check:\n" +
+				"+\tif mise doctor >/dev/null 2>&1; then \\\n" +
+				"```\n",
+		})).WithCorrelation(corrID),
+	}
+
+	mb := &mockBackend{
+		name: "gemini",
+		response: &backend.Response{
+			Output:   "Grounded review.\n\nVERDICT: FAIL\n\n1. **Major**: `Makefile` line 10 swallows `mise doctor` output, making diagnostics harder.",
+			Duration: time.Second,
+		},
+	}
+
+	h := NewReviewHandler(ReviewHandlerConfig{
+		AIConfig: AIHandlerConfig{
+			Name:     "pr-observability",
+			Phase:    "pr-category-review",
+			Persona:  persona.PRObservability,
+			Backend:  mb,
+			Store:    store,
+			Personas: persona.DefaultRegistry(),
+			Builder:  persona.NewPromptBuilder(),
+		},
+		TargetPhase: "develop",
+	})
+
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "pr-jira-context",
+	})).WithCorrelation(corrID)
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	var verdict event.VerdictPayload
+	if err := json.Unmarshal(results[2].Payload, &verdict); err != nil {
+		t.Fatalf("unmarshal verdict: %v", err)
+	}
+	if verdict.Outcome != event.VerdictFail {
+		t.Fatalf("want fail with grounded issue, got %s", verdict.Outcome)
+	}
+	if len(verdict.Issues) != 1 {
+		t.Fatalf("want 1 grounded issue, got %d", len(verdict.Issues))
+	}
+	if verdict.Issues[0].File != "Makefile" || verdict.Issues[0].Line != 10 {
+		t.Fatalf("unexpected grounded location: %s:%d", verdict.Issues[0].File, verdict.Issues[0].Line)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // extractResponseText — no AIResponseReceived event
 // ---------------------------------------------------------------------------
@@ -455,6 +587,18 @@ func TestParseIssuesNoIssueLines(t *testing.T) {
 	issues := ParseIssues(text, event.VerdictFail)
 	if len(issues) != 0 {
 		t.Errorf("want 0 issues (no numbered/bulleted lines), got %d", len(issues))
+	}
+}
+
+func TestExtractFileRefNonGoFiles(t *testing.T) {
+	file, line := extractFileRef("**Major**: `Makefile` line 184 uses the wrong command.")
+	if file != "Makefile" || line != 184 {
+		t.Fatalf("want Makefile:184, got %q:%d", file, line)
+	}
+
+	file, line = extractFileRef("Issue in `scripts/test-mise-config.sh:100` due to weak grep assertion.")
+	if file != "scripts/test-mise-config.sh" || line != 100 {
+		t.Fatalf("want scripts/test-mise-config.sh:100, got %q:%d", file, line)
 	}
 }
 

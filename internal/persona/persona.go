@@ -78,15 +78,15 @@ func NewRegistry() *Registry {
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
 	for _, p := range []Persona{
-		{Name: Researcher, Description: "Interdimensional Research Scout"},
+		{Name: Researcher, Description: "Requirements and codebase researcher"},
 		{Name: Architect, Description: "Multi-Dimensional Architect"},
 		{Name: Developer, Description: "Staff Engineer Implementor"},
-		{Name: Reviewer, Description: "PR Executioner"},
-		{Name: QA, Description: "Quality Enforcement Officer"},
+		{Name: Reviewer, Description: "Implementation reviewer"},
+		{Name: QA, Description: "QA reviewer"},
 		{Name: Committer, Description: "Release Engineer"},
 		{Name: Workspace, Description: "Git Workspace Provisioner"},
 		{Name: ContextSnapshot, Description: "Codebase Context Snapshotter"},
-		{Name: QAAnalyzer, Description: "QA Steps Generator"},
+		{Name: QAAnalyzer, Description: "QA scenario generator"},
 		{Name: FeedbackAnalyzer, Description: "PR Feedback Triage Analyst"},
 		{Name: PRConsolidator, Description: "PR Review Consolidator"},
 		// PR category review personas.

@@ -1,5 +1,6 @@
 # Claude Code
 .claude/
+.codex
 
 # Workflow output (generated artifacts)
 .workflow/
