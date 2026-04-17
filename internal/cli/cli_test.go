@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/marconn/rick-event-driven-development/internal/backend"
 	"github.com/marconn/rick-event-driven-development/internal/eventstore"
+	"github.com/marconn/rick-event-driven-development/internal/persona"
 )
 
 func TestRootCommand(t *testing.T) {
@@ -225,6 +227,109 @@ func TestPRFeedbackWorkflowDef_DisableQualityGate(t *testing.T) {
 	}
 	if !depSet["reviewer"] || !depSet["qa"] {
 		t.Errorf("committer deps = %v, want reviewer and qa", deps)
+	}
+}
+
+// Regression test for the hulilabs/huli#689 duplicate-comment incident (2026-04-17).
+// Rick must own PR comment posting after the committer — the pr-feedback DAG
+// therefore terminates in two composer→poster pairs, and all four must be in
+// Required so WorkflowCompleted cannot fire until both posts are done.
+func TestPRFeedbackWorkflowDef_RickOwnedCommentPosters(t *testing.T) {
+	def, err := selectWorkflowDef("pr-feedback")
+	if err != nil {
+		t.Fatalf("selectWorkflowDef: %v", err)
+	}
+
+	required := map[string]bool{}
+	for _, r := range def.Required {
+		required[r] = true
+	}
+	for _, name := range []string{"pr-replier", "pr-reply-poster", "pr-summarizer", "pr-summary-poster"} {
+		if !required[name] {
+			t.Errorf("%q missing from Required — WorkflowCompleted would fire before the comment is posted", name)
+		}
+	}
+
+	// Strict ordering: committer → pr-replier → pr-reply-poster → pr-summarizer → pr-summary-poster.
+	// Each must have exactly the one predecessor; any drift lets posts race or fire early.
+	checks := []struct {
+		handler string
+		want    string
+	}{
+		{"pr-replier", "committer"},
+		{"pr-reply-poster", "pr-replier"},
+		{"pr-summarizer", "pr-reply-poster"},
+		{"pr-summary-poster", "pr-summarizer"},
+	}
+	for _, c := range checks {
+		deps := def.Graph[c.handler]
+		if len(deps) != 1 || deps[0] != c.want {
+			t.Errorf("%s deps = %v, want [%s]", c.handler, deps, c.want)
+		}
+	}
+
+	// PhaseMap must resolve the new phases so verdict-to-handler lookups work
+	// if a reviewer ever targets the reply/summary phases. Absent entries
+	// would silently fall through to handler==phase which doesn't match.
+	if got := def.PhaseMap["pr-reply"]; got != "pr-replier" {
+		t.Errorf("PhaseMap[pr-reply] = %q, want pr-replier", got)
+	}
+	if got := def.PhaseMap["pr-summary"]; got != "pr-summarizer" {
+		t.Errorf("PhaseMap[pr-summary] = %q, want pr-summarizer", got)
+	}
+}
+
+// Regression test for the hulilabs/huli#689 duplicate-comment incident.
+// The committer LLM must never be instructed to post PR comments. Two
+// properties must hold:
+//  1. The actionable "run gh pr comment" instruction is gone (it was present
+//     as `gh pr comment {{.Ticket}} --body "<summary>"` before the fix).
+//  2. An explicit prohibition is present ("Never run `gh pr comment`...").
+//
+// If (1) regresses, the LLM gets a documented path to post comments itself,
+// reintroducing the duplicate-post failure mode.
+// If (2) regresses, the prohibition has been weakened and the LLM may
+// fall back to skill-driven posting (pr-feedback skill Phase 4).
+func TestCommitterPromptsProhibitGhPrComment(t *testing.T) {
+	reg := persona.DefaultRegistry()
+	sys, err := reg.LoadSystemPrompt(persona.Committer)
+	if err != nil {
+		t.Fatalf("load committer system prompt: %v", err)
+	}
+
+	builder := persona.NewPromptBuilder()
+	userPrompt, err := builder.Build("commit", persona.PromptContext{
+		Task: "test", Ticket: "TEST-1", BaseBranch: "main",
+		WorkspacePath: "/tmp/wsp",
+	})
+	if err != nil {
+		t.Fatalf("build commit phase prompt: %v", err)
+	}
+
+	// Actionable invocation patterns that used to live in the prompt. These
+	// are the exact strings that told the LLM to post a comment.
+	badPatterns := []string{
+		"gh pr comment <branch>",
+		"gh pr comment {{.Ticket}}",
+		"post a comment summarizing what was addressed",
+		"post a comment summarizing",
+	}
+	for _, pat := range badPatterns {
+		if strings.Contains(sys, pat) {
+			t.Errorf("committer system prompt still contains actionable instruction %q", pat)
+		}
+		if strings.Contains(userPrompt, pat) {
+			t.Errorf("commit phase prompt still contains actionable instruction %q", pat)
+		}
+	}
+
+	// Explicit prohibitions must be present — otherwise the LLM can fall
+	// back to skill-driven posting (e.g., ~/.claude/skills/pr-feedback).
+	if !strings.Contains(sys, "Never run `gh pr comment`") {
+		t.Error("committer system prompt must contain 'Never run `gh pr comment`' prohibition")
+	}
+	if !strings.Contains(userPrompt, "do NOT run `gh pr comment`") {
+		t.Error("commit phase prompt must contain 'do NOT run `gh pr comment`' prohibition")
 	}
 }
 

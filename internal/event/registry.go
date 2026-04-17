@@ -122,5 +122,6 @@ func DefaultRegistry() *Registry {
 	r.Register(TokenBudgetExceeded, "Cumulative token usage exceeds budget", 1)
 	r.Register(CompensationStarted, "Rollback begins", 1)
 	r.Register(CompensationCompleted, "Rollback finishes", 1)
+	r.Register(PRCommentPosted, "Rick posted a PR comment", 1)
 	return r
 }

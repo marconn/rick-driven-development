@@ -44,6 +44,8 @@ var internalEvents = map[event.Type]bool{
 	event.WorkspaceReady:    true,
 	// Child workflow coordination — consumed by parent handler, not persona registry.
 	event.ChildWorkflowCompleted: true,
+	// Observability side-effect record — nothing subscribes to it.
+	event.PRCommentPosted: true,
 }
 
 // Sentinel monitors the event bus for events that no handler is subscribed to.

@@ -85,6 +85,12 @@ const (
 
 	// Child workflow lifecycle (injected by parent workflow plugins)
 	ChildWorkflowCompleted Type = "child.workflow.completed"
+
+	// Side-effect observability: emitted after a PR comment is posted to GitHub
+	// by a Rick-owned handler. Lets operators trace comment posts in the event
+	// stream and lets downstream handlers dedupe on body hash without re-calling
+	// the REST API.
+	PRCommentPosted Type = "pr.comment.posted"
 )
 
 // WorkflowStartedPrefix is the prefix for workflow-scoped start events.

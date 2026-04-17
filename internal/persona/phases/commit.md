@@ -56,7 +56,6 @@ The develop phase produced the following changes:
 7. Push: `git push -u origin {{.Ticket}}`
 8. Check if a PR exists: `gh pr view {{.Ticket}}`
    - If none exists, create one: `gh pr create --base {{.BaseBranch}} --head {{.Ticket}}`
-   - If one already exists, post a comment summarizing what was addressed: `gh pr comment {{.Ticket}} --body "<summary>"`
-   - **CRITICAL**: **DO NOT USE THE `@` SYMBOL ANYWHERE IN YOUR COMMENT TEXT**. Replace any `@username` mentions with just `username` or `user username` (e.g., write `botreviewer` instead of `@botreviewer`). This is a hard constraint to prevent unwanted GitHub notifications.
+   - If one already exists, stop. Rick will post follow-up comments from its own handler once the workflow completes — **do NOT run `gh pr comment`, `gh issue comment`, or any other command that writes to GitHub**. Posting from this phase will create duplicate notifications.
 
-Report each step's result concisely.
+Report each step's result concisely via stdout. Do not post to GitHub.

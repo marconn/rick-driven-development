@@ -297,3 +297,18 @@ type EnrichmentItem struct {
 	DocURL      string `json:"doc_url,omitempty"`     // reference link
 	ImportPath  string `json:"import_path,omitempty"` // "@tanstack/react-query"
 }
+
+// PRCommentPostedPayload records a PR comment Rick posted via its own client.
+// BodyHash lets downstream handlers dedupe without re-fetching the comment list
+// from GitHub. Kind distinguishes reply (immediate, addresses reviewer feedback)
+// from summary (workflow completion overview) so projections and tests can
+// filter by intent. Skipped is true when the poster short-circuited because an
+// identical body already existed on the PR — observability only, not an error.
+type PRCommentPostedPayload struct {
+	Repo      string `json:"repo"`                 // "owner/repo"
+	PRNumber  int    `json:"pr_number"`
+	Kind      string `json:"kind"`                 // "reply", "summary"
+	CommentID int    `json:"comment_id,omitempty"` // GitHub comment ID (0 when skipped)
+	BodyHash  string `json:"body_hash"`            // sha256 hex of the posted body
+	Skipped   bool   `json:"skipped,omitempty"`    // true when an identical comment already existed
+}
