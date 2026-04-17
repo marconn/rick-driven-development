@@ -237,19 +237,19 @@ func (p *CIPoller) triggerCIFix(ctx context.Context, ticket *pluginstore.Ticket,
 
 func (p *CIPoller) buildCIFixPrompt(ticket *pluginstore.Ticket, head *PRHead, result *checkResult) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Fix CI failures for ticket %s on branch %s (commit %s).\n\n",
-		ticket.TicketID, head.Ref, head.SHA[:8]))
+	fmt.Fprintf(&b, "Fix CI failures for ticket %s on branch %s (commit %s).\n\n",
+		ticket.TicketID, head.Ref, head.SHA[:8])
 
 	b.WriteString("## Failed Checks\n\n")
 	for _, cr := range result.failures {
-		b.WriteString(fmt.Sprintf("### %s — %s\n", cr.Name, cr.Conclusion))
+		fmt.Fprintf(&b, "### %s — %s\n", cr.Name, cr.Conclusion)
 		if cr.Output.Title != "" {
-			b.WriteString(fmt.Sprintf("**%s**\n", cr.Output.Title))
+			fmt.Fprintf(&b, "**%s**\n", cr.Output.Title)
 		}
 		if cr.Output.Summary != "" {
 			b.WriteString(cr.Output.Summary + "\n")
 		}
-		b.WriteString(fmt.Sprintf("Details: %s\n\n", cr.HTMLURL))
+		fmt.Fprintf(&b, "Details: %s\n\n", cr.HTMLURL)
 	}
 
 	b.WriteString("## Instructions\n\n")

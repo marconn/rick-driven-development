@@ -26,7 +26,7 @@ func NewStore(dbPath string) (*Store, error) {
 	}
 
 	if err := migrate(db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
@@ -100,7 +100,7 @@ func (s *Store) SaveBatch(ctx context.Context, estimates []Estimate) error {
 	if err != nil {
 		return fmt.Errorf("estimation: prepare: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	now := time.Now().Format(time.RFC3339)
 	for i := range estimates {
@@ -125,7 +125,7 @@ func (s *Store) CalibrationSummary(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("estimation: query calibration: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var sb strings.Builder
 	count := 0
@@ -172,7 +172,7 @@ func (s *Store) SimilarEstimates(ctx context.Context, microservice, category str
 	if err != nil {
 		return "", fmt.Errorf("estimation: query similar: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var sb strings.Builder
 	count := 0

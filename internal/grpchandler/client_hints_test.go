@@ -23,7 +23,7 @@ func TestClient_HintHandler_CalledForHintOnlyDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	var hintCalled atomic.Int64
 	var handleCalled atomic.Int64
@@ -100,7 +100,7 @@ func TestClient_HintHandler_FallsBackToHandler_WhenNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	var handlerCalled atomic.Bool
 	c := NewClient(conn, ClientConfig{
@@ -207,7 +207,7 @@ func TestClient_UnwatchWorkflow_NoStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := NewClient(conn, ClientConfig{
 		Name:    "no-stream-unwatch",

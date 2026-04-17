@@ -123,7 +123,7 @@ func rpcPost(t *testing.T, baseURL, method string, params any) jsonRPCResponse {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -146,7 +146,7 @@ func TestIntegrationHealthCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -473,7 +473,7 @@ func TestIntegrationInvalidJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var rpcResp jsonRPCResponse
 	_ = json.NewDecoder(resp.Body).Decode(&rpcResp)
@@ -494,7 +494,7 @@ func TestIntegrationCORSHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if v := resp.Header.Get("Access-Control-Allow-Origin"); v != "*" {
 		t.Errorf("expected CORS origin *, got %s", v)

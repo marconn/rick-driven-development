@@ -228,7 +228,7 @@ func TestGRPCExternalHandlerE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := pb.NewPersonaServiceClient(conn)
 	stream, err := client.HandleStream(ctx)
@@ -389,7 +389,7 @@ func TestGRPCDisconnectCleansUpHooksAndSubscriptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := pb.NewPersonaServiceClient(conn)
 	stream, err := client.HandleStream(ctx)
@@ -471,7 +471,7 @@ func TestGRPCInjectEvent_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := pb.NewPersonaServiceClient(conn)
 	stream, err := client.HandleStream(ctx)
@@ -574,7 +574,7 @@ func TestGRPCInjectEvent_Blocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := pb.NewPersonaServiceClient(conn)
 	stream, err := client.HandleStream(ctx)
@@ -652,7 +652,7 @@ func TestGRPCInjectEvent_ProducerOnly_NewWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := pb.NewPersonaServiceClient(conn)
 	stream, err := client.HandleStream(ctx)
@@ -752,7 +752,7 @@ func TestGRPCWatch_E2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := pb.NewPersonaServiceClient(conn)
 	stream, err := client.HandleStream(ctx)
@@ -843,7 +843,7 @@ func TestGRPCWatch_DisconnectCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := pb.NewPersonaServiceClient(conn)
 	stream, err := client.HandleStream(ctx)

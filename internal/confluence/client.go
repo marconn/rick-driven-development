@@ -80,7 +80,7 @@ func (c *Client) ReadPage(ctx context.Context, pageID string) (*Page, error) {
 	if err != nil {
 		return nil, fmt.Errorf("confluence: request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -160,7 +160,7 @@ func (c *Client) updatePage(ctx context.Context, pageID, title, body string, ver
 	if err != nil {
 		return fmt.Errorf("confluence: request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)

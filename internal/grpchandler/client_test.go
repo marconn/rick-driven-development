@@ -100,7 +100,7 @@ func TestClientDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	c := NewClient(conn, ClientConfig{
 		Name:    "test",
@@ -124,7 +124,7 @@ func TestClientMaxRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	c := NewClient(conn, ClientConfig{
 		Name:       "test",
@@ -242,7 +242,7 @@ func TestClientContextCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -398,7 +398,7 @@ func TestClientInjectEvent_NoStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := NewClient(conn, ClientConfig{
 		Name:    "no-stream",
@@ -728,7 +728,7 @@ func TestClientHandleDispatch_ErrIncomplete_SetsIncompleteFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	c := NewClient(conn, ClientConfig{
 		Name: "test-incomplete",

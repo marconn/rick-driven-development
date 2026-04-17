@@ -140,7 +140,7 @@ func (c *Client) AddLabel(ctx context.Context, issueKey, label string) error {
 	if err != nil {
 		return fmt.Errorf("http put %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -181,7 +181,7 @@ func (c *Client) FetchIssue(ctx context.Context, key string) (*Issue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("http get %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -227,7 +227,7 @@ func (c *Client) UpdateField(ctx context.Context, issueKey, fieldID string, valu
 	if err != nil {
 		return fmt.Errorf("http put %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -381,7 +381,7 @@ func (c *Client) createIssue(ctx context.Context, fields map[string]any) (string
 	if err != nil {
 		return "", fmt.Errorf("jira: request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {
@@ -420,7 +420,7 @@ func (c *Client) LinkIssues(ctx context.Context, blockerKey, blockedKey string) 
 	if err != nil {
 		return fmt.Errorf("jira: link request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -460,7 +460,7 @@ func (c *Client) FetchRawIssue(ctx context.Context, key string) (*RawIssue, erro
 	if err != nil {
 		return nil, fmt.Errorf("http get %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -519,7 +519,7 @@ func (c *Client) Search(ctx context.Context, jql string, maxResults int) (*Searc
 	if err != nil {
 		return nil, fmt.Errorf("jira: search: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -567,7 +567,7 @@ func (c *Client) AddComment(ctx context.Context, key, body string) error {
 	if err != nil {
 		return fmt.Errorf("jira: add comment to %s: %w", key, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -662,7 +662,7 @@ func (c *Client) TransitionIssue(ctx context.Context, key, targetStatus string) 
 	if err != nil {
 		return fmt.Errorf("jira: get transitions: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -713,7 +713,7 @@ func (c *Client) TransitionIssue(ctx context.Context, key, targetStatus string) 
 	if err != nil {
 		return fmt.Errorf("jira: execute transition: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -763,7 +763,7 @@ func (c *Client) FetchEpicChildren(ctx context.Context, epicKey string, includeC
 	if err != nil {
 		return nil, fmt.Errorf("jira: epic children: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -832,7 +832,7 @@ func (c *Client) LinkIssuesWithType(ctx context.Context, fromKey, toKey, linkTyp
 	if err != nil {
 		return fmt.Errorf("jira: link request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(resp.Body)
@@ -855,7 +855,7 @@ func (c *Client) FetchIssueLinks(ctx context.Context, key string) ([]IssueLink, 
 	if err != nil {
 		return nil, fmt.Errorf("jira: fetch issue links: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -924,7 +924,7 @@ func (c *Client) DeleteIssueLink(ctx context.Context, linkID string) error {
 	if err != nil {
 		return fmt.Errorf("jira: delete issue link: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -968,7 +968,7 @@ func (c *Client) FetchPRLinks(ctx context.Context, issueKey string) ([]PRLink, e
 	if err != nil {
 		return nil, fmt.Errorf("jira: dev-status request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {

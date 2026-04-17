@@ -82,7 +82,7 @@ func runPlan(ctx context.Context, opts *planOpts, prompt string) error {
 	if err != nil {
 		return fmt.Errorf("connect to rick: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Build payload
 	payload, err := json.Marshal(event.WorkflowRequestedPayload{

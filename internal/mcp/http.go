@@ -47,7 +47,7 @@ func (s *Server) handleHTTPPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	var req jsonRPCRequest
 	if err := json.Unmarshal(body, &req); err != nil {

@@ -229,7 +229,7 @@ func TestWavePlan_JiraEpicBackCompat(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error when Jira is unconfigured")
 	}
-	if !strings.Contains(err.Error(), "Jira") {
-		t.Fatalf("expected Jira-related error, got %v", err)
+	if !strings.Contains(err.Error(), "jira") {
+		t.Fatalf("expected jira-related error, got %v", err)
 	}
 }

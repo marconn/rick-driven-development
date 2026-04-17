@@ -58,7 +58,7 @@ func (s *Server) registerConfluenceTools() {
 
 func (s *Server) requireConfluence() error {
 	if s.deps.Confluence == nil {
-		return fmt.Errorf("Confluence client not configured (set CONFLUENCE_URL, CONFLUENCE_EMAIL, CONFLUENCE_TOKEN)")
+		return fmt.Errorf("confluence client not configured (set CONFLUENCE_URL, CONFLUENCE_EMAIL, CONFLUENCE_TOKEN)")
 	}
 	return nil
 }

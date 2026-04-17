@@ -703,12 +703,12 @@ func (s *Server) toolProjectSync(ctx context.Context, raw json.RawMessage) (any,
 		if icon == "" {
 			icon = "⏳"
 		}
-		mermaid.WriteString(fmt.Sprintf("    %s[\"%s %s: %s\"]\n", child.Key, icon, child.Key, child.Summary))
+		fmt.Fprintf(&mermaid, "    %s[\"%s %s: %s\"]\n", child.Key, icon, child.Key, child.Summary)
 	}
 
 	for key, blockedBy := range depGraph {
 		for _, blocker := range blockedBy {
-			mermaid.WriteString(fmt.Sprintf("    %s --> %s\n", blocker, key))
+			fmt.Fprintf(&mermaid, "    %s --> %s\n", blocker, key)
 		}
 	}
 
@@ -722,8 +722,8 @@ func (s *Server) toolProjectSync(ctx context.Context, raw json.RawMessage) (any,
 	inProgress := 0
 
 	for _, child := range children {
-		table.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %.0f |\n",
-			child.Key, child.Summary, child.Status, child.Assignee, child.Points))
+		fmt.Fprintf(&table, "| %s | %s | %s | %s | %.0f |\n",
+			child.Key, child.Summary, child.Status, child.Assignee, child.Points)
 		totalPoints += child.Points
 		switch child.Status {
 		case "Done", "DONE", "Closed":

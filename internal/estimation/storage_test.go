@@ -10,7 +10,7 @@ func TestNewStoreAndSaveBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 	estimates := []Estimate{
@@ -33,7 +33,7 @@ func TestCalibrationSummaryEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	summary, err := store.CalibrationSummary(context.Background())
 	if err != nil {
@@ -49,7 +49,7 @@ func TestSimilarEstimatesEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	result, err := store.SimilarEstimates(context.Background(), "api", "")
 	if err != nil {

@@ -327,7 +327,7 @@ func (s *Server) registerJiraTools() {
 
 func (s *Server) requireJira() error {
 	if s.deps.Jira == nil {
-		return fmt.Errorf("Jira client not configured (set JIRA_URL, JIRA_EMAIL, JIRA_TOKEN)")
+		return fmt.Errorf("jira client not configured (set JIRA_URL, JIRA_EMAIL, JIRA_TOKEN)")
 	}
 	return nil
 }

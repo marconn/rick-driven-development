@@ -196,7 +196,7 @@ func TestQAContextHandlerHandleWithExplicitTicket(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, issueJSON)
+		_, _ = fmt.Fprint(w, issueJSON)
 	}))
 	defer srv.Close()
 
@@ -362,7 +362,7 @@ func TestFetchTicketContextSuccess(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, issueJSON)
+		_, _ = fmt.Fprint(w, issueJSON)
 	}))
 	defer srv.Close()
 

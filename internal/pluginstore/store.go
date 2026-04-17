@@ -22,7 +22,7 @@ func New(path string) (*Store, error) {
 		return nil, fmt.Errorf("pluginstore: open: %w", err)
 	}
 	if err := migrate(db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("pluginstore: migrate: %w", err)
 	}
 	return &Store{db: db}, nil

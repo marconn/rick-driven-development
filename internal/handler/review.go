@@ -449,8 +449,8 @@ func parseUnifiedDiff(scope *prDiffGroundingScope, diff string) {
 			currentNewLine++
 		case strings.HasPrefix(line, " "):
 			currentNewLine++
-		case strings.HasPrefix(line, "-"), strings.HasPrefix(line, `\ No newline at end of file`):
-			// Removed lines do not advance the new-file cursor.
+			// Removed lines ("-") and "\ No newline at end of file" markers
+			// fall through — they must not advance the new-file cursor.
 		}
 	}
 }

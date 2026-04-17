@@ -165,14 +165,14 @@ func (f *FetcherHandler) FetchPRFeedback(ctx context.Context, owner, repo string
 func formatPRFeedback(pr *PullRequest, reviews []Review, comments []ReviewComment, issueComments []IssueComment, diff string) string {
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("## PR #%d: %s\n\n", pr.Number, pr.Title))
+	fmt.Fprintf(&b, "## PR #%d: %s\n\n", pr.Number, pr.Title)
 
 	// Issue comments (standard comments).
 	if len(issueComments) > 0 {
 		b.WriteString("### Issue Comments\n\n")
 		for _, ic := range issueComments {
-			b.WriteString(fmt.Sprintf("**%s**:\n", ic.User.Login))
-			b.WriteString(fmt.Sprintf("> %s\n\n", strings.ReplaceAll(strings.ReplaceAll(ic.Body, "@", ""), "\n", "\n> ")))
+			fmt.Fprintf(&b, "**%s**:\n", ic.User.Login)
+			fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(strings.ReplaceAll(ic.Body, "@", ""), "\n", "\n> "))
 		}
 	}
 
@@ -186,8 +186,8 @@ func formatPRFeedback(pr *PullRequest, reviews []Review, comments []ReviewCommen
 			b.WriteString("### Reviews\n\n")
 			hasReviews = true
 		}
-		b.WriteString(fmt.Sprintf("**%s** (%s):\n", r.User.Login, r.State))
-		b.WriteString(fmt.Sprintf("> %s\n\n", strings.ReplaceAll(strings.ReplaceAll(r.Body, "@", ""), "\n", "\n> ")))
+		fmt.Fprintf(&b, "**%s** (%s):\n", r.User.Login, r.State)
+		fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(strings.ReplaceAll(r.Body, "@", ""), "\n", "\n> "))
 	}
 
 	// Inline diff comments.
@@ -198,13 +198,13 @@ func formatPRFeedback(pr *PullRequest, reviews []Review, comments []ReviewCommen
 			if c.Line > 0 {
 				loc = fmt.Sprintf("%s:%d", c.Path, c.Line)
 			}
-			b.WriteString(fmt.Sprintf("**%s** on `%s`:\n", c.User.Login, loc))
+			fmt.Fprintf(&b, "**%s** on `%s`:\n", c.User.Login, loc)
 			if c.DiffHunk != "" {
 				b.WriteString("```diff\n")
 				b.WriteString(c.DiffHunk)
 				b.WriteString("\n```\n")
 			}
-			b.WriteString(fmt.Sprintf("> %s\n\n", strings.ReplaceAll(strings.ReplaceAll(c.Body, "@", ""), "\n", "\n> ")))
+			fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(strings.ReplaceAll(c.Body, "@", ""), "\n", "\n> "))
 		}
 	}
 
@@ -226,7 +226,7 @@ func formatPRFeedback(pr *PullRequest, reviews []Review, comments []ReviewCommen
 				deletions++
 			}
 		}
-		b.WriteString(fmt.Sprintf("%d files changed, %d additions(+), %d deletions(-)\n\n", filesChanged, additions, deletions))
+		fmt.Fprintf(&b, "%d files changed, %d additions(+), %d deletions(-)\n\n", filesChanged, additions, deletions)
 		for _, s := range diffSummary {
 			b.WriteString(s + "\n")
 		}

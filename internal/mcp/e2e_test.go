@@ -58,7 +58,7 @@ func (c *mcpClient) call(ctx context.Context, method string, params any) (json.R
 	if err != nil {
 		return nil, fmt.Errorf("http: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -119,7 +119,7 @@ func (c *mcpClient) healthCheck(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode == http.StatusOK, nil
 }
 
@@ -893,7 +893,7 @@ func TestE2ECancelRequestedWorkflow(t *testing.T) {
 	mux.HandleFunc("POST /mcp", server.handleHTTPPost)
 	httpSrv := &http.Server{Handler: mux}
 	go func() { _ = httpSrv.Serve(listener) }()
-	defer httpSrv.Close()
+	defer func() { _ = httpSrv.Close() }()
 
 	client := newMCPClient("http://" + listener.Addr().String())
 

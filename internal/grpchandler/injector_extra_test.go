@@ -53,10 +53,10 @@ func TestInjector_RetryExhaustion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	defer realStore.Close()
+	defer func() { _ = realStore.Close() }()
 
 	bus := eventbus.NewChannelBus()
-	defer bus.Close()
+	defer func() { _ = bus.Close() }()
 
 	ctx := context.Background()
 
@@ -118,7 +118,7 @@ func TestInjector_PublishFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	defer realStore.Close()
+	defer func() { _ = realStore.Close() }()
 
 	ctx := context.Background()
 
@@ -144,7 +144,7 @@ func TestInjector_PublishFailure(t *testing.T) {
 		Bus:        eventbus.NewChannelBus(),
 		publishErr: errors.New(publishErrMsg),
 	}
-	defer bus.Bus.Close()
+	defer func() { _ = bus.Close() }()
 
 	inj := newInjectorWithStore(t, realStore, bus)
 

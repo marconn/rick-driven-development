@@ -596,7 +596,7 @@ func TestJiraTools_NoClientConfigured(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error when Jira client not configured")
 			}
-			if !strings.Contains(err.Error(), "Jira client not configured") {
+			if !strings.Contains(err.Error(), "jira client not configured") {
 				t.Errorf("unexpected error: %v", err)
 			}
 		})
@@ -625,7 +625,7 @@ func TestConfluenceTools_NoClientConfigured(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error when Confluence client not configured")
 			}
-			if !strings.Contains(err.Error(), "Confluence client not configured") {
+			if !strings.Contains(err.Error(), "confluence client not configured") {
 				t.Errorf("unexpected error: %v", err)
 			}
 		})
@@ -651,7 +651,7 @@ func TestWaveTools_NoJiraClient(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error when Jira client not configured")
 			}
-			if !strings.Contains(err.Error(), "Jira client not configured") {
+			if !strings.Contains(err.Error(), "jira client not configured") {
 				t.Errorf("unexpected error: %v", err)
 			}
 		})

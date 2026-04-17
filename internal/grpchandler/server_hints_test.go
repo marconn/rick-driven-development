@@ -36,7 +36,7 @@ func TestGRPCHandleStream_FirstMessageNotRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := pb.NewPersonaServiceClient(conn)
 	stream, err := client.HandleStream(ctx)
@@ -82,7 +82,7 @@ func TestGRPCHandleStream_StreamDiesBeforeMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := pb.NewPersonaServiceClient(conn)
 	stream, err := client.HandleStream(ctx)
@@ -133,7 +133,7 @@ func TestGRPCSupportsHints_RegistrationCreatesHinter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := pb.NewPersonaServiceClient(conn)
 	stream, err := client.HandleStream(ctx)

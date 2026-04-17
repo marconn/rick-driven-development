@@ -225,7 +225,7 @@ func TestToolJiraCreate_NoClient(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when Jira not configured")
 	}
-	if !strings.Contains(err.Error(), "Jira client not configured") {
+	if !strings.Contains(err.Error(), "jira client not configured") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -1144,7 +1144,7 @@ func TestToolJiraPRLinks_NoClient(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when Jira not configured")
 	}
-	if !strings.Contains(err.Error(), "Jira client not configured") {
+	if !strings.Contains(err.Error(), "jira client not configured") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
@@ -1215,7 +1215,7 @@ func TestToolJiraDeleteLink_NoClient(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when Jira not configured")
 	}
-	if !strings.Contains(err.Error(), "Jira client not configured") {
+	if !strings.Contains(err.Error(), "jira client not configured") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

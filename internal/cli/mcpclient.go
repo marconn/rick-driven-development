@@ -43,7 +43,7 @@ func mcpCall(ctx context.Context, serverURL, toolName string, args map[string]an
 	if err != nil {
 		return "", fmt.Errorf("server unreachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

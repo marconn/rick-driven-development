@@ -242,18 +242,18 @@ func (p *Poller) extractInfo(raw *jira.RawIssue) issueInfo {
 
 func (p *Poller) buildPrompt(issue jira.SearchIssue, info issueInfo) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Review the code changes for Jira ticket %s.\n\n", issue.Key))
-	b.WriteString(fmt.Sprintf("**Summary:** %s\n\n", issue.Fields.Summary))
+	fmt.Fprintf(&b, "Review the code changes for Jira ticket %s.\n\n", issue.Key)
+	fmt.Fprintf(&b, "**Summary:** %s\n\n", issue.Fields.Summary)
 
 	desc := jira.ExtractTextField(issue.Fields.Description)
 	if desc != "" {
-		b.WriteString(fmt.Sprintf("**Description:**\n%s\n\n", desc))
+		fmt.Fprintf(&b, "**Description:**\n%s\n\n", desc)
 	}
 
-	b.WriteString(fmt.Sprintf("**Repository:** %s\n", info.Repo))
-	b.WriteString(fmt.Sprintf("**Branch:** %s\n", info.Branch))
+	fmt.Fprintf(&b, "**Repository:** %s\n", info.Repo)
+	fmt.Fprintf(&b, "**Branch:** %s\n", info.Branch)
 	if info.PRURL != "" {
-		b.WriteString(fmt.Sprintf("**Pull Request:** %s\n", info.PRURL))
+		fmt.Fprintf(&b, "**Pull Request:** %s\n", info.PRURL)
 	}
 
 	return b.String()

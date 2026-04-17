@@ -518,7 +518,7 @@ func TestWorkspaceHandlerIsolatedUsesCorrelationSuffix(t *testing.T) {
 		t.Errorf("expected path %s, got %s", expectedPath, payload.Path)
 	}
 
-	t.Cleanup(func() { os.RemoveAll(expectedPath) })
+	t.Cleanup(func() { _ = os.RemoveAll(expectedPath) })
 }
 
 // ---------------------------------------------------------------------------
