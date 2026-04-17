@@ -108,6 +108,17 @@ func (s *SQLiteStore) migrate() error {
     );
 
     CREATE INDEX IF NOT EXISTS idx_event_tags_lookup ON event_tags(key, value);
+
+    -- Durable throttle queue: survives restarts when RICK_MAX_WORKFLOWS is set.
+    -- aggregate_id is PRIMARY KEY so re-enqueue of the same request is idempotent.
+    -- enqueued_at is unix nanoseconds for stable FIFO ordering.
+    CREATE TABLE IF NOT EXISTS workflow_queue (
+        aggregate_id TEXT PRIMARY KEY,
+        envelope     BLOB NOT NULL,
+        enqueued_at  INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_workflow_queue_fifo ON workflow_queue(enqueued_at);
     `
 	_, err := s.db.Exec(schema)
 	return err
@@ -433,4 +444,101 @@ func (s *SQLiteStore) LoadByTag(ctx context.Context, key, value string) ([]strin
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
+}
+
+// --- WorkflowQueueStore implementation ---
+
+// EnqueueWorkflow persists env into workflow_queue. If the aggregate_id already
+// exists the row is left unchanged (idempotent due to OR IGNORE).
+func (s *SQLiteStore) EnqueueWorkflow(ctx context.Context, env event.Envelope) error {
+	raw, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("eventstore: marshal queued envelope: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO workflow_queue (aggregate_id, envelope, enqueued_at) VALUES (?, ?, ?)`,
+		env.AggregateID, raw, env.Timestamp.UnixNano(),
+	)
+	if err != nil {
+		return fmt.Errorf("eventstore: enqueue workflow %s: %w", env.AggregateID, err)
+	}
+	return nil
+}
+
+// DequeueWorkflow removes and returns the oldest queued envelope (FIFO by
+// enqueued_at). Returns (zero, false, nil) when the table is empty.
+func (s *SQLiteStore) DequeueWorkflow(ctx context.Context) (event.Envelope, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return event.Envelope{}, false, fmt.Errorf("eventstore: dequeue begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // best-effort cleanup
+
+	var (
+		aggregateID string
+		raw         []byte
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT aggregate_id, envelope FROM workflow_queue ORDER BY enqueued_at LIMIT 1`,
+	).Scan(&aggregateID, &raw)
+	if err == sql.ErrNoRows {
+		return event.Envelope{}, false, nil
+	}
+	if err != nil {
+		return event.Envelope{}, false, fmt.Errorf("eventstore: dequeue select: %w", err)
+	}
+
+	if _, err = tx.ExecContext(ctx,
+		`DELETE FROM workflow_queue WHERE aggregate_id = ?`, aggregateID,
+	); err != nil {
+		return event.Envelope{}, false, fmt.Errorf("eventstore: dequeue delete: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return event.Envelope{}, false, fmt.Errorf("eventstore: dequeue commit: %w", err)
+	}
+
+	var env event.Envelope
+	if err = json.Unmarshal(raw, &env); err != nil {
+		return event.Envelope{}, false, fmt.Errorf("eventstore: dequeue unmarshal: %w", err)
+	}
+	return env, true, nil
+}
+
+// DeleteQueuedWorkflow removes a row by aggregate_id. Safe to call even if the
+// row does not exist (cancellation idempotency).
+func (s *SQLiteStore) DeleteQueuedWorkflow(ctx context.Context, aggregateID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM workflow_queue WHERE aggregate_id = ?`, aggregateID,
+	)
+	if err != nil {
+		return fmt.Errorf("eventstore: delete queued workflow %s: %w", aggregateID, err)
+	}
+	return nil
+}
+
+// LoadQueuedWorkflows returns all queued envelopes in FIFO order (enqueued_at
+// ascending). Used once at startup to re-seed the in-memory throttle queue.
+func (s *SQLiteStore) LoadQueuedWorkflows(ctx context.Context) ([]event.Envelope, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT envelope FROM workflow_queue ORDER BY enqueued_at`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("eventstore: load queued workflows: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // best-effort cleanup
+
+	var envelopes []event.Envelope
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, fmt.Errorf("eventstore: scan queued workflow: %w", err)
+		}
+		var env event.Envelope
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return nil, fmt.Errorf("eventstore: unmarshal queued workflow: %w", err)
+		}
+		envelopes = append(envelopes, env)
+	}
+	return envelopes, rows.Err()
 }

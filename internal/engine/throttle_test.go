@@ -14,14 +14,14 @@ import (
 // === Unit Tests for workflowThrottle ===
 
 func TestThrottleShouldQueueDisabled(t *testing.T) {
-	th := newWorkflowThrottle(0, slog.Default())
+	th := newWorkflowThrottle(0, nil, slog.Default())
 	if th.shouldQueue() {
 		t.Error("disabled throttle should never queue")
 	}
 }
 
 func TestThrottleShouldQueueUnderCapacity(t *testing.T) {
-	th := newWorkflowThrottle(3, slog.Default())
+	th := newWorkflowThrottle(3, nil, slog.Default())
 	th.addRunning("wf-1")
 	if th.shouldQueue() {
 		t.Error("should not queue when under capacity (1/3)")
@@ -29,7 +29,7 @@ func TestThrottleShouldQueueUnderCapacity(t *testing.T) {
 }
 
 func TestThrottleShouldQueueAtCapacity(t *testing.T) {
-	th := newWorkflowThrottle(2, slog.Default())
+	th := newWorkflowThrottle(2, nil, slog.Default())
 	th.addRunning("wf-1")
 	th.addRunning("wf-2")
 	if !th.shouldQueue() {
@@ -38,34 +38,35 @@ func TestThrottleShouldQueueAtCapacity(t *testing.T) {
 }
 
 func TestThrottleEnqueueDequeue(t *testing.T) {
-	th := newWorkflowThrottle(1, slog.Default())
+	ctx := context.Background()
+	th := newWorkflowThrottle(1, nil, slog.Default())
 	env1 := event.Envelope{AggregateID: "wf-1"}
 	env2 := event.Envelope{AggregateID: "wf-2"}
 
-	th.enqueue(env1)
-	th.enqueue(env2)
+	th.enqueue(ctx, env1)
+	th.enqueue(ctx, env2)
 
 	if th.queuedCount() != 2 {
 		t.Fatalf("expected 2 queued, got %d", th.queuedCount())
 	}
 
 	// FIFO order
-	got, ok := th.dequeue()
+	got, ok := th.dequeue(ctx)
 	if !ok || got.AggregateID != "wf-1" {
 		t.Errorf("first dequeue: want wf-1, got %s (ok=%v)", got.AggregateID, ok)
 	}
-	got, ok = th.dequeue()
+	got, ok = th.dequeue(ctx)
 	if !ok || got.AggregateID != "wf-2" {
 		t.Errorf("second dequeue: want wf-2, got %s (ok=%v)", got.AggregateID, ok)
 	}
-	_, ok = th.dequeue()
+	_, ok = th.dequeue(ctx)
 	if ok {
 		t.Error("dequeue from empty should return false")
 	}
 }
 
 func TestThrottleRemoveRunning(t *testing.T) {
-	th := newWorkflowThrottle(2, slog.Default())
+	th := newWorkflowThrottle(2, nil, slog.Default())
 	th.addRunning("wf-1")
 	th.addRunning("wf-2")
 
@@ -81,12 +82,13 @@ func TestThrottleRemoveRunning(t *testing.T) {
 }
 
 func TestThrottleRemoveQueued(t *testing.T) {
-	th := newWorkflowThrottle(1, slog.Default())
-	th.enqueue(event.Envelope{AggregateID: "wf-1"})
-	th.enqueue(event.Envelope{AggregateID: "wf-2"})
-	th.enqueue(event.Envelope{AggregateID: "wf-3"})
+	ctx := context.Background()
+	th := newWorkflowThrottle(1, nil, slog.Default())
+	th.enqueue(ctx, event.Envelope{AggregateID: "wf-1"})
+	th.enqueue(ctx, event.Envelope{AggregateID: "wf-2"})
+	th.enqueue(ctx, event.Envelope{AggregateID: "wf-3"})
 
-	if !th.removeQueued("wf-2") {
+	if !th.removeQueued(ctx, "wf-2") {
 		t.Error("removeQueued should return true for present ID")
 	}
 	if th.queuedCount() != 2 {
@@ -94,25 +96,26 @@ func TestThrottleRemoveQueued(t *testing.T) {
 	}
 
 	// Verify ordering preserved after middle removal
-	got, _ := th.dequeue()
+	got, _ := th.dequeue(ctx)
 	if got.AggregateID != "wf-1" {
 		t.Errorf("expected wf-1 first, got %s", got.AggregateID)
 	}
-	got, _ = th.dequeue()
+	got, _ = th.dequeue(ctx)
 	if got.AggregateID != "wf-3" {
 		t.Errorf("expected wf-3 second, got %s", got.AggregateID)
 	}
 }
 
 func TestThrottleRemoveQueuedNotFound(t *testing.T) {
-	th := newWorkflowThrottle(1, slog.Default())
-	if th.removeQueued("nope") {
+	ctx := context.Background()
+	th := newWorkflowThrottle(1, nil, slog.Default())
+	if th.removeQueued(ctx, "nope") {
 		t.Error("removeQueued should return false for absent ID")
 	}
 }
 
 func TestThrottleWarmRunning(t *testing.T) {
-	th := newWorkflowThrottle(5, slog.Default())
+	th := newWorkflowThrottle(5, nil, slog.Default())
 	th.warmRunning([]string{"wf-1", "wf-2", "wf-3"})
 
 	if th.runningCount() != 3 {
@@ -121,10 +124,10 @@ func TestThrottleWarmRunning(t *testing.T) {
 }
 
 func TestThrottleEnabled(t *testing.T) {
-	if newWorkflowThrottle(0, slog.Default()).enabled() {
+	if newWorkflowThrottle(0, nil, slog.Default()).enabled() {
 		t.Error("max=0 should not be enabled")
 	}
-	if !newWorkflowThrottle(1, slog.Default()).enabled() {
+	if !newWorkflowThrottle(1, nil, slog.Default()).enabled() {
 		t.Error("max=1 should be enabled")
 	}
 }
@@ -423,13 +426,14 @@ func TestEngineThrottleSnapshot_Disabled(t *testing.T) {
 }
 
 func TestEngineThrottleSnapshot_ReflectsState(t *testing.T) {
+	ctx := context.Background()
 	eng, _, _ := newTestEngine(t)
 	eng.SetMaxConcurrentWorkflows(3)
 	eng.WarmThrottle([]string{"wf-a", "wf-b"})
 	// Simulate a queued request bypassing processLoop for the test — the
 	// throttle is owned by that goroutine but we can poke it directly here
 	// because the test engine is not Started.
-	eng.throttle.enqueue(event.Envelope{AggregateID: "wf-queued"})
+	eng.throttle.enqueue(ctx, event.Envelope{AggregateID: "wf-queued"})
 
 	snap := eng.ThrottleSnapshot()
 	if !snap.Enabled {

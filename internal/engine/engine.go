@@ -64,11 +64,21 @@ func (e *Engine) initThrottleFromEnv() {
 		return
 	}
 	if n > 0 {
-		e.throttle = newWorkflowThrottle(n, e.logger)
+		queueStore := e.queueStore()
+		e.throttle = newWorkflowThrottle(n, queueStore, e.logger)
 		e.logger.Info("engine: workflow throttle enabled",
 			slog.Int("max_concurrent", n),
 		)
 	}
+}
+
+// queueStore returns the store as a WorkflowQueueStore if it implements the
+// interface; otherwise returns nil (throttle operates in memory-only mode).
+func (e *Engine) queueStore() eventstore.WorkflowQueueStore {
+	if qs, ok := e.store.(eventstore.WorkflowQueueStore); ok {
+		return qs
+	}
+	return nil
 }
 
 // SetMaxConcurrentWorkflows sets the maximum number of concurrently running
@@ -78,7 +88,8 @@ func (e *Engine) SetMaxConcurrentWorkflows(n int) {
 		e.throttle = nil
 		return
 	}
-	e.throttle = newWorkflowThrottle(n, e.logger)
+	queueStore := e.queueStore()
+	e.throttle = newWorkflowThrottle(n, queueStore, e.logger)
 }
 
 // WarmThrottle seeds the throttle's running set with workflow IDs that were
@@ -89,6 +100,63 @@ func (e *Engine) WarmThrottle(runningIDs []string) {
 		return
 	}
 	e.throttle.warmRunning(runningIDs)
+}
+
+// LoadQueuedWorkflows rehydrates the in-memory throttle queue from the DB.
+// Must be called after WarmThrottle and before Start() so the queue is ready
+// before processLoop begins consuming events.
+//
+// For each row in workflow_queue, if the aggregate_id does not correspond to a
+// valid WorkflowRequested in the events table (orphan row), it is deleted with
+// a warning. This keeps the table consistent across schema evolution.
+func (e *Engine) LoadQueuedWorkflows(ctx context.Context) {
+	if e.throttle == nil {
+		return
+	}
+	qs, ok := e.store.(eventstore.WorkflowQueueStore)
+	if !ok {
+		return
+	}
+
+	envs, err := qs.LoadQueuedWorkflows(ctx)
+	if err != nil {
+		e.logger.Error("engine: load queued workflows failed",
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+
+	// Validate each envelope: the aggregate must exist in the events table.
+	// An orphan row (aggregate_id present but no events) means we crashed after
+	// writing the queue row but before Appending the WorkflowRequested event to
+	// the events table — extremely unlikely but must not crash.
+	valid := make([]event.Envelope, 0, len(envs))
+	for _, env := range envs {
+		events, loadErr := e.store.Load(ctx, env.AggregateID)
+		if loadErr != nil {
+			e.logger.Warn("engine: could not verify queued workflow, keeping",
+				slog.String("aggregate_id", env.AggregateID),
+				slog.String("error", loadErr.Error()),
+			)
+			valid = append(valid, env) // keep on load error — fail safe
+			continue
+		}
+		if len(events) == 0 {
+			e.logger.Warn("engine: orphan queue row (no events), deleting",
+				slog.String("aggregate_id", env.AggregateID),
+			)
+			if delErr := qs.DeleteQueuedWorkflow(ctx, env.AggregateID); delErr != nil {
+				e.logger.Error("engine: delete orphan queue row failed",
+					slog.String("aggregate_id", env.AggregateID),
+					slog.String("error", delErr.Error()),
+				)
+			}
+			continue
+		}
+		valid = append(valid, env)
+	}
+
+	e.throttle.warmQueued(valid)
 }
 
 // ThrottleSnapshot reports throttle state for observability. Safe to call
@@ -233,7 +301,7 @@ func (e *Engine) processAndLog(env event.Envelope) {
 func (e *Engine) processDecision(ctx context.Context, env event.Envelope) error {
 	// Throttle: queue WorkflowRequested if at capacity.
 	if env.Type == event.WorkflowRequested && e.throttle != nil && e.throttle.shouldQueue() {
-		e.throttle.enqueue(env)
+		e.throttle.enqueue(ctx, env)
 		return nil
 	}
 
@@ -245,7 +313,7 @@ func (e *Engine) processDecision(ctx context.Context, env event.Envelope) error 
 			corrID = env.AggregateID
 		}
 		e.throttle.removeRunning(corrID)
-		e.throttle.removeQueued(corrID)
+		e.throttle.removeQueued(ctx, corrID)
 	}
 
 	aggID := e.resolveWorkflowAggregateID(env)
@@ -287,7 +355,7 @@ func (e *Engine) drainThrottleQueue(ctx context.Context) {
 		return
 	}
 	for !e.throttle.shouldQueue() {
-		next, ok := e.throttle.dequeue()
+		next, ok := e.throttle.dequeue(ctx)
 		if !ok {
 			return
 		}
@@ -374,7 +442,6 @@ func (e *Engine) resolveWorkflowAggregateID(env event.Envelope) string {
 	}
 	return env.AggregateID
 }
-
 
 func (e *Engine) loadAggregate(ctx context.Context, aggregateID string) (*WorkflowAggregate, error) {
 	agg := NewWorkflowAggregate(aggregateID)

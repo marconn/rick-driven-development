@@ -81,6 +81,10 @@ func (s *RecoveryScanner) Recover(ctx context.Context) RecoveryResult {
 	// Warm the throttle with workflows that survived the restart.
 	s.engine.WarmThrottle(runningIDs)
 
+	// Rehydrate the durable queue from DB. Must happen after WarmThrottle and
+	// before processLoop starts so queued requests are ready to drain.
+	s.engine.LoadQueuedWorkflows(ctx)
+
 	return result
 }
 
