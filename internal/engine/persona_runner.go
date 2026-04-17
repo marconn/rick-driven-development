@@ -82,14 +82,16 @@ type PersonaRunner struct {
 	// event with no correlation ID). Per-workflow limits are looked up via the
 	// resolver using WorkflowDef.EffectiveMaxChainDepth().
 	defaultChainDepth int
-	maxActive         int32 // max concurrent reactive handlers
-	active            atomic.Int32
-	// sem throttles concurrent handler execution. Each dispatch acquires a
-	// slot before running and releases it after. When full, drain goroutines
-	// block rather than dropping events — this preserves the per-(handler,
-	// correlation) queue ordering and prevents lost dispatches under bursty
-	// fan-out (e.g., pr-review's 11 parallel reviewers × N concurrent PRs).
-	sem  chan struct{}
+	maxActive         int32 // max concurrent reactive handlers (total cap)
+	// fair throttles concurrent handler execution with per-correlation fairness.
+	// It replaces the old flat channel semaphore. Each dispatch acquires a slot
+	// keyed by correlationID before running and releases it after. When the total
+	// cap is reached, drain goroutines block rather than dropping events —
+	// preserving per-(handler, correlation) queue ordering. Unlike the old
+	// semaphore, the fairDispatcher allocates slots proportionally across active
+	// correlations so one loud workflow (e.g., pr-review with 11 parallel
+	// reviewers) cannot starve another workflow's critical-path handlers.
+	fair *fairDispatcher
 	seen *idempotencyCache
 
 	// Pause support
@@ -184,61 +186,58 @@ func NewPersonaRunner(store eventstore.Store, bus eventbus.Bus, dispatcher Dispa
 	for _, opt := range opts {
 		opt(r)
 	}
-	// Build the semaphore after options so WithMaxActive is honored.
-	r.sem = make(chan struct{}, r.maxActive)
+	// Build the fair dispatcher after options so WithMaxActive is honored.
+	r.fair = newFairDispatcher(int(r.maxActive))
 	return r
 }
 
 // RunnerSnapshot reports dispatcher saturation for observability. Active is
-// the current number of handlers holding a semaphore slot; MaxActive is the
-// configured cap.
+// the current number of handlers holding a slot; MaxActive is the configured
+// cap. InflightByCorrelation provides a per-correlation breakdown to help
+// diagnose which workflows are consuming the most concurrency budget.
 type RunnerSnapshot struct {
-	Active    int32
-	MaxActive int32
+	Active                int32
+	MaxActive             int32
+	InflightByCorrelation map[string]int
 }
 
-// Snapshot returns a point-in-time read of runner load. Zero synchronization:
-// both fields are atomic reads / immutable-after-construction values. The
-// snapshot may be briefly inconsistent (Active read before a concurrent slot
-// acquire completes), which is acceptable for the intended telemetry use case.
+// Snapshot returns a point-in-time read of runner load. Active and MaxActive
+// are suitable for alerting on saturation; InflightByCorrelation is suitable
+// for debugging which workflow is dominating the concurrency pool.
 func (r *PersonaRunner) Snapshot() RunnerSnapshot {
+	byCorr := r.fair.activeCorrelations()
 	return RunnerSnapshot{
-		Active:    r.active.Load(),
-		MaxActive: r.maxActive,
+		Active:                int32(r.fair.inflightTotal()),
+		MaxActive:             r.maxActive,
+		InflightByCorrelation: byCorr,
 	}
 }
 
-// acquireSlot blocks until a concurrency slot is available or the runner
-// context is cancelled. Returns false if the caller should abort (shutdown).
+// acquireSlot blocks until a fair-share concurrency slot is available for this
+// correlation, or the runner context is cancelled. Returns false when the caller
+// should abort (shutdown). The fair dispatcher ensures no single correlation
+// monopolises the total cap when multiple workflows run concurrently.
 func (r *PersonaRunner) acquireSlot(env event.Envelope, handlerName string) bool {
-	// Fast path.
-	select {
-	case r.sem <- struct{}{}:
-		r.active.Add(1)
-		return true
-	default:
+	// Log saturation when the total cap is full. We check before blocking so the
+	// log reflects the load at admission time. fairDispatcher.acquire has its own
+	// fast path (no cond.Wait when below cap and under fair share), so this check
+	// does not add overhead on the uncontested path.
+	if r.fair.inflightTotal() >= int(r.maxActive) {
+		r.logger.Warn("persona runner: concurrency cap reached, dispatch waiting",
+			slog.String("handler", handlerName),
+			slog.Int("active", r.fair.inflightTotal()),
+			slog.Int("cap", int(r.maxActive)),
+			slog.String("correlation", env.CorrelationID),
+		)
 	}
-	// Slow path: log once, then block. Keeps parity with the old WARN log
-	// so operators still see saturation events.
-	r.logger.Warn("persona runner: concurrency cap reached, dispatch waiting",
-		slog.String("handler", handlerName),
-		slog.Int("active", int(r.active.Load())),
-		slog.Int("cap", int(r.maxActive)),
-		slog.String("correlation", env.CorrelationID),
-	)
-	select {
-	case r.sem <- struct{}{}:
-		r.active.Add(1)
-		return true
-	case <-r.ctx.Done():
-		return false
-	}
+	return r.fair.acquire(r.ctx, env.CorrelationID)
 }
 
-// releaseSlot frees a concurrency slot acquired by acquireSlot.
-func (r *PersonaRunner) releaseSlot() {
-	r.active.Add(-1)
-	<-r.sem
+// releaseSlot frees the concurrency slot acquired by acquireSlot for this
+// correlation, allowing a waiting goroutine (preferring under-share correlations)
+// to proceed.
+func (r *PersonaRunner) releaseSlot(corrID string) {
+	r.fair.release(corrID)
 }
 
 // RegisterWorkflow registers a workflow definition for DAG-based dispatch.
@@ -499,7 +498,7 @@ func (r *PersonaRunner) Close() error {
 		return nil
 	case <-time.After(r.drainTimeout):
 		return fmt.Errorf("persona runner: drain timeout after %s with %d active handlers",
-			r.drainTimeout, r.active.Load())
+			r.drainTimeout, r.fair.inflightTotal())
 	}
 }
 
@@ -701,7 +700,7 @@ func (r *PersonaRunner) executeDispatch(h handler.Handler, env event.Envelope, c
 	if !r.acquireSlot(env, h.Name()) {
 		return
 	}
-	defer r.releaseSlot()
+	defer r.releaseSlot(env.CorrelationID)
 
 	// Two-phase hint: if handler implements Hinter and this isn't a
 	// HintApproved replay, run the hint phase instead of full dispatch.
@@ -986,7 +985,7 @@ func (r *PersonaRunner) executeHintApprovedDispatch(handlerName string, env even
 	if !r.acquireSlot(env, handlerName) {
 		return
 	}
-	defer r.releaseSlot()
+	defer r.releaseSlot(env.CorrelationID)
 
 	dispatchCtx := r.corrCtxs.get(r.ctx, env.CorrelationID)
 

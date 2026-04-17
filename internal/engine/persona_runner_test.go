@@ -2263,6 +2263,8 @@ func TestFeedbackGeneratedRetriggersDeveloper(t *testing.T) {
 
 func TestPersonaRunnerSnapshot_ReportsCapAndActive(t *testing.T) {
 	runner, _, _, _ := newTestPersonaRunner(t, WithMaxActive(7))
+	ctx := context.Background()
+
 	snap := runner.Snapshot()
 	if snap.MaxActive != 7 {
 		t.Errorf("MaxActive = %d, want 7", snap.MaxActive)
@@ -2270,12 +2272,18 @@ func TestPersonaRunnerSnapshot_ReportsCapAndActive(t *testing.T) {
 	if snap.Active != 0 {
 		t.Errorf("Active = %d, want 0 before any dispatch", snap.Active)
 	}
-	// Simulate an in-flight dispatch by directly bumping the counter —
-	// avoids spinning up a full handler harness just to read a gauge.
-	runner.active.Add(3)
+	// Simulate in-flight dispatches by acquiring slots directly from the fair
+	// dispatcher. This exercises the Snapshot path without a full handler harness.
+	runner.ctx = ctx
+	runner.fair.acquire(ctx, "corr-A") //nolint:errcheck // bool return; only false on ctx cancel
+	runner.fair.acquire(ctx, "corr-B") //nolint:errcheck
+	runner.fair.acquire(ctx, "corr-C") //nolint:errcheck
 	snap = runner.Snapshot()
 	if snap.Active != 3 {
 		t.Errorf("Active = %d, want 3", snap.Active)
+	}
+	if snap.InflightByCorrelation["corr-A"] != 1 {
+		t.Errorf("corr-A inflight = %d, want 1", snap.InflightByCorrelation["corr-A"])
 	}
 }
 
