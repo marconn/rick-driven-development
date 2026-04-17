@@ -15,6 +15,23 @@ type WorkflowDef struct {
 	HintThreshold     float64                       // auto-approve hints above this confidence (0 = always ask, 1 = never ask, default: 0.7)
 	PhaseMap          map[string]string             // phase verb → handler name (e.g., "develop" → "developer")
 	RetriggeredBy     map[string][]event.Type       // handler → extra event types that re-trigger it (e.g., developer → [FeedbackGenerated])
+	// MaxChainDepth caps the reactive chain depth for dispatches in this
+	// workflow. Zero means "auto": len(Required) + 5, matching the old
+	// AdjustChainDepth formula so existing workflows behave identically.
+	// Set an explicit value to tighten the guard for short workflows.
+	MaxChainDepth int
+}
+
+// EffectiveMaxChainDepth returns the chain-depth limit for this workflow.
+// When MaxChainDepth is zero (the default), the limit is auto-computed as
+// len(Required) + 5, which mirrors the old global AdjustChainDepth formula
+// and gives every workflow headroom for the developer→reviewer→qa feedback
+// loop on top of its declared phase count.
+func (d *WorkflowDef) EffectiveMaxChainDepth() int {
+	if d.MaxChainDepth > 0 {
+		return d.MaxChainDepth
+	}
+	return len(d.Required) + 5
 }
 
 // DownstreamOf returns all personas that transitively depend on the given

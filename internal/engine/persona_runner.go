@@ -77,9 +77,13 @@ type PersonaRunner struct {
 	drainTimeout time.Duration
 
 	// Safety
-	maxChain  atomic.Int32 // max reactive chain depth (adjusted dynamically)
-	maxActive int32        // max concurrent reactive handlers
-	active    atomic.Int32
+	// defaultChainDepth is the fallback chain-depth cap used when no workflow
+	// definition is found for a correlation (e.g., unregistered correlation or
+	// event with no correlation ID). Per-workflow limits are looked up via the
+	// resolver using WorkflowDef.EffectiveMaxChainDepth().
+	defaultChainDepth int
+	maxActive         int32 // max concurrent reactive handlers
+	active            atomic.Int32
 	// sem throttles concurrent handler execution. Each dispatch acquires a
 	// slot before running and releases it after. When full, drain goroutines
 	// block rather than dropping events — this preserves the per-(handler,
@@ -131,33 +135,13 @@ func WithDrainTimeout(d time.Duration) PersonaRunnerOption {
 	return func(r *PersonaRunner) { r.drainTimeout = d }
 }
 
-// WithMaxChainDepth sets the max reactive chain depth (storm protection).
+// WithMaxChainDepth sets the package-level fallback chain-depth cap used when
+// no workflow definition can be resolved for a correlation (e.g., unknown
+// correlation or event with no correlation ID). Per-workflow limits are
+// derived from WorkflowDef.EffectiveMaxChainDepth() and always take
+// precedence over this value.
 func WithMaxChainDepth(n int) PersonaRunnerOption {
-	return func(r *PersonaRunner) { r.maxChain.Store(int32(n)) }
-}
-
-// AdjustChainDepth raises the max chain depth if the given workflow phase
-// count (plus a margin for feedback loops) exceeds the current limit.
-// Safe to call concurrently — used as a callback on workflow registration
-// so the limit auto-scales with the longest registered workflow.
-func (r *PersonaRunner) AdjustChainDepth(requiredCount int) {
-	// Margin covers feedback loops where the developer→reviewer→qa chain
-	// re-executes after a failed verdict.
-	needed := int32(requiredCount + 5)
-	for {
-		old := r.maxChain.Load()
-		if needed <= old {
-			return
-		}
-		if r.maxChain.CompareAndSwap(old, needed) {
-			r.logger.Info("persona runner: adjusted max chain depth",
-				slog.Int("old", int(old)),
-				slog.Int("new", int(needed)),
-				slog.Int("workflow_phases", requiredCount),
-			)
-			return
-		}
-	}
+	return func(r *PersonaRunner) { r.defaultChainDepth = n }
 }
 
 // WithMaxActive sets the max concurrent reactive handlers.
@@ -179,24 +163,24 @@ func WithBeforeHook(persona string, hookPersonas ...string) PersonaRunnerOption 
 // for all persona handlers.
 func NewPersonaRunner(store eventstore.Store, bus eventbus.Bus, dispatcher Dispatcher, logger *slog.Logger, opts ...PersonaRunnerOption) *PersonaRunner {
 	r := &PersonaRunner{
-		store:        store,
-		bus:          bus,
-		dispatcher:   dispatcher,
-		logger:       logger,
-		drainTimeout: defaultDrainTimeout,
-		maxActive:    int32(defaultMaxActive),
-		seen:         newIdempotencyCache(defaultDedup),
-		pauser:       newPauseController(),
-		hooks:        newHookRegistry(nil),
-		persister:    &resultPersister{store: store, bus: bus, logger: logger},
-		queues:       newDispatchQueues(),
-		hinters:      make(map[string]handler.Hinter),
-		handlers:     make(map[string]handler.Handler),
-		dynamicGen:   make(map[string]uint64),
-		resolver:     newWorkflowResolver(store, logger),
-		corrCtxs:     newCorrelationContexts(),
+		store:             store,
+		bus:               bus,
+		dispatcher:        dispatcher,
+		logger:            logger,
+		drainTimeout:      defaultDrainTimeout,
+		defaultChainDepth: defaultMaxChain,
+		maxActive:         int32(defaultMaxActive),
+		seen:              newIdempotencyCache(defaultDedup),
+		pauser:            newPauseController(),
+		hooks:             newHookRegistry(nil),
+		persister:         &resultPersister{store: store, bus: bus, logger: logger},
+		queues:            newDispatchQueues(),
+		hinters:           make(map[string]handler.Hinter),
+		handlers:          make(map[string]handler.Handler),
+		dynamicGen:        make(map[string]uint64),
+		resolver:          newWorkflowResolver(store, logger),
+		corrCtxs:          newCorrelationContexts(),
 	}
-	r.maxChain.Store(int32(defaultMaxChain))
 	for _, opt := range opts {
 		opt(r)
 	}
@@ -563,12 +547,13 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 			}
 		}
 
-		// 3. Chain depth check
-		if chainDepth >= int(r.maxChain.Load()) {
+		// 3. Chain depth check (per-workflow limit, falls back to package default).
+		if chainDepth >= r.chainDepthLimit(env.CorrelationID) {
 			r.logger.Warn("persona runner: max chain depth reached",
 				slog.String("handler", h.Name()),
 				slog.Int("depth", chainDepth),
 				slog.String("event_id", string(env.ID)),
+				slog.String("correlation", env.CorrelationID),
 			)
 			return nil
 		}
@@ -639,6 +624,22 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 		r.enqueueAndDrain(h, env, chainDepth)
 		return nil
 	}
+}
+
+// chainDepthLimit returns the effective max chain depth for the given
+// correlationID. It resolves the workflow definition via the runner's
+// resolver (O(1) cache + map lookup) and delegates to
+// WorkflowDef.EffectiveMaxChainDepth(). Falls back to r.defaultChainDepth
+// when the correlation is unknown or has no registered workflow.
+func (r *PersonaRunner) chainDepthLimit(correlationID string) int {
+	if correlationID != "" {
+		if wfID, ok := r.resolver.resolveWorkflowID(correlationID); ok {
+			if def, ok := r.resolver.getWorkflowDef(wfID); ok {
+				return def.EffectiveMaxChainDepth()
+			}
+		}
+	}
+	return r.defaultChainDepth
 }
 
 // handlerLookup returns the handler for the given name, for use by workflowResolver.

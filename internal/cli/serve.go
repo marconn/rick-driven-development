@@ -135,10 +135,6 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 	personaRunner := engine.NewPersonaRunner(store, bus, compositeD, logger)
 
 	eng := engine.NewEngine(store, bus, logger)
-	// Auto-scale chain depth whenever a workflow is registered (startup or runtime gRPC).
-	eng.OnWorkflowRegistered(func(def engine.WorkflowDef) {
-		personaRunner.AdjustChainDepth(len(def.Required))
-	})
 
 	// Register workflow defs with both Engine (lifecycle) and PersonaRunner (DAG dispatch).
 	for _, name := range []string{"develop-only", "workspace-dev", "pr-review", "pr-feedback", "jira-dev", "github-dev", "ci-fix", "plan-btu", "plan-jira", "task-creator", "jira-qa-steps"} {

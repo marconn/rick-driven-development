@@ -2278,3 +2278,351 @@ func TestPersonaRunnerSnapshot_ReportsCapAndActive(t *testing.T) {
 		t.Errorf("Active = %d, want 3", snap.Active)
 	}
 }
+
+// =============================================================================
+// Per-workflow chain-depth tests (Fix 7 — EffectiveMaxChainDepth)
+// =============================================================================
+
+// setupWorkflowCorr registers a workflow with the runner, seeds workflow.started
+// into the store, and publishes it so the correlation cache is populated.
+// Returns the correlation ID assigned to the workflow.
+func setupWorkflowCorr(t *testing.T, runner *PersonaRunner, store eventstore.Store, bus eventbus.Bus, def WorkflowDef, corrID string) {
+	t.Helper()
+	runner.RegisterWorkflow(def)
+
+	wsEvt := event.New(event.WorkflowStartedFor(def.ID), 1, event.MustMarshal(event.WorkflowStartedPayload{
+		WorkflowID: def.ID,
+	})).WithCorrelation(corrID).WithAggregate(corrID, 1)
+	if err := store.Append(context.Background(), corrID, 0, []event.Envelope{wsEvt}); err != nil {
+		t.Fatalf("setupWorkflowCorr: append: %v", err)
+	}
+	if err := bus.Publish(context.Background(), wsEvt); err != nil {
+		t.Fatalf("setupWorkflowCorr: publish: %v", err)
+	}
+	// Allow the SubscribeAll cache-population goroutine to run.
+	time.Sleep(30 * time.Millisecond)
+}
+
+// TestPerWorkflowChainDepth_ShortWorkflowRejected verifies that a dispatch in
+// a short workflow (len(Required)=2, effective depth 7) is rejected when
+// chainDepth=8, even though a longer workflow with depth 12 is also registered.
+func TestPerWorkflowChainDepth_ShortWorkflowRejected(t *testing.T) {
+	runner, store, bus, reg := newTestPersonaRunner(t)
+
+	// Workflow A: 2 required → effective max = 2+5 = 7
+	defA := WorkflowDef{
+		ID:       "wf-short",
+		Required: []string{"alpha", "beta"},
+		Graph: map[string][]string{
+			"alpha": {},
+			"beta":  {"alpha"},
+		},
+	}
+	// Workflow B: 7 required → effective max = 7+5 = 12
+	defB := WorkflowDef{
+		ID:       "wf-long",
+		Required: []string{"p1", "p2", "p3", "p4", "p5", "p6", "p7"},
+		Graph: map[string][]string{
+			"p1": {},
+			"p2": {"p1"},
+			"p3": {"p2"},
+			"p4": {"p3"},
+			"p5": {"p4"},
+			"p6": {"p5"},
+			"p7": {"p6"},
+		},
+	}
+
+	corrA := "corr-short"
+	corrB := "corr-long"
+
+	// Register both workflow defs and their correlations before Start.
+	setupWorkflowCorr(t, runner, store, bus, defA, corrA)
+	setupWorkflowCorr(t, runner, store, bus, defB, corrB)
+
+	handled := make(chan string, 5)
+	h := &stubHandler{
+		name: "beta",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, env event.Envelope) ([]event.Envelope, error) {
+			handled <- env.CorrelationID
+			return nil, nil
+		},
+	}
+	if err := reg.Register(h); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	runner.Start(context.Background(), reg)
+	// Let the correlation cache settle (workflow.started already published above).
+	time.Sleep(30 * time.Millisecond)
+
+	// Dispatch in corrA at depth 8 — must be rejected (8 >= 7).
+	deepEvt := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona:    "alpha",
+		Reactive:   true,
+		ChainDepth: 7, // depth delivered is 7; runner adds +1 → 8
+	})).WithCorrelation(corrA)
+
+	if err := bus.Publish(context.Background(), deepEvt); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case corr := <-handled:
+		t.Errorf("short workflow should have rejected depth 8, but handler fired for %s", corr)
+	case <-time.After(300 * time.Millisecond):
+		// Correct: rejected.
+	}
+}
+
+// TestPerWorkflowChainDepth_LongWorkflowAdmitted verifies that a dispatch in
+// a long workflow (len(Required)=7, effective depth 12) is admitted at depth 10,
+// even though a shorter workflow (depth 7) is also registered.
+func TestPerWorkflowChainDepth_LongWorkflowAdmitted(t *testing.T) {
+	runner, store, bus, reg := newTestPersonaRunner(t)
+
+	defA := WorkflowDef{
+		ID:       "wf-short",
+		Required: []string{"alpha", "beta"},
+		Graph: map[string][]string{
+			"alpha": {},
+			"beta":  {"alpha"},
+		},
+	}
+	defB := WorkflowDef{
+		ID:       "wf-long",
+		Required: []string{"p1", "p2", "p3", "p4", "p5", "p6", "p7"},
+		Graph: map[string][]string{
+			"p1": {},
+			"p2": {"p1"},
+			"p3": {"p2"},
+			"p4": {"p3"},
+			"p5": {"p4"},
+			"p6": {"p5"},
+			"p7": {"p6"},
+		},
+	}
+
+	corrA := "corr-short-2"
+	corrB := "corr-long-2"
+
+	// Register workflows first.
+	runner.RegisterWorkflow(defA)
+	runner.RegisterWorkflow(defB)
+
+	ctx := context.Background()
+
+	// p7 depends on p6 completing. Seed p6's PersonaCompleted into the store
+	// so the join condition is satisfied.
+	p6Agg := corrB + ":persona:p6"
+	p6PC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona:    "p6",
+		Reactive:   true,
+		ChainDepth: 9,
+	})).WithAggregate(p6Agg, 1).WithCorrelation(corrB)
+	if err := store.Append(ctx, p6Agg, 0, []event.Envelope{p6PC}); err != nil {
+		t.Fatalf("seed p6: %v", err)
+	}
+
+	handled := make(chan string, 5)
+	h := &stubHandler{
+		name: "p7",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, env event.Envelope) ([]event.Envelope, error) {
+			handled <- env.CorrelationID
+			return nil, nil
+		},
+	}
+	if err := reg.Register(h); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	runner.Start(ctx, reg)
+
+	// Manually warm the correlation cache (simulates what subscribeWorkflowStarted
+	// does when it receives workflow.started events). This avoids a publish-before-
+	// subscribe race: if Start() hasn't run yet when we publish the started events,
+	// SubscribeAll misses them and the corrMap stays empty.
+	runner.WarmCorrelationCache(corrA, defA.ID)
+	runner.WarmCorrelationCache(corrB, defB.ID)
+	// Seed workflow.started into store so checkJoinCondition can read it.
+	wsB := event.New(event.WorkflowStartedFor(defB.ID), 1, event.MustMarshal(event.WorkflowStartedPayload{
+		WorkflowID: defB.ID,
+	})).WithCorrelation(corrB).WithAggregate(corrB, 1)
+	if err := store.Append(ctx, corrB, 0, []event.Envelope{wsB}); err != nil {
+		t.Fatalf("seed ws: %v", err)
+	}
+
+	// Publish PersonaCompleted{p6} at chainDepth=9 → runner computes 9+1=10 < 12 → admitted.
+	if err := bus.Publish(ctx, p6PC); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case corr := <-handled:
+		if corr != corrB {
+			t.Errorf("expected corrB to be admitted, got %s", corr)
+		}
+		// Correct: admitted.
+	case <-time.After(2 * time.Second):
+		t.Fatal("long workflow should have admitted depth 10, but handler was not called")
+	}
+}
+
+// TestPerWorkflowChainDepth_ExplicitMaxChainDepth verifies that setting
+// MaxChainDepth: 3 on a workflow caps at 3 regardless of Required count.
+func TestPerWorkflowChainDepth_ExplicitMaxChainDepth(t *testing.T) {
+	runner, store, bus, reg := newTestPersonaRunner(t)
+
+	// 5 required → auto would be 10, but we force MaxChainDepth=3.
+	def := WorkflowDef{
+		ID:            "wf-explicit",
+		Required:      []string{"a", "b", "c", "d", "e"},
+		MaxChainDepth: 3,
+		Graph: map[string][]string{
+			"a": {},
+			"b": {"a"},
+			"c": {"b"},
+			"d": {"c"},
+			"e": {"d"},
+		},
+	}
+
+	corrID := "corr-explicit"
+	ctx := context.Background()
+
+	// Register workflow and seed the store before Start().
+	runner.RegisterWorkflow(def)
+
+	// Seed workflow.started into the store so checkJoinCondition can read correlation events.
+	wsEvt := event.New(event.WorkflowStartedFor(def.ID), 1, event.MustMarshal(event.WorkflowStartedPayload{
+		WorkflowID: def.ID,
+	})).WithCorrelation(corrID).WithAggregate(corrID, 1)
+	if err := store.Append(ctx, corrID, 0, []event.Envelope{wsEvt}); err != nil {
+		t.Fatalf("seed ws: %v", err)
+	}
+
+	// Handler b depends on a. Seed a's PersonaCompleted (ChainDepth=1) which
+	// will be used in the admission case. The join check loads all correlation
+	// events from the store — any a PC satisfies "a completed".
+	aAgg := corrID + ":persona:a"
+	aPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona:    "a",
+		Reactive:   true,
+		ChainDepth: 1,
+	})).WithAggregate(aAgg, 1).WithCorrelation(corrID)
+	if err := store.Append(ctx, aAgg, 0, []event.Envelope{aPC}); err != nil {
+		t.Fatalf("seed a: %v", err)
+	}
+
+	handled := make(chan struct{}, 2)
+	h := &stubHandler{
+		name: "b",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			handled <- struct{}{}
+			return nil, nil
+		},
+	}
+	if err := reg.Register(h); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	runner.Start(ctx, reg)
+	// Manually warm the correlation cache after Start() to avoid the publish-
+	// before-subscribe race in subscribeWorkflowStarted.
+	runner.WarmCorrelationCache(corrID, def.ID)
+
+	// Rejection: payload ChainDepth=2 → runner computes 2+1=3 >= limit=3 → rejected.
+	// New event (distinct ID from aPC) to avoid dedup suppression.
+	rejectedEvt := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona:    "a",
+		Reactive:   true,
+		ChainDepth: 2, // +1 → 3 >= 3 → rejected
+	})).WithCorrelation(corrID)
+
+	if err := bus.Publish(ctx, rejectedEvt); err != nil {
+		t.Fatalf("publish rejected: %v", err)
+	}
+
+	select {
+	case <-handled:
+		t.Error("explicit MaxChainDepth=3 should reject depth 3, but handler fired")
+	case <-time.After(300 * time.Millisecond):
+		// Correct: rejected.
+	}
+
+	// Admission: publish the seeded aPC (ChainDepth=1 → runner: 1+1=2 < 3 → admitted).
+	if err := bus.Publish(ctx, aPC); err != nil {
+		t.Fatalf("publish admitted: %v", err)
+	}
+
+	select {
+	case <-handled:
+		// Correct: admitted.
+	case <-time.After(2 * time.Second):
+		t.Fatal("explicit MaxChainDepth=3 should admit depth 2, but handler was not called")
+	}
+}
+
+// TestPerWorkflowChainDepth_FallbackForUnknownCorrelation verifies that events
+// for correlations not mapped to any workflow fall back to the package default
+// (defaultMaxChain = 5) and not to any per-workflow limit.
+func TestPerWorkflowChainDepth_FallbackForUnknownCorrelation(t *testing.T) {
+	// No WithMaxChainDepth option: defaultChainDepth = defaultMaxChain = 5.
+	runner, _, bus, reg := newTestPersonaRunner(t)
+
+	handled := make(chan struct{}, 2)
+	h := &stubHandler{
+		name: "sink",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			handled <- struct{}{}
+			return nil, nil
+		},
+	}
+	if err := reg.Register(h); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	runner.Start(context.Background(), reg)
+
+	// Correlation "unknown-corr" is not mapped to any workflow → fallback = 5.
+	// ChainDepth=5 → runner: 5+1=6... wait. Payload depth is the completing
+	// persona's depth; wrap adds +1. So payload=4 → evaluated=5 >= 5 → rejected.
+	rejEvt := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona:    "other",
+		Reactive:   true,
+		ChainDepth: 4, // +1 → 5 >= 5 → rejected
+	})).WithCorrelation("unknown-corr")
+
+	if err := bus.Publish(context.Background(), rejEvt); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case <-handled:
+		t.Error("unknown correlation should fall back to default=5, rejecting depth 5")
+	case <-time.After(300 * time.Millisecond):
+		// Correct: rejected.
+	}
+
+	// ChainDepth=3 → evaluated=4 < 5 → admitted.
+	admEvt := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona:    "other",
+		Reactive:   true,
+		ChainDepth: 3, // +1 → 4 < 5 → admitted
+	})).WithCorrelation("unknown-corr")
+
+	if err := bus.Publish(context.Background(), admEvt); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case <-handled:
+		// Correct: admitted.
+	case <-time.After(2 * time.Second):
+		t.Fatal("unknown correlation should fall back to default=5, admitting depth 4")
+	}
+}

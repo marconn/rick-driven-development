@@ -22,9 +22,8 @@ type Engine struct {
 	bus         eventbus.Bus
 	logger      *slog.Logger
 	workflowsMu sync.RWMutex
-	workflows          map[string]WorkflowDef // registered workflow definitions by ID
-	onWorkflowRegister func(def WorkflowDef)  // callback fired on RegisterWorkflow
-	unsubs             []func()
+	workflows   map[string]WorkflowDef // registered workflow definitions by ID
+	unsubs      []func()
 
 	// FIFO event channel: serializes all lifecycle events into a single
 	// goroutine. This prevents ordering races (e.g., VerdictRendered must
@@ -123,21 +122,12 @@ func (e *Engine) ThrottleSnapshot() ThrottleSnapshot {
 	}
 }
 
-// OnWorkflowRegistered sets a callback that fires whenever a workflow
-// definition is registered. Used by PersonaRunner to auto-scale chain depth.
-func (e *Engine) OnWorkflowRegistered(fn func(def WorkflowDef)) {
-	e.onWorkflowRegister = fn
-}
-
 // RegisterWorkflow registers a workflow definition by ID. Safe to call after
 // Start() — concurrent reads in the process loop are protected by a mutex.
 func (e *Engine) RegisterWorkflow(def WorkflowDef) {
 	e.workflowsMu.Lock()
 	e.workflows[def.ID] = def
 	e.workflowsMu.Unlock()
-	if e.onWorkflowRegister != nil {
-		e.onWorkflowRegister(def)
-	}
 }
 
 // GetWorkflowDef returns the registered workflow definition for the given ID.

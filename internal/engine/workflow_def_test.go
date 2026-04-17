@@ -90,3 +90,55 @@ func TestDevelopOnlyWorkflowDefPreservesMaxIterations(t *testing.T) {
 		t.Error("EscalateOnMaxIter must be false for develop-only (silent fail at max iterations)")
 	}
 }
+
+// TestEffectiveMaxChainDepth verifies the auto-compute formula and explicit override.
+func TestEffectiveMaxChainDepth(t *testing.T) {
+	cases := []struct {
+		name          string
+		required      []string
+		maxChainDepth int
+		want          int
+	}{
+		{
+			name:     "zero means auto: len(required)+5",
+			required: []string{"a", "b"},
+			want:     7, // 2+5
+		},
+		{
+			name:          "explicit value overrides auto",
+			required:      []string{"a", "b", "c", "d", "e"},
+			maxChainDepth: 3,
+			want:          3,
+		},
+		{
+			name:     "empty required: 0+5=5 (package default)",
+			required: []string{},
+			want:     5,
+		},
+		{
+			name:          "explicit=1 is the minimum expressible limit",
+			required:      []string{"a", "b", "c"},
+			maxChainDepth: 1,
+			want:          1,
+		},
+		{
+			name:     "pr-review has 15 required: 15+5=20",
+			required: PRReviewWorkflowDef().Required,
+			want:     len(PRReviewWorkflowDef().Required) + 5,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			def := WorkflowDef{
+				ID:            "test",
+				Required:      tc.required,
+				MaxChainDepth: tc.maxChainDepth,
+			}
+			got := def.EffectiveMaxChainDepth()
+			if got != tc.want {
+				t.Errorf("EffectiveMaxChainDepth() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
