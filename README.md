@@ -34,7 +34,7 @@ When a reviewer or QA persona renders a failing verdict, the engine emits `Feedb
 
 - **DAG-based workflow orchestration** — Declare handler dependencies as a directed acyclic graph. The engine computes subscriptions, join conditions, and dispatch order automatically.
 - **Event sourcing** — Every state change is an immutable event in SQLite. Full audit trail, deterministic replay, and aggregate-based decision making.
-- **Built-in workflows** — `workspace-dev`, `jira-dev`, `pr-review`, `pr-feedback`, `ci-fix`, `plan-btu`, `plan-jira`, `task-creator`, `jira-qa-steps`, and more.
+- **Built-in workflows** — `workspace-dev`, `jira-dev`, `github-dev`, `pr-review`, `pr-feedback`, `ci-fix`, `plan-btu`, `plan-jira`, `task-creator`, `jira-qa-steps`, and more.
 - **Feedback loops** — Failing review verdicts re-trigger the developer automatically. Max iterations and escalation-on-limit keep loops bounded.
 - **Hint system** — Two-phase dispatch: handlers can emit a lightweight pre-check (`Hint`) for human review before full execution. Auto-approve above a confidence threshold, or pause for operator input.
 - **MCP server** — 48 tools across workflow management, jobs, workspaces, Jira, Confluence, wave orchestration, and observability. Works with Claude Desktop, Cursor, or any MCP-compatible client.
