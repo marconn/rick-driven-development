@@ -304,6 +304,7 @@ func (r *PersonaRunner) Start(ctx context.Context, registry *handler.Registry) {
 	r.subscribeHintApproved()
 	r.subscribeWorkflowStarted()
 	r.subscribeTerminalEvents()
+	r.subscribeWorkflowRetried()
 	for _, h := range registry.All() {
 		r.handlers[h.Name()] = h
 		r.registerHinter(h)
@@ -753,12 +754,15 @@ func (r *PersonaRunner) executeDispatch(h handler.Handler, env event.Envelope, c
 
 	// Build PersonaCompleted or PersonaFailed
 	if dispatchErr != nil {
+		failureKind, stderr := classifyDispatchFailure(dispatchCtx, dispatchErr)
 		allEvents = append(allEvents, event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
 			Persona:      h.Name(),
 			TriggerEvent: string(env.Type),
 			TriggerID:    string(env.ID),
 			Reactive:     true,
 			Error:        dispatchErr.Error(),
+			FailureKind:  failureKind,
+			Stderr:       stderr,
 			DurationMS:   durationMS,
 			ChainDepth:   chainDepth,
 		})).
@@ -860,6 +864,143 @@ func (r *PersonaRunner) subscribePauseResume() {
 	r.unsubs = append(r.unsubs, unsub1, unsub2, unsub3)
 }
 
+// subscribeWorkflowRetried handles operator-initiated retries from a specific
+// phase. The aggregate has already cleared CompletedPersonas for FromPhase +
+// downstream (via Apply) by the time we see the event on the bus, so we only
+// need to re-dispatch FromPhase — downstream handlers will re-fire naturally
+// once it re-completes. Using RecoverDispatch bypasses the idempotency cache,
+// which already holds the prior trigger eventID from the first failed run.
+func (r *PersonaRunner) subscribeWorkflowRetried() {
+	unsub := r.bus.Subscribe(event.WorkflowRetried, func(_ context.Context, env event.Envelope) error {
+		var p event.WorkflowRetriedPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			r.logger.Error("persona runner: workflow retried payload decode failed",
+				slog.String("error", err.Error()),
+			)
+			return nil
+		}
+		if p.FromPhase == "" {
+			return nil
+		}
+
+		corrID := env.CorrelationID
+		if corrID == "" {
+			corrID = env.AggregateID
+		}
+
+		// Load events up front — we need them for the trigger lookup anyway,
+		// and they let us warm the correlation cache if RecoveryScanner skipped
+		// this workflow (Failed/Cancelled aren't eligible for startup recovery).
+		events, err := r.store.LoadByCorrelation(r.ctx, corrID)
+		if err != nil {
+			r.logger.Error("persona runner: retry load events failed",
+				slog.String("correlation", corrID),
+				slog.String("error", err.Error()),
+			)
+			return nil
+		}
+
+		workflowID, ok := r.resolver.resolveWorkflowID(corrID)
+		if !ok {
+			workflowID = findWorkflowIDFromEvents(events)
+			if workflowID == "" {
+				r.logger.Warn("persona runner: retry could not resolve workflow id",
+					slog.String("correlation", corrID),
+					slog.String("from_phase", p.FromPhase),
+				)
+				return nil
+			}
+			r.resolver.cacheWorkflowID(corrID, workflowID)
+		}
+		def, ok := r.resolver.getWorkflowDef(workflowID)
+		if !ok {
+			r.logger.Warn("persona runner: retry with unknown workflow def",
+				slog.String("workflow", workflowID),
+				slog.String("from_phase", p.FromPhase),
+			)
+			return nil
+		}
+
+		trigger := r.findRetryTrigger(events, def, p.FromPhase)
+		if trigger == nil {
+			r.logger.Warn("persona runner: retry trigger event not found",
+				slog.String("correlation", corrID),
+				slog.String("from_phase", p.FromPhase),
+			)
+			return nil
+		}
+
+		// Retries un-pause too — the aggregate is back in Running.
+		r.pauser.resume(corrID)
+
+		r.logger.Info("persona runner: retry dispatch",
+			slog.String("correlation", corrID),
+			slog.String("from_phase", p.FromPhase),
+			slog.String("trigger_type", string(trigger.Type)),
+		)
+		if dispatchErr := r.RecoverDispatch(p.FromPhase, *trigger); dispatchErr != nil {
+			r.logger.Error("persona runner: retry dispatch failed",
+				slog.String("correlation", corrID),
+				slog.String("from_phase", p.FromPhase),
+				slog.String("error", dispatchErr.Error()),
+			)
+		}
+		return nil
+	}, eventbus.WithName("persona-runner:retry"))
+	r.unsubs = append(r.unsubs, unsub)
+}
+
+// findWorkflowIDFromEvents scans the correlation chain for the original
+// WorkflowRequested and returns its WorkflowID. Used when the runner's
+// correlation cache is cold (e.g., server restart between a workflow's
+// failure and the operator-triggered retry — RecoveryScanner only warms
+// Running/Paused workflows, so Failed ones need lazy resolution).
+func findWorkflowIDFromEvents(events []event.Envelope) string {
+	for _, e := range events {
+		if e.Type != event.WorkflowRequested {
+			continue
+		}
+		var p event.WorkflowRequestedPayload
+		if err := json.Unmarshal(e.Payload, &p); err == nil && p.WorkflowID != "" {
+			return p.WorkflowID
+		}
+	}
+	return ""
+}
+
+// findRetryTrigger picks the envelope to replay into FromPhase's handler:
+// the most recent PersonaCompleted from a predecessor, or — for a root phase —
+// the workflow.started.<id> envelope from the original run.
+func (r *PersonaRunner) findRetryTrigger(events []event.Envelope, def WorkflowDef, fromPhase string) *event.Envelope {
+	predecessors := def.Graph[fromPhase]
+	if len(predecessors) == 0 {
+		for i := range events {
+			if event.IsWorkflowStarted(events[i].Type) {
+				return &events[i]
+			}
+		}
+		return nil
+	}
+	predSet := make(map[string]bool, len(predecessors))
+	for _, pred := range predecessors {
+		predSet[pred] = true
+	}
+	var best *event.Envelope
+	for i := range events {
+		if events[i].Type != event.PersonaCompleted {
+			continue
+		}
+		var pc event.PersonaCompletedPayload
+		if err := json.Unmarshal(events[i].Payload, &pc); err != nil {
+			continue
+		}
+		if predSet[pc.Persona] {
+			best = &events[i]
+		}
+	}
+	return best
+}
+
 // =============================================================================
 // Hint support
 // =============================================================================
@@ -956,12 +1097,15 @@ func (r *PersonaRunner) executeHint(hinter handler.Hinter, h handler.Handler, en
 
 	var allEvents []event.Envelope
 	if err != nil {
+		failureKind, stderr := classifyDispatchFailure(hintCtx, err)
 		allEvents = append(allEvents, event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
 			Persona:      h.Name(),
 			TriggerEvent: string(env.Type),
 			TriggerID:    string(env.ID),
 			Reactive:     true,
 			Error:        fmt.Sprintf("hint failed: %s", err.Error()),
+			FailureKind:  failureKind,
+			Stderr:       stderr,
 			DurationMS:   durationMS,
 			ChainDepth:   chainDepth,
 		})).
@@ -1023,12 +1167,15 @@ func (r *PersonaRunner) executeHintApprovedDispatch(handlerName string, env even
 	}
 
 	if dispatchErr != nil {
+		failureKind, stderr := classifyDispatchFailure(dispatchCtx, dispatchErr)
 		allEvents = append(allEvents, event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
 			Persona:      handlerName,
 			TriggerEvent: string(env.Type),
 			TriggerID:    string(env.ID),
 			Reactive:     true,
 			Error:        dispatchErr.Error(),
+			FailureKind:  failureKind,
+			Stderr:       stderr,
 			DurationMS:   durationMS,
 			ChainDepth:   chainDepth,
 		})).

@@ -64,6 +64,11 @@ const (
 	// Operator intervention
 	WorkflowPaused  Type = "workflow.paused"
 	WorkflowResumed Type = "workflow.resumed"
+	// WorkflowRetried reboots a Failed/Cancelled workflow from a specific phase,
+	// invalidating that phase plus its DAG-downstream while leaving upstream
+	// PersonaCompleted state intact. Emitted by the MCP rick_retry_workflow tool
+	// when from_phase is set.
+	WorkflowRetried  Type = "workflow.retried"
 	OperatorGuidance Type = "operator.guidance"
 
 	// Hint lifecycle

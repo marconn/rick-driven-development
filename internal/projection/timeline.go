@@ -91,6 +91,9 @@ func (p *PhaseTimelineProjection) Handle(_ context.Context, env event.Envelope) 
 		if pt.StartedAt.IsZero() {
 			pt.StartedAt = env.Timestamp.Add(-pt.Duration)
 		}
+		pt.Error = payload.Error
+		pt.FailureKind = string(payload.FailureKind)
+		pt.Stderr = payload.Stderr
 	}
 	return nil
 }

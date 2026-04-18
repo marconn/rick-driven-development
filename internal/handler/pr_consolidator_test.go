@@ -63,7 +63,7 @@ func TestExtractConsolidatorInputs(t *testing.T) {
 		})).WithCorrelation(corrID).WithSource("handler:pr-performance"),
 	}
 
-	params, handlerOutputs := extractConsolidatorInputs(events)
+	params, handlerOutputs, _ := extractConsolidatorInputs(events)
 
 	if params.Source != "gh:owner/repo#42" {
 		t.Errorf("params.Source: want 'gh:owner/repo#42', got %q", params.Source)
@@ -82,6 +82,30 @@ func TestExtractConsolidatorInputs(t *testing.T) {
 	}
 }
 
+// TestExtractConsolidatorInputs_CapturesWorkspacePath locks in the fix for the
+// PR #27 crash: the consolidator must run its backend inside the PR workspace
+// (a git repo), otherwise codex exits fast with "not inside a trusted
+// directory". The workspace path comes from WorkspaceReady, emitted by
+// pr-workspace earlier in the DAG.
+func TestExtractConsolidatorInputs_CapturesWorkspacePath(t *testing.T) {
+	events := []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Source: "gh:owner/repo#27",
+		})),
+		event.New(event.WorkspaceReady, 1, event.MustMarshal(event.WorkspaceReadyPayload{
+			Path:   "/var/rick/workspaces/repo-rick-ws-pr27",
+			Branch: "feature/fix",
+			Base:   "main",
+		})),
+	}
+
+	_, _, workspacePath := extractConsolidatorInputs(events)
+
+	if workspacePath != "/var/rick/workspaces/repo-rick-ws-pr27" {
+		t.Errorf("workspacePath = %q, want the WorkspaceReady.Path", workspacePath)
+	}
+}
+
 func TestExtractConsolidatorInputsFallbackToPhase(t *testing.T) {
 	// Events without Source fall back to Phase as key.
 	output, _ := json.Marshal("fallback output")
@@ -93,7 +117,7 @@ func TestExtractConsolidatorInputsFallbackToPhase(t *testing.T) {
 		})),
 	}
 
-	_, handlerOutputs := extractConsolidatorInputs(events)
+	_, handlerOutputs, _ := extractConsolidatorInputs(events)
 	if handlerOutputs["review"] != "fallback output" {
 		t.Errorf("fallback: want 'fallback output', got %q", handlerOutputs["review"])
 	}
@@ -182,7 +206,7 @@ func TestPRConsolidatorCallAI(t *testing.T) {
 		"pr-testing":  "ok",
 	}
 
-	output, err := h.callAI(context.Background(), env, params, handlerOutputs)
+	output, err := h.callAI(context.Background(), env, params, handlerOutputs, "")
 	if err != nil {
 		t.Fatalf("callAI: %v", err)
 	}

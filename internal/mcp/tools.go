@@ -944,6 +944,14 @@ type phaseTimelineEntry struct {
 	CompletedAt string `json:"completed_at,omitempty"`
 	DurationMS  int64  `json:"duration_ms,omitempty"`
 	ElapsedMS   int64  `json:"elapsed_ms,omitempty"` // for running phases: wall-clock since start
+	// Failure fields are populated when Status == "failed". Error is the raw
+	// PersonaFailed error message; FailureKind classifies it so operators
+	// can distinguish a wedged subprocess (idle_timeout) from a code bug
+	// (handler_error) without loading the payload. Stderr carries a
+	// bounded tail of subprocess stderr when the backend captured one.
+	Error       string `json:"error,omitempty"`
+	FailureKind string `json:"failure_kind,omitempty"`
+	Stderr      string `json:"stderr,omitempty"`
 }
 
 type phaseTimelineResult struct {
@@ -980,6 +988,11 @@ func (s *Server) toolPhaseTimeline(_ context.Context, raw json.RawMessage) (any,
 		}
 		if pt.Status == "running" && !pt.StartedAt.IsZero() {
 			entry.ElapsedMS = time.Since(pt.StartedAt).Milliseconds()
+		}
+		if pt.Status == "failed" {
+			entry.Error = pt.Error
+			entry.FailureKind = pt.FailureKind
+			entry.Stderr = pt.Stderr
 		}
 		entries = append(entries, entry)
 	}
@@ -1416,11 +1429,20 @@ type personaOutputArgs struct {
 type personaOutputResult struct {
 	WorkflowID string `json:"workflow_id"`
 	Persona    string `json:"persona"`
-	Output     string `json:"output"`
-	Truncated  bool   `json:"truncated"`
-	Backend    string `json:"backend"`
-	TokensUsed int    `json:"tokens_used"`
-	DurationMS int64  `json:"duration_ms"`
+	Status     string `json:"status"` // "completed" or "failed"
+	Output     string `json:"output,omitempty"`
+	Truncated  bool   `json:"truncated,omitempty"`
+	Backend    string `json:"backend,omitempty"`
+	TokensUsed int    `json:"tokens_used,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	// Failure diagnostics populated when Status == "failed". This is the
+	// operator's primary entry point for debugging a persona that died
+	// without producing output — rather than returning a 404-style error,
+	// we surface the same classification + stderr tail the event store
+	// already holds so the operator does not have to grep raw payloads.
+	Error       string `json:"error,omitempty"`
+	FailureKind string `json:"failure_kind,omitempty"`
+	Stderr      string `json:"stderr,omitempty"`
 }
 
 func (s *Server) toolPersonaOutput(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -1438,29 +1460,64 @@ func (s *Server) toolPersonaOutput(ctx context.Context, raw json.RawMessage) (an
 		args.MaxLength = 10000
 	}
 
-	// Scan all events correlated to this workflow to find PersonaCompleted for the target persona.
+	// Scan all events correlated to this workflow to find PersonaCompleted
+	// for the target persona. Fall back to the most recent PersonaFailed
+	// when no completion exists — a failed persona still has useful
+	// diagnostics (error, failure kind, stderr tail) and returning an
+	// error here would make the common "developer crashed silently" case
+	// look identical to "persona never ran", blocking diagnosis.
 	allEvents, err := s.deps.Store.LoadByCorrelation(ctx, args.WorkflowID)
 	if err != nil {
 		return nil, fmt.Errorf("load correlation events: %w", err)
 	}
 
 	outputRef := ""
+	var failure *event.PersonaFailedPayload
 	for _, env := range allEvents {
-		if env.Type != event.PersonaCompleted {
-			continue
-		}
-		var p event.PersonaCompletedPayload
-		if unmarshalErr := json.Unmarshal(env.Payload, &p); unmarshalErr != nil {
-			continue
-		}
-		if p.Persona == args.Persona && p.OutputRef != "" {
-			outputRef = p.OutputRef
-			// Keep the last one to handle retries — later completions win.
+		switch env.Type {
+		case event.PersonaCompleted:
+			var p event.PersonaCompletedPayload
+			if unmarshalErr := json.Unmarshal(env.Payload, &p); unmarshalErr != nil {
+				continue
+			}
+			if p.Persona == args.Persona && p.OutputRef != "" {
+				outputRef = p.OutputRef
+				// Keep the last one to handle retries — later completions win.
+				// Also clear any prior failure: a later successful completion
+				// supersedes earlier failures.
+				failure = nil
+			}
+		case event.PersonaFailed:
+			var p event.PersonaFailedPayload
+			if unmarshalErr := json.Unmarshal(env.Payload, &p); unmarshalErr != nil {
+				continue
+			}
+			if p.Persona == args.Persona {
+				// Snapshot into a local variable so the pointer remains valid
+				// after the loop iteration ends (p is reused by the next switch).
+				latest := p
+				failure = &latest
+			}
 		}
 	}
 
 	if outputRef == "" {
-		return nil, fmt.Errorf("no output available for persona %q in workflow %s", args.Persona, args.WorkflowID)
+		if failure == nil {
+			return nil, fmt.Errorf("no output available for persona %q in workflow %s", args.Persona, args.WorkflowID)
+		}
+		stderr := failure.Stderr
+		if len(stderr) > args.MaxLength {
+			stderr = stderr[:args.MaxLength]
+		}
+		return personaOutputResult{
+			WorkflowID:  args.WorkflowID,
+			Persona:     args.Persona,
+			Status:      "failed",
+			Error:       failure.Error,
+			FailureKind: string(failure.FailureKind),
+			Stderr:      stderr,
+			DurationMS:  failure.DurationMS,
+		}, nil
 	}
 
 	aiEvt, err := s.deps.Store.LoadEvent(ctx, outputRef)
@@ -1485,6 +1542,7 @@ func (s *Server) toolPersonaOutput(ctx context.Context, raw json.RawMessage) (an
 	return personaOutputResult{
 		WorkflowID: args.WorkflowID,
 		Persona:    args.Persona,
+		Status:     "completed",
 		Output:     outputStr,
 		Truncated:  truncated,
 		Backend:    aiPayload.Backend,

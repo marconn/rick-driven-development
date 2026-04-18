@@ -113,6 +113,7 @@ func DefaultRegistry() *Registry {
 	r.Register(WorkflowCompleted, "Workflow finishes successfully", 1)
 	r.Register(WorkflowFailed, "Workflow fails", 1)
 	r.Register(WorkflowCancelled, "Workflow is cancelled", 1)
+	r.Register(WorkflowRetried, "Workflow is retried from a specific phase", 1)
 	r.Register(AIRequestSent, "AI backend call is made", 1)
 	r.Register(AIResponseReceived, "AI backend returns", 1)
 	r.Register(AIStructuredOutput, "Structured output extracted from AI response", 1)
@@ -122,6 +123,8 @@ func DefaultRegistry() *Registry {
 	r.Register(TokenBudgetExceeded, "Cumulative token usage exceeds budget", 1)
 	r.Register(CompensationStarted, "Rollback begins", 1)
 	r.Register(CompensationCompleted, "Rollback finishes", 1)
+	r.Register(PersonaCompleted, "Persona handler finishes successfully", 1)
+	r.Register(PersonaFailed, "Persona handler fails", 1)
 	r.Register(PRCommentPosted, "Rick posted a PR comment", 1)
 	return r
 }

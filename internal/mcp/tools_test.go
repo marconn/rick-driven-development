@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/marconn/rick-event-driven-development/internal/engine"
+	"github.com/marconn/rick-event-driven-development/internal/event"
 	"github.com/marconn/rick-event-driven-development/internal/jira"
 )
 
@@ -783,6 +784,134 @@ func TestToolRetryWorkflow_MissingID(t *testing.T) {
 	_, err := callTool(t, s, "rick_retry_workflow", map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for missing workflow_id")
+	}
+}
+
+// TestToolRetryWorkflow_FromPhase_EmitsRetryEvent asserts the from_phase path:
+// the failed workflow's correlation is reused, a WorkflowRetried event is
+// appended with the DAG-downstream invalidation set, and the MCP result
+// reports status="resumed". This is the regression test for the bug where
+// from_phase was silently ignored and the tool started a fresh workflow,
+// re-paying every upstream persona's token bill.
+func TestToolRetryWorkflow_FromPhase_EmitsRetryEvent(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	ctx := context.Background()
+	corrID := "wf-retry-fromphase"
+
+	// Seed a failed develop-only workflow (DAG: developer only; we use it
+	// because it's already registered in testDeps and avoids needing a
+	// multi-stage build-up).
+	def := engine.DevelopOnlyWorkflowDef()
+	reqEvt := event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+		Prompt:     "seed",
+		WorkflowID: def.ID,
+		Source:     "test",
+	})).
+		WithAggregate(corrID, 1).
+		WithCorrelation(corrID).
+		WithSource("test")
+	failEvt := event.New(event.WorkflowFailed, 1, event.MustMarshal(event.WorkflowFailedPayload{
+		Reason: "simulated failure",
+		Phase:  "developer",
+	})).
+		WithAggregate(corrID, 2).
+		WithCorrelation(corrID).
+		WithSource("test")
+	if err := deps.Store.Append(ctx, corrID, 0, []event.Envelope{reqEvt, failEvt}); err != nil {
+		t.Fatalf("seed events: %v", err)
+	}
+
+	result, err := callTool(t, s, "rick_retry_workflow", map[string]any{
+		"workflow_id": corrID,
+		"from_phase":  "developer",
+	})
+	if err != nil {
+		t.Fatalf("retry_workflow: %v", err)
+	}
+
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", result)
+	}
+	if m["status"] != "resumed" {
+		t.Errorf("status = %v, want resumed", m["status"])
+	}
+	if m["correlation_id"] != corrID {
+		t.Errorf("correlation_id = %v, want %q (retry should reuse original correlation)", m["correlation_id"], corrID)
+	}
+	invalidated, ok := m["invalidated_personas"].([]string)
+	if !ok {
+		t.Fatalf("invalidated_personas type = %T, want []string", m["invalidated_personas"])
+	}
+	var found bool
+	for _, p := range invalidated {
+		if p == "developer" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("invalidated_personas = %v, want to include developer", invalidated)
+	}
+
+	// Verify the WorkflowRetried event landed in the store.
+	events, err := deps.Store.Load(ctx, corrID)
+	if err != nil {
+		t.Fatalf("load events: %v", err)
+	}
+	var retryFound bool
+	for _, env := range events {
+		if env.Type == event.WorkflowRetried {
+			retryFound = true
+			var p event.WorkflowRetriedPayload
+			if jerr := json.Unmarshal(env.Payload, &p); jerr != nil {
+				t.Fatalf("unmarshal retry payload: %v", jerr)
+			}
+			if p.FromPhase != "developer" {
+				t.Errorf("payload FromPhase = %q, want developer", p.FromPhase)
+			}
+			if len(p.InvalidatedPersonas) == 0 {
+				t.Errorf("payload InvalidatedPersonas is empty")
+			}
+		}
+	}
+	if !retryFound {
+		t.Errorf("WorkflowRetried event not appended to store")
+	}
+}
+
+// TestToolRetryWorkflow_FromPhase_UnknownPhase rejects a from_phase that
+// isn't a handler in the workflow's Graph, so typos don't silently no-op.
+func TestToolRetryWorkflow_FromPhase_UnknownPhase(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	ctx := context.Background()
+	corrID := "wf-retry-badphase"
+	def := engine.DevelopOnlyWorkflowDef()
+	reqEvt := event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+		Prompt:     "seed",
+		WorkflowID: def.ID,
+	})).WithAggregate(corrID, 1).WithCorrelation(corrID).WithSource("test")
+	failEvt := event.New(event.WorkflowFailed, 1, event.MustMarshal(event.WorkflowFailedPayload{
+		Reason: "x",
+	})).WithAggregate(corrID, 2).WithCorrelation(corrID).WithSource("test")
+	if err := deps.Store.Append(ctx, corrID, 0, []event.Envelope{reqEvt, failEvt}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	_, err := callTool(t, s, "rick_retry_workflow", map[string]any{
+		"workflow_id": corrID,
+		"from_phase":  "not-a-real-handler",
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown from_phase")
 	}
 }
 

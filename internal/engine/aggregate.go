@@ -81,6 +81,24 @@ func (w *WorkflowAggregate) Apply(env event.Envelope) {
 	case event.WorkflowResumed:
 		w.Status = StatusRunning
 
+	case event.WorkflowRetried:
+		// Drops CompletedPersonas for every persona the emitter marked as
+		// invalidated (FromPhase + DAG-downstream at emit time). Kept in the
+		// payload so replay doesn't depend on the live WorkflowDef registry,
+		// which isn't attached until after Apply runs.
+		var p event.WorkflowRetriedPayload
+		_ = json.Unmarshal(env.Payload, &p)
+		for _, persona := range p.InvalidatedPersonas {
+			delete(w.CompletedPersonas, persona)
+			delete(w.FeedbackPending, persona)
+			for src, target := range w.FeedbackPending {
+				if target == persona {
+					delete(w.FeedbackPending, src)
+				}
+			}
+		}
+		w.Status = StatusRunning
+
 	case event.PersonaCompleted, event.PersonaTracked:
 		// PersonaTracked is the internal tracking copy stored by the engine on the
 		// workflow aggregate; PersonaCompleted is the original from PersonaRunner.
@@ -162,6 +180,10 @@ func (w *WorkflowAggregate) Decide(env event.Envelope) ([]event.Envelope, error)
 		return w.decideTokenBudgetExceeded(env)
 	case event.WorkflowResumed:
 		return w.decideWorkflowResumed(env)
+	case event.WorkflowRetried:
+		// State reset happens in Apply; PersonaRunner re-dispatches FromPhase
+		// asynchronously via its own subscription. Nothing for Decide to emit.
+		return nil, nil
 	case event.HintEmitted:
 		return w.decideHintEmitted(env)
 	case event.HintRejected:

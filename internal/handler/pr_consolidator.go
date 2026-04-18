@@ -52,14 +52,14 @@ func (h *PRConsolidatorHandler) Handle(ctx context.Context, env event.Envelope) 
 		return nil, fmt.Errorf("pr-consolidator: load correlation chain: %w", err)
 	}
 
-	params, phaseOutputs := extractConsolidatorInputs(events)
+	params, phaseOutputs, workspacePath := extractConsolidatorInputs(events)
 
 	fullRepo, prNumber, err := parsePRSource(params.Source)
 	if err != nil {
 		return nil, fmt.Errorf("pr-consolidator: parse source %q: %w", params.Source, err)
 	}
 
-	consolidatedOutput, err := h.callAI(ctx, env, params, phaseOutputs)
+	consolidatedOutput, err := h.callAI(ctx, env, params, phaseOutputs, workspacePath)
 	if err != nil {
 		return nil, fmt.Errorf("pr-consolidator: AI call: %w", err)
 	}
@@ -78,17 +78,27 @@ func (h *PRConsolidatorHandler) Handle(ctx context.Context, env event.Envelope) 
 }
 
 // extractConsolidatorInputs scans the correlation chain and returns the
-// WorkflowRequestedPayload and a map of handler name → AI output text.
-// Keyed by handler name (from event Source "handler:<name>") so that
-// multiple handlers sharing the same phase template don't collide.
-func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequestedPayload, map[string]string) {
+// WorkflowRequestedPayload, a map of handler name → AI output text, and the
+// workspace path provisioned by pr-workspace. Keyed by handler name (from
+// event Source "handler:<name>") so that multiple handlers sharing the same
+// phase template don't collide. The workspace path is required so the backend
+// runs inside a git repo — codex refuses with "not inside a trusted directory"
+// otherwise.
+func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequestedPayload, map[string]string, string) {
 	var params event.WorkflowRequestedPayload
 	handlerOutputs := make(map[string]string)
+	var workspacePath string
 
 	for _, e := range events {
 		switch e.Type {
 		case event.WorkflowRequested:
 			_ = json.Unmarshal(e.Payload, &params)
+
+		case event.WorkspaceReady:
+			var p event.WorkspaceReadyPayload
+			if err := json.Unmarshal(e.Payload, &p); err == nil && p.Path != "" {
+				workspacePath = p.Path
+			}
 
 		case event.AIResponseReceived:
 			var p event.AIResponsePayload
@@ -102,7 +112,7 @@ func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequested
 		}
 	}
 
-	return params, handlerOutputs
+	return params, handlerOutputs, workspacePath
 }
 
 // callAI builds the consolidation prompt and invokes the AI backend.
@@ -111,6 +121,7 @@ func (h *PRConsolidatorHandler) callAI(
 	env event.Envelope,
 	params event.WorkflowRequestedPayload,
 	phaseOutputs map[string]string,
+	workspacePath string,
 ) (string, error) {
 	systemPrompt, err := h.registry.LoadSystemPrompt(persona.PRConsolidator)
 	if err != nil {
@@ -119,9 +130,15 @@ func (h *PRConsolidatorHandler) callAI(
 
 	userPrompt := buildConsolidationPrompt(params, phaseOutputs)
 
-	// Use workspace path as working directory when available.
+	// Prefer the PR workspace the pr-workspace handler provisioned so the
+	// backend runs inside a git repo (codex refuses "not inside a trusted
+	// directory" otherwise). Fall back to the static workDir when the
+	// workspace payload is missing — a legitimate path in non-PR flows that
+	// might reuse this handler.
 	workDir := h.workDir
-	_ = env // env carries correlation context; workDir override happens through workspace payload
+	if workspacePath != "" {
+		workDir = workspacePath
+	}
 
 	// Yolo is always false here — the consolidator only synthesises text
 	// from the three review outputs. Tool access caused a double-post bug

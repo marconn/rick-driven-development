@@ -93,18 +93,32 @@ func (g *Gemini) Run(ctx context.Context, req Request) (*Response, error) {
 
 	if err := cmd.Run(); err != nil {
 		_ = sw.Close()
+		stderr := tailBytes(stderrBuf.String(), MaxStderrCapture)
+		elapsed := time.Since(start)
 		if errors.Is(context.Cause(watchCtx), ErrIdleTimeout) {
-			return nil, fmt.Errorf("gemini: %w (after %s, stall=%s)", ErrIdleTimeout, time.Since(start), g.stallTimeout)
+			return nil, &BackendError{
+				Backend:  "gemini",
+				Inner:    fmt.Errorf("%w (stall=%s)", ErrIdleTimeout, g.stallTimeout),
+				Duration: elapsed,
+				Stderr:   stderr,
+			}
 		}
 		// Surface the context error when the deadline tripped so the caller
 		// sees the timeout, not the SIGKILL exit status.
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, fmt.Errorf("gemini: %w (after %s)", ctxErr, time.Since(start))
+			return nil, &BackendError{
+				Backend:  "gemini",
+				Inner:    ctxErr,
+				Duration: elapsed,
+				Stderr:   stderr,
+			}
 		}
-		if stderr := strings.TrimSpace(stderrBuf.String()); stderr != "" {
-			return nil, fmt.Errorf("gemini: %w: %s", err, stderr)
+		return nil, &BackendError{
+			Backend:  "gemini",
+			Inner:    err,
+			Duration: elapsed,
+			Stderr:   stderr,
 		}
-		return nil, fmt.Errorf("gemini: %w", err)
 	}
 	_ = sw.Close()
 

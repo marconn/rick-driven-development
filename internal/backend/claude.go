@@ -125,19 +125,33 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 
 	if err := cmd.Run(); err != nil {
 		_ = sw.Close()
+		stderr := tailBytes(stderrBuf.String(), MaxStderrCapture)
+		elapsed := time.Since(start)
 		if errors.Is(context.Cause(watchCtx), ErrIdleTimeout) {
-			return nil, fmt.Errorf("claude: %w (after %s, stall=%s)", ErrIdleTimeout, time.Since(start), c.stallTimeout)
+			return nil, &BackendError{
+				Backend:  "claude",
+				Inner:    fmt.Errorf("%w (stall=%s)", ErrIdleTimeout, c.stallTimeout),
+				Duration: elapsed,
+				Stderr:   stderr,
+			}
 		}
 		// Prefer the context error when the deadline tripped — otherwise the
-		// caller sees "claude: signal: killed", which is the symptom (we
-		// SIGKILL'd the child) not the root cause (we timed out).
+		// caller sees "signal: killed", which is the symptom (we SIGKILL'd
+		// the child) not the root cause (we timed out).
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, fmt.Errorf("claude: %w (after %s)", ctxErr, time.Since(start))
+			return nil, &BackendError{
+				Backend:  "claude",
+				Inner:    ctxErr,
+				Duration: elapsed,
+				Stderr:   stderr,
+			}
 		}
-		if stderr := strings.TrimSpace(stderrBuf.String()); stderr != "" {
-			return nil, fmt.Errorf("claude: %w: %s", err, stderr)
+		return nil, &BackendError{
+			Backend:  "claude",
+			Inner:    err,
+			Duration: elapsed,
+			Stderr:   stderr,
 		}
-		return nil, fmt.Errorf("claude: %w", err)
 	}
 	_ = sw.Close()
 

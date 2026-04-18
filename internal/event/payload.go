@@ -70,6 +70,19 @@ type WorkflowResumedPayload struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// WorkflowRetriedPayload reboots a Failed/Cancelled workflow at a specific
+// phase. The aggregate clears CompletedPersonas for every persona in
+// InvalidatedPersonas (computed by the emitter from the DAG's DownstreamOf),
+// flips Status back to Running, and PersonaRunner re-dispatches FromPhase
+// using the most recent predecessor completion as its trigger. The list is
+// stored on the event — not recomputed from the live DAG — so replay stays
+// deterministic even if the workflow definition changes later.
+type WorkflowRetriedPayload struct {
+	FromPhase           string   `json:"from_phase"`
+	InvalidatedPersonas []string `json:"invalidated_personas"`
+	Reason              string   `json:"reason,omitempty"`
+}
+
 // OperatorGuidancePayload is emitted when an operator injects context into a workflow.
 type OperatorGuidancePayload struct {
 	Content    string `json:"content"`                // operator's text input
@@ -157,16 +170,58 @@ type PersonaCompletedPayload struct {
 	ChainDepth   int    `json:"chain_depth"`           // reactive chain depth (storm protection)
 }
 
+// FailureKind classifies a persona handler failure so operators can tell a
+// transient-shaped failure (wedged subprocess killed by the idle watchdog)
+// apart from a deterministic one (handler code error, permanent backend
+// error). Emitted on PersonaFailedPayload; safe default is
+// FailureKindUnspecified for back-compat with events written before this
+// field existed.
+type FailureKind string
+
+const (
+	// FailureKindUnspecified is the zero value — used for events written
+	// before FailureKind was added, or when no classification is available.
+	FailureKindUnspecified FailureKind = ""
+	// FailureKindIdleTimeout means the backend subprocess was silent for
+	// longer than RICK_BACKEND_STALL_TIMEOUT and was killed by the idle
+	// watchdog. Transient — a retry has a real chance of succeeding.
+	FailureKindIdleTimeout FailureKind = "idle_timeout"
+	// FailureKindWallTimeout means the backend ran past its wall-clock
+	// budget (RICK_BACKEND_TIMEOUT / RICK_REVIEW_BACKEND_TIMEOUT) and the
+	// context deadline fired. Transient-ish — prompt may genuinely need
+	// more time.
+	FailureKindWallTimeout FailureKind = "wall_timeout"
+	// FailureKindCancelled means the per-correlation context was cancelled
+	// before backend.Run returned (operator cancel, workflow shutdown).
+	FailureKindCancelled FailureKind = "cancelled"
+	// FailureKindBackendError means backend.Run returned a non-timeout
+	// error — subprocess crashed, invalid args, auth failure, etc. See
+	// the Error and Stderr fields for specifics.
+	FailureKindBackendError FailureKind = "backend_error"
+	// FailureKindHandlerError means the handler itself returned an error
+	// before or after the backend call — prompt build failure, context
+	// load failure, etc. Deterministic; retry rarely helps.
+	FailureKindHandlerError FailureKind = "handler_error"
+)
+
 // PersonaFailedPayload is emitted when a persona handler fails.
+//
+// FailureKind classifies the failure so operators and auto-retry policies
+// can distinguish transient shapes (idle/wall timeout) from deterministic
+// ones (handler error). Stderr captures the last bytes of subprocess output
+// when available (backend-driven failures); it is bounded and may be
+// truncated. Both fields are optional for backward compatibility.
 type PersonaFailedPayload struct {
-	Persona      string `json:"persona"`
-	Phase        string `json:"phase,omitempty"`
-	TriggerEvent string `json:"trigger_event"`
-	TriggerID    string `json:"trigger_id"`
-	Reactive     bool   `json:"reactive"`
-	Error        string `json:"error"`
-	DurationMS   int64  `json:"duration_ms"`
-	ChainDepth   int    `json:"chain_depth"`
+	Persona      string      `json:"persona"`
+	Phase        string      `json:"phase,omitempty"`
+	TriggerEvent string      `json:"trigger_event"`
+	TriggerID    string      `json:"trigger_id"`
+	Reactive     bool        `json:"reactive"`
+	Error        string      `json:"error"`
+	FailureKind  FailureKind `json:"failure_kind,omitempty"`
+	Stderr       string      `json:"stderr,omitempty"`
+	DurationMS   int64       `json:"duration_ms"`
+	ChainDepth   int         `json:"chain_depth"`
 }
 
 // CompensationPayload is emitted during rollback.

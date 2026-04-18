@@ -147,6 +147,12 @@ type TokenUsage struct {
 }
 
 // PhaseTimeline tracks timing and iteration count for a phase execution.
+// On failure (Status == "failed"), Error holds the PersonaFailedPayload.Error
+// message and FailureKind classifies the failure shape (idle_timeout,
+// wall_timeout, cancelled, backend_error, handler_error) so operators can
+// distinguish a wedged subprocess from a deterministic code error without
+// loading the raw event payload. Stderr carries the bounded tail of
+// subprocess stderr when the backend captured one.
 type PhaseTimeline struct {
 	AggregateID string
 	Phase       string
@@ -155,6 +161,9 @@ type PhaseTimeline struct {
 	CompletedAt time.Time
 	Duration    time.Duration
 	Status      string // running, done, failed
+	Error       string
+	FailureKind string
+	Stderr      string
 }
 
 // VerdictRecord captures a single review verdict for a workflow phase.

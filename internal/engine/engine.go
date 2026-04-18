@@ -237,6 +237,7 @@ func (e *Engine) Start() {
 		event.WorkflowCancelled,
 		event.WorkflowPaused,
 		event.WorkflowResumed,
+		event.WorkflowRetried,
 		event.HintEmitted,
 		event.HintRejected,
 	}
@@ -435,7 +436,7 @@ func (e *Engine) resolveWorkflowAggregateID(env event.Envelope) string {
 	switch env.Type {
 	case event.PersonaCompleted, event.PersonaFailed, event.VerdictRendered,
 		event.WorkflowCancelled, event.WorkflowPaused, event.WorkflowResumed,
-		event.HintEmitted, event.HintRejected:
+		event.WorkflowRetried, event.HintEmitted, event.HintRejected:
 		if env.CorrelationID != "" {
 			return env.CorrelationID
 		}

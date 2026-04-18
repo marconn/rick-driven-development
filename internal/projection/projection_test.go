@@ -285,6 +285,45 @@ func TestPhaseTimelineProjection_TracksFailed(t *testing.T) {
 	}
 }
 
+// TestPhaseTimelineProjection_SurfacesFailureDiagnostics is the
+// regression test for the developer-zero-iteration bug. The operator
+// report noted phase_timeline showed status=failed with no causal
+// information — once FailureKind + Error + Stderr are set on the event,
+// this projection is the first place operators look, so it MUST carry
+// all three fields across.
+func TestPhaseTimelineProjection_SurfacesFailureDiagnostics(t *testing.T) {
+	proj := NewPhaseTimelineProjection()
+	ctx := context.Background()
+
+	env := makeEnvelope(event.PersonaFailed, "wf-2:persona:developer", 1,
+		event.PersonaFailedPayload{
+			Persona:     "developer",
+			Error:       "claude: backend: idle timeout exceeded (stall=2m0s) (after 2m0s)",
+			FailureKind: event.FailureKindIdleTimeout,
+			Stderr:      "fatal: CLI crashed mid-stream",
+			DurationMS:  180_000,
+		})
+	env.CorrelationID = "wf-2"
+
+	if err := proj.Handle(ctx, env); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	pt, ok := proj.Get("wf-2", "developer")
+	if !ok {
+		t.Fatal("timeline not found")
+	}
+	if pt.FailureKind != string(event.FailureKindIdleTimeout) {
+		t.Errorf("FailureKind = %q, want idle_timeout", pt.FailureKind)
+	}
+	if pt.Error == "" {
+		t.Errorf("Error not propagated from payload")
+	}
+	if pt.Stderr != "fatal: CLI crashed mid-stream" {
+		t.Errorf("Stderr = %q, want subprocess stderr tail", pt.Stderr)
+	}
+}
+
 func TestPhaseTimelineProjection_MultipleIterations(t *testing.T) {
 	proj := NewPhaseTimelineProjection()
 	ctx := context.Background()

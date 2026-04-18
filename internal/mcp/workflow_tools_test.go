@@ -248,6 +248,132 @@ func TestToolPersonaOutput_MissingArgs(t *testing.T) {
 	}
 }
 
+// TestToolPersonaOutput_FallsBackToPersonaFailed is the operator-facing
+// regression for the developer-zero-iteration bug. Before this change the
+// tool returned an opaque "no output available" error whenever the persona
+// only emitted PersonaFailed (no PersonaCompleted), which was every silent
+// subprocess crash. The contract now: surface the captured error,
+// failure_kind, and stderr tail so operators can diagnose from a single
+// MCP call.
+func TestToolPersonaOutput_FallsBackToPersonaFailed(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	corrID := "wf-failed-developer"
+	personaAgg := corrID + ":persona:developer"
+	failedEvt := event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
+		Persona:      "developer",
+		TriggerEvent: string(event.WorkflowStarted),
+		Reactive:     true,
+		Error:        "claude: backend: idle timeout exceeded (stall=2m0s) (after 2m0s)",
+		FailureKind:  event.FailureKindIdleTimeout,
+		Stderr:       "subprocess stderr: CLI panicked mid-run",
+		DurationMS:   180_000,
+	})).
+		WithAggregate(personaAgg, 1).
+		WithCorrelation(corrID).
+		WithSource("persona-runner:developer")
+
+	if err := deps.Store.Append(context.Background(), personaAgg, 0, []event.Envelope{failedEvt}); err != nil {
+		t.Fatalf("seed PersonaFailed: %v", err)
+	}
+
+	result, err := callTool(t, s, "rick_persona_output", map[string]any{
+		"workflow_id": corrID,
+		"persona":     "developer",
+	})
+	if err != nil {
+		t.Fatalf("rick_persona_output: %v", err)
+	}
+
+	out, ok := result.(personaOutputResult)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", result)
+	}
+	if out.Status != "failed" {
+		t.Errorf("Status = %q; want failed", out.Status)
+	}
+	if out.FailureKind != string(event.FailureKindIdleTimeout) {
+		t.Errorf("FailureKind = %q; want idle_timeout", out.FailureKind)
+	}
+	if !strings.Contains(out.Error, "idle timeout exceeded") {
+		t.Errorf("Error missing root-cause text: %q", out.Error)
+	}
+	if !strings.Contains(out.Stderr, "CLI panicked") {
+		t.Errorf("Stderr tail not surfaced: %q", out.Stderr)
+	}
+	if out.DurationMS != 180_000 {
+		t.Errorf("DurationMS = %d; want 180000", out.DurationMS)
+	}
+}
+
+// TestToolPersonaOutput_CompletedSupersedesEarlierFailure guards the
+// retry-loop case: if a persona failed once then succeeded on retry, the
+// tool must prefer the completion (with real output) and not resurrect the
+// stale failure diagnostics.
+func TestToolPersonaOutput_CompletedSupersedesEarlierFailure(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	corrID := "wf-recovered-developer"
+	personaAgg := corrID + ":persona:developer"
+
+	// First attempt fails.
+	failedEvt := event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
+		Persona:     "developer",
+		Error:       "transient",
+		FailureKind: event.FailureKindIdleTimeout,
+		DurationMS:  180_000,
+	})).WithAggregate(personaAgg, 1).WithCorrelation(corrID)
+
+	// AI response the retry produced, referenced by PersonaCompleted.OutputRef.
+	aiEvt := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
+		Phase:      "develop",
+		Backend:    "claude",
+		TokensUsed: 4200,
+		DurationMS: 60_000,
+		Structured: false,
+		Output:     []byte(`"retry succeeded"`),
+	})).WithAggregate(personaAgg, 2).WithCorrelation(corrID)
+
+	completedEvt := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona:    "developer",
+		OutputRef:  string(aiEvt.ID),
+		DurationMS: 60_000,
+	})).WithAggregate(personaAgg, 3).WithCorrelation(corrID)
+
+	if err := deps.Store.Append(context.Background(), personaAgg, 0, []event.Envelope{failedEvt, aiEvt, completedEvt}); err != nil {
+		t.Fatalf("seed events: %v", err)
+	}
+
+	result, err := callTool(t, s, "rick_persona_output", map[string]any{
+		"workflow_id": corrID,
+		"persona":     "developer",
+	})
+	if err != nil {
+		t.Fatalf("rick_persona_output: %v", err)
+	}
+
+	out, ok := result.(personaOutputResult)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", result)
+	}
+	if out.Status != "completed" {
+		t.Errorf("Status = %q; want completed (later success supersedes earlier failure)", out.Status)
+	}
+	if out.FailureKind != "" || out.Error != "" || out.Stderr != "" {
+		t.Errorf("stale failure fields should be cleared: kind=%q err=%q stderr=%q",
+			out.FailureKind, out.Error, out.Stderr)
+	}
+	if out.TokensUsed != 4200 {
+		t.Errorf("TokensUsed = %d; want 4200", out.TokensUsed)
+	}
+}
+
 // --- toolDiff tests ---
 
 func TestToolDiff_MissingID(t *testing.T) {

@@ -674,6 +674,58 @@ func TestToolPhaseTimeline(t *testing.T) {
 	}
 }
 
+// TestToolPhaseTimeline_SurfacesFailureDiagnostics verifies that the
+// phase_timeline tool exposes the new failure_kind/error/stderr fields
+// when a persona failed. Complements the projection-level test — this
+// checks the MCP serialization path end-to-end.
+func TestToolPhaseTimeline_SurfacesFailureDiagnostics(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+
+	failedEvt := event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
+		Persona:     "developer",
+		Error:       "claude: backend: idle timeout exceeded (stall=2m0s) (after 2m0s)",
+		FailureKind: event.FailureKindIdleTimeout,
+		Stderr:      "last gasps from the subprocess",
+		DurationMS:  180_000,
+	})).WithAggregate("tl-failed:persona:developer", 1).WithCorrelation("tl-failed")
+
+	_ = deps.Timelines.Handle(context.Background(), failedEvt)
+
+	s := NewServer(deps, testLogger())
+	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
+		Name:      "rick_phase_timeline",
+		Arguments: json.RawMessage(`{"workflow_id":"tl-failed"}`),
+	}))
+
+	resp := parseResponse(t, lines[0])
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	_ = json.Unmarshal(data, &result)
+	if result.IsError {
+		t.Fatalf("tool error: %s", result.Content[0].Text)
+	}
+
+	var timeline phaseTimelineResult
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &timeline)
+	if len(timeline.Phases) != 1 {
+		t.Fatalf("expected 1 phase, got %d", len(timeline.Phases))
+	}
+	phase := timeline.Phases[0]
+	if phase.Status != "failed" {
+		t.Errorf("Status = %q; want failed", phase.Status)
+	}
+	if phase.FailureKind != string(event.FailureKindIdleTimeout) {
+		t.Errorf("FailureKind = %q; want idle_timeout", phase.FailureKind)
+	}
+	if !strings.Contains(phase.Error, "idle timeout") {
+		t.Errorf("Error missing root cause: %q", phase.Error)
+	}
+	if !strings.Contains(phase.Stderr, "last gasps") {
+		t.Errorf("Stderr not surfaced to MCP response: %q", phase.Stderr)
+	}
+}
+
 func TestToolListDeadLetters(t *testing.T) {
 	deps, cleanup := testDeps(t)
 	defer cleanup()

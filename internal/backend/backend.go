@@ -2,7 +2,9 @@ package backend
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -49,3 +51,71 @@ type Response struct {
 // Set conservatively at 128KB (ARG_MAX is ~2MB on Linux, but we share
 // the budget with other args, env vars, and the binary path).
 const maxArgSize = 128 << 10
+
+// MaxStderrCapture caps how many trailing bytes of subprocess stderr a
+// BackendError carries. Event store payloads are JSON-marshalled into
+// SQLite rows — capping at 4KB keeps per-failure overhead bounded while
+// still giving operators enough context to diagnose a crash.
+const MaxStderrCapture = 4 << 10
+
+// BackendError wraps a driver failure with separately-accessible subprocess
+// stderr and a stable classifiable Inner error. Drivers return this on any
+// Run failure so upstream code (handlers, PersonaRunner) can:
+//   - Use errors.Is(err, ErrIdleTimeout) to detect a wedged subprocess.
+//   - Use errors.Is(err, context.DeadlineExceeded) to detect a wall-clock timeout.
+//   - Use errors.Is(err, context.Canceled) to detect operator cancellation.
+//   - Use errors.As(err, &backendErr) to pull the captured Stderr tail.
+//
+// Stderr may be empty when the subprocess was killed before producing any
+// output (the idle-watchdog case). Duration reflects how long Run had been
+// executing when it failed, so diagnostics do not have to re-derive it.
+type BackendError struct {
+	// Backend names the driver that failed (e.g., "claude", "gemini").
+	Backend string
+	// Inner is the underlying cause. Preserving it separately (rather than
+	// just formatting into a string) keeps errors.Is working against
+	// sentinel values (ErrIdleTimeout, context.DeadlineExceeded, etc.).
+	Inner error
+	// Duration is how long Run had been executing when it failed.
+	Duration time.Duration
+	// Stderr holds the captured tail of subprocess stderr, truncated to
+	// MaxStderrCapture bytes. Empty when none was captured (silent stall).
+	Stderr string
+}
+
+// Error renders a human-readable message. Format is stable: it preserves
+// the "<backend>: <cause>" prefix established by prior versions so logs
+// and existing substring matches keep working.
+func (e *BackendError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: %s", e.Backend, e.Inner.Error())
+	if e.Duration > 0 {
+		fmt.Fprintf(&b, " (after %s)", e.Duration.Round(time.Millisecond))
+	}
+	if stderr := strings.TrimSpace(e.Stderr); stderr != "" {
+		// Keep message short — full stderr lives in the struct field.
+		snippet := stderr
+		if len(snippet) > 256 {
+			snippet = snippet[len(snippet)-256:]
+		}
+		fmt.Fprintf(&b, ": %s", snippet)
+	}
+	return b.String()
+}
+
+// Unwrap returns the wrapped cause so errors.Is / errors.As traverse through.
+func (e *BackendError) Unwrap() error { return e.Inner }
+
+// tailBytes returns the trailing n bytes of s. When s is shorter than n,
+// s is returned as-is. When truncated, a leading "...[truncated]..."
+// marker is prepended so readers do not mistake the tail for the whole.
+func tailBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	const marker = "...[truncated]...\n"
+	if n <= len(marker) {
+		return s[len(s)-n:]
+	}
+	return marker + s[len(s)-(n-len(marker)):]
+}

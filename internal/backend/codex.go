@@ -99,16 +99,30 @@ func (c *Codex) Run(ctx context.Context, req Request) (*Response, error) {
 
 	if err := cmd.Run(); err != nil {
 		_ = sw.Close()
+		stderr := tailBytes(stderrBuf.String(), MaxStderrCapture)
+		elapsed := time.Since(start)
 		if errors.Is(context.Cause(watchCtx), ErrIdleTimeout) {
-			return nil, fmt.Errorf("codex: %w (after %s, stall=%s)", ErrIdleTimeout, time.Since(start), c.stallTimeout)
+			return nil, &BackendError{
+				Backend:  "codex",
+				Inner:    fmt.Errorf("%w (stall=%s)", ErrIdleTimeout, c.stallTimeout),
+				Duration: elapsed,
+				Stderr:   stderr,
+			}
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, fmt.Errorf("codex: %w (after %s)", ctxErr, time.Since(start))
+			return nil, &BackendError{
+				Backend:  "codex",
+				Inner:    ctxErr,
+				Duration: elapsed,
+				Stderr:   stderr,
+			}
 		}
-		if stderr := strings.TrimSpace(stderrBuf.String()); stderr != "" {
-			return nil, fmt.Errorf("codex: %w: %s", err, stderr)
+		return nil, &BackendError{
+			Backend:  "codex",
+			Inner:    err,
+			Duration: elapsed,
+			Stderr:   stderr,
 		}
-		return nil, fmt.Errorf("codex: %w", err)
 	}
 	_ = sw.Close()
 

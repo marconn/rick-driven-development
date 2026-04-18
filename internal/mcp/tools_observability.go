@@ -53,7 +53,7 @@ func (s *Server) registerObservabilityTools() {
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_retry_workflow",
-			Description: "Restart a failed or cancelled workflow with the same parameters. Creates a new workflow run using the original prompt, DAG, source, and ticket from the failed workflow.",
+			Description: "Resume a failed or cancelled workflow. With from_phase set, the original workflow is re-dispatched at that phase — every upstream PersonaCompleted is preserved, so only from_phase and its DAG-downstream re-run (no token re-bill for already-done work). Without from_phase, a brand-new workflow is started with the original prompt/dag/source/ticket.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -63,7 +63,7 @@ func (s *Server) registerObservabilityTools() {
 					},
 					"from_phase": map[string]any{
 						"type":        "string",
-						"description": "Override: restart from this specific phase.",
+						"description": "Handler name to restart at. Must be present in the workflow's DAG. When set, the original correlation is reused and upstream completions are preserved.",
 					},
 				},
 				"required": []string{"workflow_id"},
@@ -287,7 +287,11 @@ func (s *Server) toolRetryWorkflow(ctx context.Context, raw json.RawMessage) (an
 		return nil, fmt.Errorf("can only retry failed or cancelled workflows (current: %s)", agg.Status)
 	}
 
-	// Find the original prompt and workflow ID.
+	if args.FromPhase != "" {
+		return s.resumeWorkflowFromPhase(ctx, args.WorkflowID, args.FromPhase, agg)
+	}
+
+	// Legacy path: full re-run as a fresh workflow, preserving original params.
 	events, err := s.deps.Store.Load(ctx, args.WorkflowID)
 	if err != nil {
 		return nil, fmt.Errorf("load events: %w", err)
@@ -307,7 +311,6 @@ func (s *Server) toolRetryWorkflow(ctx context.Context, raw json.RawMessage) (an
 		return nil, fmt.Errorf("could not find original prompt in workflow events")
 	}
 
-	// Start a new workflow with the same parameters.
 	retryArgs := map[string]any{
 		"prompt": orig.Prompt,
 		"dag":    orig.WorkflowID,
@@ -334,10 +337,57 @@ func (s *Server) toolRetryWorkflow(ctx context.Context, raw json.RawMessage) (an
 
 	return map[string]any{
 		"original_workflow_id": args.WorkflowID,
-		"retry_workflow_id":   retryResult.WorkflowID,
-		"correlation_id":      retryResult.CorrelationID,
-		"dag":                 retryResult.DAG,
-		"status":              "started",
+		"retry_workflow_id":    retryResult.WorkflowID,
+		"correlation_id":       retryResult.CorrelationID,
+		"dag":                  retryResult.DAG,
+		"status":               "started",
+	}, nil
+}
+
+// resumeWorkflowFromPhase reuses the original correlation and emits a
+// WorkflowRetried event. The aggregate clears CompletedPersonas for fromPhase
+// + DAG-downstream (computed here, stored in the payload so replay stays
+// deterministic), flips Status back to Running, and PersonaRunner re-dispatches
+// fromPhase — so upstream completions are preserved and no tokens are re-paid.
+func (s *Server) resumeWorkflowFromPhase(
+	ctx context.Context,
+	workflowID string,
+	fromPhase string,
+	agg *engine.WorkflowAggregate,
+) (any, error) {
+	def, ok := s.deps.Engine.GetWorkflowDef(agg.WorkflowID)
+	if !ok {
+		return nil, fmt.Errorf("workflow definition %q not registered", agg.WorkflowID)
+	}
+	if _, inGraph := def.Graph[fromPhase]; !inGraph {
+		return nil, fmt.Errorf("from_phase %q is not in workflow %q's DAG", fromPhase, agg.WorkflowID)
+	}
+
+	invalidated := def.DownstreamOf(fromPhase) // includes fromPhase itself
+
+	retryEvt := event.New(event.WorkflowRetried, 1, event.MustMarshal(event.WorkflowRetriedPayload{
+		FromPhase:           fromPhase,
+		InvalidatedPersonas: invalidated,
+		Reason:              "operator retry via mcp",
+	})).
+		WithAggregate(workflowID, agg.Version+1).
+		WithCorrelation(workflowID).
+		WithSource("mcp:retry_workflow")
+
+	if err := s.deps.Store.Append(ctx, workflowID, agg.Version, []event.Envelope{retryEvt}); err != nil {
+		return nil, fmt.Errorf("store retry event: %w", err)
+	}
+	if err := s.deps.Bus.Publish(ctx, retryEvt); err != nil {
+		return nil, fmt.Errorf("publish retry event: %w", err)
+	}
+
+	return map[string]any{
+		"original_workflow_id": workflowID,
+		"correlation_id":       workflowID,
+		"dag":                  agg.WorkflowID,
+		"from_phase":           fromPhase,
+		"invalidated_personas": invalidated,
+		"status":               "resumed",
 	}, nil
 }
 
