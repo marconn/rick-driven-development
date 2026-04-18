@@ -102,6 +102,27 @@ type ClaudePrintExtractor struct {
 	// we have an authoritative total and should prefer it over the deltas.
 	resultTokens int
 	hasResult    bool
+
+	// progress, when set, is called only on genuine text progress (text_delta
+	// events and terminal result events). It must NOT be called on protocol
+	// noise such as tool_use, message_start, or keep-alive frames — those
+	// reset the idle watchdog without any text ever emerging, which is exactly
+	// the bug described in the 2026-04-18 idle_timeout operator report.
+	progress func()
+}
+
+// ExtractorOption configures optional ClaudePrintExtractor behaviour.
+type ExtractorOption func(*ClaudePrintExtractor)
+
+// WithProgress attaches a progress callback that fires only when the extractor
+// observes genuine text output (content_block_delta→text_delta) or a terminal
+// result event. Non-text protocol frames (tool_use, message_start, keep-alive
+// pings, etc.) do NOT trigger it, preventing them from resetting an idle
+// watchdog while the model is silent on actual generation.
+func WithProgress(progress func()) ExtractorOption {
+	return func(e *ClaudePrintExtractor) {
+		e.progress = progress
+	}
 }
 
 // NewClaudePrintExtractor returns a stateful extractor for Claude's verbose print mode.
@@ -113,8 +134,12 @@ type ClaudePrintExtractor struct {
 //
 // Handles both the legacy flat format and the stream_event envelope format
 // (content_block_delta with text_delta) from --include-partial-messages.
-func NewClaudePrintExtractor() *ClaudePrintExtractor {
-	return &ClaudePrintExtractor{}
+func NewClaudePrintExtractor(opts ...ExtractorOption) *ClaudePrintExtractor {
+	e := &ClaudePrintExtractor{}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
 // ExtractFn returns the ExtractFn closure for use with StreamWriter.
@@ -149,6 +174,12 @@ func (e *ClaudePrintExtractor) handleStreamEvent(innerType string, delta claudeS
 	case "content_block_delta":
 		if delta.Type == "text_delta" {
 			e.sawText = true
+			// A real text token arrived — signal progress. Non-text deltas
+			// (tool_use_delta, etc.) intentionally do not trigger this: they
+			// would reset the idle watchdog without any text ever emerging.
+			if e.progress != nil {
+				e.progress()
+			}
 			return delta.Text, true
 		}
 
@@ -173,10 +204,20 @@ func (e *ClaudePrintExtractor) handleStreamEvent(innerType string, delta claudeS
 		var env claudeStreamEvent
 		if err := json.Unmarshal(rawEnvelope, &env); err == nil {
 			var inner struct {
-				Usage claudeUsage `json:"usage"`
+				Delta claudeStreamDelta `json:"delta"`
+				Usage claudeUsage       `json:"usage"`
 			}
-			if err := json.Unmarshal(env.Event, &inner); err == nil && inner.Usage.OutputTokens > 0 {
-				e.outputTokens = inner.Usage.OutputTokens
+			if err := json.Unmarshal(env.Event, &inner); err == nil {
+				if inner.Usage.OutputTokens > 0 {
+					e.outputTokens = inner.Usage.OutputTokens
+				}
+				// message_delta with a stop_reason is the terminal signal for the
+				// stream_event envelope format — fire progress so a subprocess that
+				// generates text-free tool-call-only responses still doesn't idle-timeout
+				// right at the finish line.
+				if inner.Delta.StopReason != "" && e.progress != nil {
+					e.progress()
+				}
 			}
 		}
 	}
@@ -205,6 +246,11 @@ func (e *ClaudePrintExtractor) handleFlatEvent(line []byte) (string, bool) {
 	case "assistant":
 		if ev.Subtype == "text" {
 			e.sawText = true
+			// Real text token — count as progress. Protocol-only events
+			// (tool_use, message_start, etc.) intentionally do not fire this.
+			if e.progress != nil {
+				e.progress()
+			}
 			return ev.Text, true
 		}
 
@@ -227,6 +273,12 @@ func (e *ClaudePrintExtractor) handleFlatEvent(line []byte) (string, bool) {
 		if total > 0 {
 			e.resultTokens = total
 			e.hasResult = true
+		}
+		// The result event is a terminal signal regardless of whether text was
+		// streamed — fire progress so a subprocess finishing silently (tool-call
+		// only) doesn't idle-timeout right before returning.
+		if e.progress != nil {
+			e.progress()
 		}
 		// Fallback: emit result text only if no incremental text events were seen.
 		if ev.Result != "" && !e.sawText {

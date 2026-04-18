@@ -114,9 +114,16 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 		inner = io.MultiWriter(&captured, req.Output)
 	}
 
-	extractor := NewClaudePrintExtractor()
+	// Thread progress into the extractor rather than wrapping raw stdout.
+	// Claude CLI emits stream_event envelopes, tool_use blocks, and keep-alive
+	// frames that would reset the idle watchdog without ever producing text if
+	// we used newProgressWriter on the raw byte stream. By wiring progress
+	// into the extractor, only genuine text deltas (content_block_delta →
+	// text_delta) and terminal result/message_delta events count — protocol
+	// noise never resets the timer.
+	extractor := NewClaudePrintExtractor(WithProgress(progress))
 	sw := NewStreamWriter(inner, extractor.ExtractFn(), WithResultCheck(ClaudeCheckResult))
-	cmd.Stdout = newProgressWriter(sw, progress)
+	cmd.Stdout = sw
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf

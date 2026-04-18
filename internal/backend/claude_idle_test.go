@@ -180,10 +180,76 @@ wait
 	}
 }
 
+// TestClaude_Run_IdleTimeout_ProtocolNoiseDoesNotResetWatchdog is the
+// regression test for the 2026-04-18 idle_timeout operator bug: Claude CLI
+// emits stream_event envelopes (tool_use, message_start, keep-alive pings)
+// that previously reset the idle watchdog via newProgressWriter on raw stdout,
+// even though no text was ever generated. A wedged model could therefore
+// suppress the 2m watchdog for the full 9m wall-clock budget.
+//
+// The fix threads progress() into ClaudePrintExtractor so it fires only on
+// content_block_delta→text_delta events and terminal result/message_delta
+// events. This test verifies that a subprocess emitting ONLY non-text protocol
+// frames still idle-times-out within the stall window even though stdout is
+// actively chattering protocol noise.
+func TestClaude_Run_IdleTimeout_ProtocolNoiseDoesNotResetWatchdog(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("claude backend is linux/macos only — script-based fake binary not portable to windows")
+	}
+
+	// The script emits tool_use, message_start, and ping stream_event frames
+	// in a tight loop — exactly the protocol noise the real Claude CLI emits
+	// while waiting for an upstream Anthropic response. None of these frames
+	// contain a text_delta, so the extractor must NOT fire progress() on them.
+	// After the noise loop the script sleeps to simulate a permanently wedged
+	// model. The watchdog must fire within stallTimeout regardless.
+	script := `#!/bin/sh
+# Emit protocol-noise frames (tool_use, message_start, ping) in a tight loop.
+# None contain text_delta — the extractor must NOT reset the idle watchdog.
+i=0
+while [ $i -lt 20 ]; do
+  printf '{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}}\n'
+  printf '{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tu_01","name":"bash"}}}\n'
+  printf '{"type":"stream_event","event":{"type":"ping"}}\n'
+  i=$((i+1))
+done
+# Then go silent — a permanently wedged generator.
+sleep 10
+`
+	binPath := writeFakeBinary(t, "fake-claude-noise.sh", script)
+
+	c := NewClaude(binPath)
+	// Stall window must be short enough that the test finishes quickly.
+	// The noise loop completes in well under 100ms on any machine; the
+	// watchdog must fire after that without the noise having reset it.
+	c.stallTimeout = 300 * time.Millisecond
+
+	start := time.Now()
+	resp, err := c.Run(context.Background(), Request{
+		SystemPrompt: "sys",
+		UserPrompt:   "hello",
+	})
+	elapsed := time.Since(start)
+
+	if resp != nil {
+		t.Fatalf("want nil response on idle timeout, got %#v", resp)
+	}
+	if err == nil {
+		t.Fatal("want ErrIdleTimeout, got nil")
+	}
+	// Must time out well before the 10s sleep ends — generous 4s ceiling.
+	if elapsed > 4*time.Second {
+		t.Errorf("Run took %s — protocol noise reset the idle watchdog (regression of 2026-04-18 bug)", elapsed)
+	}
+	if !errors.Is(err, ErrIdleTimeout) {
+		t.Errorf("want ErrIdleTimeout, got %v", err)
+	}
+}
+
 // writeFakeBinary drops a POSIX shell script into t.TempDir and returns its
 // absolute path. The script becomes the "claude binary" passed to NewClaude
 // — the real Run() still exec's it as a child process, so the full chain
-// (exec.CommandContext → progressWriter → WithIdleTimeout → BackendError)
+// (exec.CommandContext → StreamWriter → WithIdleTimeout → BackendError)
 // is exercised end-to-end without touching the real claude CLI.
 func writeFakeBinary(t *testing.T, name, body string) string {
 	t.Helper()
