@@ -173,6 +173,198 @@ func TestAggregate_Apply_CountsOnlyAutomaticRetries(t *testing.T) {
 	}
 }
 
+// TestAggregate_AutoRetry_AcrossDeveloperDAGs locks the contract that
+// idle_timeout auto-retry is workflow-agnostic: ANY built-in DAG with
+// `developer` in its Graph must auto-retry, not just workspace-dev.
+//
+// Added after the 2026-04-18 pr-feedback idle_timeout report
+// (rick-feedback-2026-04-18-pr-feedback-idle-timeout.md), where the
+// operator observed a developer idle_timeout in pr-feedback and
+// hypothesised that the workspace-dev fix had not been applied to the
+// pr-feedback code path. The aggregate's maybeAutoRetry is in fact
+// workflow-agnostic — it only checks that the failed persona is in the
+// Graph — but the original test suite exercised only WorkspaceDevWorkflowDef,
+// so nothing in CI proved the claim. This table-driven test pins every
+// built-in DAG that ships a developer phase so that a future refactor
+// splitting the retry path per-DAG (or a new DAG accidentally excluding
+// developer from the auto-retry surface) fails loudly on a single line.
+func TestAggregate_AutoRetry_AcrossDeveloperDAGs(t *testing.T) {
+	defs := map[string]WorkflowDef{
+		"workspace-dev": WorkspaceDevWorkflowDef(),
+		"pr-feedback":   PRFeedbackWorkflowDef(),
+		"jira-dev":      JiraDevWorkflowDef(),
+		"github-dev":    GithubDevWorkflowDef(),
+		"ci-fix":        CIFixWorkflowDef(),
+		"develop-only":  DevelopOnlyWorkflowDef(),
+	}
+	for name, def := range defs {
+		t.Run(name, func(t *testing.T) {
+			if _, ok := def.Graph["developer"]; !ok {
+				t.Fatalf("%s: developer missing from Graph — this test's premise is wrong, "+
+					"update the defs map if this DAG legitimately no longer has a developer phase", name)
+			}
+
+			agg := NewWorkflowAggregate("wf-" + name)
+			agg.Status = StatusRunning
+			agg.WorkflowDef = &def
+
+			failEnv := event.Envelope{
+				Type:          event.PersonaFailed,
+				AggregateID:   "wf-" + name,
+				CorrelationID: "corr-" + name,
+				Payload: event.MustMarshal(event.PersonaFailedPayload{
+					Persona:     "developer",
+					Error:       "handler developer: backend: claude: idle timeout exceeded (stall=2m0s)",
+					FailureKind: event.FailureKindIdleTimeout,
+				}),
+			}
+			events, err := agg.Decide(failEnv)
+			if err != nil {
+				t.Fatalf("%s: Decide: %v", name, err)
+			}
+			if len(events) != 1 || events[0].Type != event.WorkflowRetried {
+				t.Fatalf("%s: want [WorkflowRetried] (auto-retry must cover this DAG), got %+v",
+					name, events)
+			}
+
+			var p event.WorkflowRetriedPayload
+			if err := json.Unmarshal(events[0].Payload, &p); err != nil {
+				t.Fatalf("%s: unmarshal retry payload: %v", name, err)
+			}
+			if !p.Automatic {
+				t.Errorf("%s: Automatic=false; want true so the cap is enforced", name)
+			}
+			if p.FromPhase != "developer" {
+				t.Errorf("%s: FromPhase=%q; want developer", name, p.FromPhase)
+			}
+			// Every DAG-downstream persona must be invalidated so stale
+			// completions don't satisfy the join on re-dispatch.
+			for _, d := range def.DownstreamOf("developer") {
+				if !slices.Contains(p.InvalidatedPersonas, d) {
+					t.Errorf("%s: InvalidatedPersonas missing %q (DAG-downstream of developer)", name, d)
+				}
+			}
+		})
+	}
+}
+
+// TestAggregate_AutoRetry_PRFeedback_AfterFeedbackAnalyzerVerdict replays
+// the exact event sequence from the 2026-04-18 pr-feedback idle_timeout
+// report:
+//
+//	github-pr-fetcher → workspace → feedback-analyzer (produces fail verdict)
+//	  → FeedbackGenerated{target:developer, source:feedback-analyzer}
+//	  → context-snapshot → developer FAILS with idle_timeout at iteration 0
+//
+// The pre-developer FeedbackGenerated is pr-feedback-specific: it bumps
+// FeedbackCount[developer] to 1 and sets FeedbackPending[feedback-analyzer]
+// to "developer" BEFORE the developer even runs. None of this should block
+// the idle_timeout auto-retry. This test pins that behaviour so a future
+// change to Apply / Decide that re-reads those fields from the feedback
+// path can't silently break pr-feedback's retry surface.
+func TestAggregate_AutoRetry_PRFeedback_AfterFeedbackAnalyzerVerdict(t *testing.T) {
+	agg := NewWorkflowAggregate("wf-prfb-scenario")
+	def := PRFeedbackWorkflowDef()
+	agg.WorkflowDef = &def
+	agg.WorkflowID = def.ID
+	agg.MaxIterations = def.MaxIterations
+	agg.Status = StatusRunning
+
+	// Everything the aggregate sees from the workflow's perspective
+	// before developer runs. Ordering matches what checkJoinCondition
+	// would observe in the store.
+	pre := []event.Envelope{
+		personaCompletedEnv("github-pr-fetcher"),
+		personaCompletedEnv("workspace"),
+		personaCompletedEnv("feedback-analyzer"),
+		feedbackGeneratedEnv("developer", "feedback-analyzer", 1),
+		personaCompletedEnv("context-snapshot"),
+	}
+	for _, e := range pre {
+		agg.Apply(e)
+	}
+
+	// Sanity-check the pre-developer state so a future change that breaks
+	// this setup (e.g., FeedbackGenerated no longer bumping FeedbackCount)
+	// surfaces as a clear precondition failure, not a misleading
+	// auto-retry assertion.
+	if agg.FeedbackCount["developer"] != 1 {
+		t.Fatalf("precondition: FeedbackCount[developer]=%d; want 1 after feedback-analyzer verdict",
+			agg.FeedbackCount["developer"])
+	}
+	if agg.FeedbackPending["feedback-analyzer"] != "developer" {
+		t.Fatalf("precondition: FeedbackPending[feedback-analyzer]=%q; want developer",
+			agg.FeedbackPending["feedback-analyzer"])
+	}
+
+	failEnv := event.Envelope{
+		Type:          event.PersonaFailed,
+		AggregateID:   "wf-prfb-scenario",
+		CorrelationID: "corr-prfb-scenario",
+		Payload: event.MustMarshal(event.PersonaFailedPayload{
+			Persona:     "developer",
+			Error:       "handler developer: backend: claude: backend: idle timeout exceeded (stall=2m0s) (after 5m0.025s)",
+			FailureKind: event.FailureKindIdleTimeout,
+		}),
+	}
+	events, err := agg.Decide(failEnv)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != event.WorkflowRetried {
+		var wfp event.WorkflowFailedPayload
+		if len(events) == 1 {
+			_ = json.Unmarshal(events[0].Payload, &wfp)
+		}
+		t.Fatalf("want [WorkflowRetried] even after feedback-analyzer verdict state; got %+v (failed reason=%q)",
+			events, wfp.Reason)
+	}
+
+	// Round-trip through Apply to prove the feedback-path state still
+	// lines up cleanly after the retry: the stale FeedbackPending gate
+	// for feedback-analyzer must be cleared (developer is in
+	// InvalidatedPersonas → the reverse-lookup branch in Apply drops
+	// FeedbackPending[feedback-analyzer]) or feedback-analyzer would
+	// stay blocked from re-tracking forever.
+	agg.Apply(events[0])
+	if _, stuck := agg.FeedbackPending["feedback-analyzer"]; stuck {
+		t.Error("FeedbackPending[feedback-analyzer] not cleared after auto-retry Apply — " +
+			"feedback-analyzer will never be re-trackable, breaking the next feedback iteration")
+	}
+	if agg.AutoRetries["developer"] != 1 {
+		t.Errorf("AutoRetries[developer]=%d; want 1 (retry must consume the budget)",
+			agg.AutoRetries["developer"])
+	}
+	if agg.Status != StatusRunning {
+		t.Errorf("Status=%q; want Running so PersonaRunner re-dispatch proceeds", agg.Status)
+	}
+}
+
+// personaCompletedEnv builds a minimal PersonaCompleted envelope suitable
+// for feeding through Apply — only fields the aggregate reads are set.
+func personaCompletedEnv(persona string) event.Envelope {
+	return event.Envelope{
+		Type: event.PersonaCompleted,
+		Payload: event.MustMarshal(event.PersonaCompletedPayload{
+			Persona: persona,
+		}),
+	}
+}
+
+// feedbackGeneratedEnv builds the aggregate-emitted FeedbackGenerated
+// shape (phase name already resolved to a persona — this matches what
+// decideVerdictRendered produces after ResolvePhase).
+func feedbackGeneratedEnv(target, source string, iteration int) event.Envelope {
+	return event.Envelope{
+		Type: event.FeedbackGenerated,
+		Payload: event.MustMarshal(event.FeedbackGeneratedPayload{
+			TargetPhase: target,
+			SourcePhase: source,
+			Iteration:   iteration,
+		}),
+	}
+}
+
 // TestAggregate_AutoRetry_RoundTripThroughApply is the end-to-end
 // invariant: Decide emits a retry, Apply consumes it, and the aggregate
 // now refuses a second auto-retry for the same persona. This catches
