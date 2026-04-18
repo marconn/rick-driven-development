@@ -866,12 +866,20 @@ func (r *PersonaRunner) subscribePauseResume() {
 	r.unsubs = append(r.unsubs, unsub1, unsub2, unsub3)
 }
 
-// subscribeWorkflowRetried handles operator-initiated retries from a specific
-// phase. The aggregate has already cleared CompletedPersonas for FromPhase +
-// downstream (via Apply) by the time we see the event on the bus, so we only
-// need to re-dispatch FromPhase — downstream handlers will re-fire naturally
-// once it re-completes. Using RecoverDispatch bypasses the idempotency cache,
-// which already holds the prior trigger eventID from the first failed run.
+// subscribeWorkflowRetried handles automatic and operator-initiated retries
+// from a specific phase. The aggregate has already cleared CompletedPersonas
+// for FromPhase + downstream (via Apply) by the time we see the event on the
+// bus, so we only need to re-dispatch FromPhase — downstream handlers will
+// re-fire naturally once it re-completes. Using RecoverDispatch bypasses the
+// idempotency cache, which already holds the prior trigger eventID from the
+// first failed run.
+//
+// If any of the four guard conditions cannot be satisfied (unresolvable
+// workflow, unregistered def, missing trigger, handler not found / join
+// unsatisfied), we publish a synthetic PersonaFailed with
+// FailureKindHandlerError so the aggregate — whose AutoRetries counter is
+// already at cap after Apply(WorkflowRetried{Automatic:true}) — transitions
+// to WorkflowFailed instead of silently staying in the Running state forever.
 func (r *PersonaRunner) subscribeWorkflowRetried() {
 	unsub := r.bus.Subscribe(event.WorkflowRetried, func(_ context.Context, env event.Envelope) error {
 		var p event.WorkflowRetriedPayload
@@ -890,6 +898,38 @@ func (r *PersonaRunner) subscribeWorkflowRetried() {
 			corrID = env.AggregateID
 		}
 
+		// publishDispatchWedge emits a synthetic PersonaFailed so the aggregate
+		// can transition to WorkflowFailed. We use FailureKindHandlerError because
+		// the root cause is a dispatch infrastructure problem, not a transient
+		// backend timeout — the aggregate must NOT auto-retry again.
+		publishDispatchWedge := func(cause string) {
+			r.logger.Warn("persona runner: auto-retry dispatch wedged, emitting synthetic PersonaFailed",
+				slog.String("correlation", corrID),
+				slog.String("from_phase", p.FromPhase),
+				slog.String("cause", cause),
+			)
+			reason := "auto-retry dispatch failed: " + cause
+			failEvt := event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
+				Persona:        p.FromPhase,
+				Phase:          p.FromPhase,
+				TriggerEvent:   string(env.Type),
+				TriggerID:      string(env.ID),
+				Reactive:       false,
+				Error:          reason,
+				FailureKind:    event.FailureKindHandlerError,
+				HandlerVersion: buildinfo.Version(),
+			})).
+				WithCorrelation(corrID).
+				WithCausation(env.ID).
+				WithSource("engine:auto-retry")
+			if pubErr := r.bus.Publish(r.ctx, failEvt); pubErr != nil {
+				r.logger.Error("persona runner: failed to publish synthetic PersonaFailed",
+					slog.String("correlation", corrID),
+					slog.String("error", pubErr.Error()),
+				)
+			}
+		}
+
 		// Load events up front — we need them for the trigger lookup anyway,
 		// and they let us warm the correlation cache if RecoveryScanner skipped
 		// this workflow (Failed/Cancelled aren't eligible for startup recovery).
@@ -906,29 +946,20 @@ func (r *PersonaRunner) subscribeWorkflowRetried() {
 		if !ok {
 			workflowID = findWorkflowIDFromEvents(events)
 			if workflowID == "" {
-				r.logger.Warn("persona runner: retry could not resolve workflow id",
-					slog.String("correlation", corrID),
-					slog.String("from_phase", p.FromPhase),
-				)
+				publishDispatchWedge("workflow id unresolvable")
 				return nil
 			}
 			r.resolver.cacheWorkflowID(corrID, workflowID)
 		}
 		def, ok := r.resolver.getWorkflowDef(workflowID)
 		if !ok {
-			r.logger.Warn("persona runner: retry with unknown workflow def",
-				slog.String("workflow", workflowID),
-				slog.String("from_phase", p.FromPhase),
-			)
+			publishDispatchWedge(fmt.Sprintf("workflow def %q not registered", workflowID))
 			return nil
 		}
 
 		trigger := r.findRetryTrigger(events, def, p.FromPhase)
 		if trigger == nil {
-			r.logger.Warn("persona runner: retry trigger event not found",
-				slog.String("correlation", corrID),
-				slog.String("from_phase", p.FromPhase),
-			)
+			publishDispatchWedge("predecessor PersonaCompleted not found in store")
 			return nil
 		}
 
@@ -946,6 +977,7 @@ func (r *PersonaRunner) subscribeWorkflowRetried() {
 				slog.String("from_phase", p.FromPhase),
 				slog.String("error", dispatchErr.Error()),
 			)
+			publishDispatchWedge(dispatchErr.Error())
 		}
 		return nil
 	}, eventbus.WithName("persona-runner:retry"))
