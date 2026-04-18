@@ -78,6 +78,7 @@ func (c *Codex) Run(ctx context.Context, req Request) (*Response, error) {
 
 	cmd := exec.CommandContext(watchCtx, c.binaryPath, args...)
 	cmd.Dir = req.WorkDir
+	configureProcessGroup(cmd, defaultKillGraceDelay)
 
 	// Capture output via stream parser.
 	var captured bytes.Buffer

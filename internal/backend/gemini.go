@@ -74,6 +74,7 @@ func (g *Gemini) Run(ctx context.Context, req Request) (*Response, error) {
 
 	cmd := exec.CommandContext(watchCtx, g.binaryPath, args...)
 	cmd.Dir = req.WorkDir
+	configureProcessGroup(cmd, defaultKillGraceDelay)
 
 	var captured bytes.Buffer
 	var inner io.Writer = &captured

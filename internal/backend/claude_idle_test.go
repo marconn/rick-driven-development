@@ -35,16 +35,14 @@ func TestClaude_Run_IdleTimeout_SurfacesBackendError(t *testing.T) {
 	// so the test doesn't hang if the watchdog regresses — the
 	// cmd.CommandContext kill path should terminate it in milliseconds
 	// after stallTimeout elapses.
-	// `exec sleep` replaces the shell with the sleep process so SIGKILL
-	// targets sleep directly. Without `exec`, sleep would be a grandchild
-	// orphaned by the shell's kill, and cmd.Run would block for the full
-	// 5s waiting for stdio pipes to close — which, incidentally, mirrors
-	// the 9-minute duration pattern in the production bug when the real
-	// claude CLI leaves node child processes alive after SIGKILL.
+	// Plain `sleep 5` runs as a grandchild of the shell — this is the
+	// production shape (claude CLI forks node). configureProcessGroup
+	// must SIGKILL the whole process group so cmd.Wait doesn't block on
+	// sleep's inherited stdio pipes.
 	script := `#!/bin/sh
 echo '{"type":"system","subtype":"init"}'
 echo 'bootstrapping claude wrapper' 1>&2
-exec sleep 5
+sleep 5
 `
 	binPath := writeFakeBinary(t, "fake-claude.sh", script)
 
@@ -110,7 +108,7 @@ func TestClaude_Run_IdleTimeout_PreservesErrorMessageShape(t *testing.T) {
 
 	script := `#!/bin/sh
 echo '{}'
-exec sleep 3
+sleep 3
 `
 	binPath := writeFakeBinary(t, "fake-claude-shape.sh", script)
 
@@ -130,6 +128,55 @@ exec sleep 3
 		if !strings.Contains(msg, needle) {
 			t.Errorf("error message %q missing %q — stable format regressed", msg, needle)
 		}
+	}
+}
+
+// TestClaude_Run_IdleTimeout_KillsGrandchildren is the explicit regression
+// guard for the grandchild-survives-SIGKILL bug that configureProcessGroup
+// was written to fix. The script forks a background sleep AND exits the
+// shell immediately — so the grandchild is reparented to init and keeps
+// the original stdout pipe open. Before the fix, cmd.Wait would block for
+// the full grandchild sleep duration even though the direct child had
+// exited; after the fix, the whole process group is killed and Run
+// returns in well under the sleep window.
+func TestClaude_Run_IdleTimeout_KillsGrandchildren(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group kill is unix-only")
+	}
+
+	// `sleep 10 &` backgrounds the sleep (grandchild of cmd). The parent
+	// shell then emits the final line and waits on the sleep via `wait`
+	// so the shell is still alive when the watchdog fires — mimicking a
+	// CLI that's waiting on its own subprocess. The 10s ceiling is
+	// intentionally long: a regression would push elapsed past 5s and
+	// trip the assert below.
+	script := `#!/bin/sh
+echo '{"type":"system"}'
+sleep 10 &
+echo 'parent waiting' 1>&2
+wait
+`
+	binPath := writeFakeBinary(t, "fake-claude-grandchild.sh", script)
+
+	c := NewClaude(binPath)
+	c.stallTimeout = 150 * time.Millisecond
+
+	start := time.Now()
+	_, err := c.Run(context.Background(), Request{UserPrompt: "x"})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("want error on idle timeout")
+	}
+	// Allow up to defaultKillGraceDelay (5s) + slack for the WaitDelay
+	// fallback. A working process-group kill should finish in well under
+	// 1s — the slack is for loaded CI runners. Anything near 10s means
+	// the grandchild was orphaned and we're back to the production bug.
+	if elapsed > 7*time.Second {
+		t.Errorf("Run took %s — grandchild sleep was not killed by process-group SIGKILL", elapsed)
+	}
+	if !errors.Is(err, ErrIdleTimeout) {
+		t.Errorf("err = %v; want ErrIdleTimeout", err)
 	}
 }
 

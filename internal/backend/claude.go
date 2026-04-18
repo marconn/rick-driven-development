@@ -98,6 +98,10 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 
 	cmd := exec.CommandContext(watchCtx, c.binaryPath, args...)
 	cmd.Dir = req.WorkDir
+	// Kill the whole process group on ctx cancel, not just the direct
+	// child — claude CLI forks a node subprocess that would otherwise
+	// survive SIGKILL and keep stdio pipes open, blocking cmd.Wait.
+	configureProcessGroup(cmd, defaultKillGraceDelay)
 
 	// Clear CLAUDECODE env var so the subprocess doesn't refuse to start
 	// when Rick is invoked from inside a Claude Code session.
