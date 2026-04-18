@@ -1,0 +1,149 @@
+package backend
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestClaude_Run_IdleTimeout_SurfacesBackendError reproduces the zero-iteration
+// developer-phase failure documented in
+// planning-workspace/rick-feedback-2026-04-18-developer-zero-iteration.md: a
+// backend subprocess emits some bootstrap noise, then goes silent while the
+// caller is waiting for tokens, and the idle watchdog must kill it and return
+// a BackendError that carries Inner=ErrIdleTimeout plus the captured stderr
+// tail so operators can diagnose via rick_persona_output.
+//
+// This is a hermetic repro: we stand in for the real `claude` CLI with a
+// shell script that writes a few bytes to stdout AND stderr, then sleeps
+// longer than the idle watchdog window. A production-shape failure is
+// identical — the real CLI prints its `system`/`init` events, then the
+// upstream Anthropic stream never delivers its first content token before the
+// 2-minute watchdog fires.
+func TestClaude_Run_IdleTimeout_SurfacesBackendError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("claude backend is linux/macos only — script-based fake binary not portable to windows")
+	}
+
+	// Script writes one line to stdout, one to stderr, then sleeps well
+	// past the idle window so the watchdog has to kill it. The sleep is 5s
+	// so the test doesn't hang if the watchdog regresses — the
+	// cmd.CommandContext kill path should terminate it in milliseconds
+	// after stallTimeout elapses.
+	// `exec sleep` replaces the shell with the sleep process so SIGKILL
+	// targets sleep directly. Without `exec`, sleep would be a grandchild
+	// orphaned by the shell's kill, and cmd.Run would block for the full
+	// 5s waiting for stdio pipes to close — which, incidentally, mirrors
+	// the 9-minute duration pattern in the production bug when the real
+	// claude CLI leaves node child processes alive after SIGKILL.
+	script := `#!/bin/sh
+echo '{"type":"system","subtype":"init"}'
+echo 'bootstrapping claude wrapper' 1>&2
+exec sleep 5
+`
+	binPath := writeFakeBinary(t, "fake-claude.sh", script)
+
+	c := NewClaude(binPath)
+	c.stallTimeout = 150 * time.Millisecond
+
+	start := time.Now()
+	resp, err := c.Run(context.Background(), Request{
+		SystemPrompt: "sys",
+		UserPrompt:   "hello",
+	})
+	elapsed := time.Since(start)
+
+	if resp != nil {
+		t.Fatalf("want nil response on idle timeout, got %#v", resp)
+	}
+	if err == nil {
+		t.Fatal("want error on idle timeout, got nil")
+	}
+
+	// Ceiling of 4s: plenty of slack for a loaded CI runner; anything
+	// close to the 5s sleep means the subprocess outlived the watchdog.
+	if elapsed > 4*time.Second {
+		t.Errorf("Run blocked for %s — watchdog did not kill subprocess", elapsed)
+	}
+
+	var backendErr *BackendError
+	if !errors.As(err, &backendErr) {
+		t.Fatalf("want *BackendError, got %T: %v", err, err)
+	}
+	if backendErr.Backend != "claude" {
+		t.Errorf("Backend = %q; want claude", backendErr.Backend)
+	}
+	if !errors.Is(err, ErrIdleTimeout) {
+		t.Errorf("errors.Is(err, ErrIdleTimeout) = false; failure_classify will mislabel this as handler_error")
+	}
+	// Stall duration must travel with the error so the message contains
+	// "(stall=150ms)" — operators grep for this to confirm the watchdog
+	// (not the wall-clock deadline) fired.
+	if !strings.Contains(backendErr.Inner.Error(), "stall=") {
+		t.Errorf("Inner = %q; want stall=<duration> marker", backendErr.Inner.Error())
+	}
+	if backendErr.Duration <= 0 {
+		t.Errorf("Duration = %s; want positive elapsed", backendErr.Duration)
+	}
+	// The bootstrap stderr line MUST survive to the BackendError. This is
+	// the single most-requested diagnostic from the operator report: the
+	// 4KB stderr tail is the only way to see what the subprocess did
+	// before it went silent.
+	if !strings.Contains(backendErr.Stderr, "bootstrapping claude wrapper") {
+		t.Errorf("Stderr = %q; want captured bootstrap stderr", backendErr.Stderr)
+	}
+}
+
+// TestClaude_Run_IdleTimeout_PreservesErrorMessageShape pins the stable
+// error string that downstream surfaces (rick_persona_output, agent UI
+// hover, operator grep) depend on. Regressions here would silently break
+// the diagnostic reporting that was shipped in commit 51aabc8.
+func TestClaude_Run_IdleTimeout_PreservesErrorMessageShape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("claude backend is linux/macos only")
+	}
+
+	script := `#!/bin/sh
+echo '{}'
+exec sleep 3
+`
+	binPath := writeFakeBinary(t, "fake-claude-shape.sh", script)
+
+	c := NewClaude(binPath)
+	c.stallTimeout = 120 * time.Millisecond
+
+	_, err := c.Run(context.Background(), Request{UserPrompt: "x"})
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	msg := err.Error()
+	// The message format this guards:
+	//   claude: backend: idle timeout exceeded (stall=120ms) (after 150ms)
+	// classifyDispatchFailure doesn't parse this, but humans and
+	// rick_persona_output's Error field do.
+	for _, needle := range []string{"claude", "idle timeout", "stall=", "after"} {
+		if !strings.Contains(msg, needle) {
+			t.Errorf("error message %q missing %q — stable format regressed", msg, needle)
+		}
+	}
+}
+
+// writeFakeBinary drops a POSIX shell script into t.TempDir and returns its
+// absolute path. The script becomes the "claude binary" passed to NewClaude
+// — the real Run() still exec's it as a child process, so the full chain
+// (exec.CommandContext → progressWriter → WithIdleTimeout → BackendError)
+// is exercised end-to-end without touching the real claude CLI.
+func writeFakeBinary(t *testing.T, name, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+	return path
+}
