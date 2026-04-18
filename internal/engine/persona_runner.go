@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/marconn/rick-event-driven-development/internal/buildinfo"
 	"github.com/marconn/rick-event-driven-development/internal/event"
 	"github.com/marconn/rick-event-driven-development/internal/eventbus"
 	"github.com/marconn/rick-event-driven-development/internal/eventstore"
@@ -756,15 +757,16 @@ func (r *PersonaRunner) executeDispatch(h handler.Handler, env event.Envelope, c
 	if dispatchErr != nil {
 		failureKind, stderr := classifyDispatchFailure(dispatchCtx, dispatchErr)
 		allEvents = append(allEvents, event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
-			Persona:      h.Name(),
-			TriggerEvent: string(env.Type),
-			TriggerID:    string(env.ID),
-			Reactive:     true,
-			Error:        dispatchErr.Error(),
-			FailureKind:  failureKind,
-			Stderr:       stderr,
-			DurationMS:   durationMS,
-			ChainDepth:   chainDepth,
+			Persona:        h.Name(),
+			TriggerEvent:   string(env.Type),
+			TriggerID:      string(env.ID),
+			Reactive:       true,
+			Error:          dispatchErr.Error(),
+			FailureKind:    failureKind,
+			Stderr:         stderr,
+			DurationMS:     durationMS,
+			ChainDepth:     chainDepth,
+			HandlerVersion: buildinfo.Version(),
 		})).
 			WithCausation(env.ID).
 			WithCorrelation(env.CorrelationID).
@@ -1099,15 +1101,16 @@ func (r *PersonaRunner) executeHint(hinter handler.Hinter, h handler.Handler, en
 	if err != nil {
 		failureKind, stderr := classifyDispatchFailure(hintCtx, err)
 		allEvents = append(allEvents, event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
-			Persona:      h.Name(),
-			TriggerEvent: string(env.Type),
-			TriggerID:    string(env.ID),
-			Reactive:     true,
-			Error:        fmt.Sprintf("hint failed: %s", err.Error()),
-			FailureKind:  failureKind,
-			Stderr:       stderr,
-			DurationMS:   durationMS,
-			ChainDepth:   chainDepth,
+			Persona:        h.Name(),
+			TriggerEvent:   string(env.Type),
+			TriggerID:      string(env.ID),
+			Reactive:       true,
+			Error:          fmt.Sprintf("hint failed: %s", err.Error()),
+			FailureKind:    failureKind,
+			Stderr:         stderr,
+			DurationMS:     durationMS,
+			ChainDepth:     chainDepth,
+			HandlerVersion: buildinfo.Version(),
 		})).
 			WithCausation(env.ID).
 			WithCorrelation(env.CorrelationID).
@@ -1169,15 +1172,16 @@ func (r *PersonaRunner) executeHintApprovedDispatch(handlerName string, env even
 	if dispatchErr != nil {
 		failureKind, stderr := classifyDispatchFailure(dispatchCtx, dispatchErr)
 		allEvents = append(allEvents, event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
-			Persona:      handlerName,
-			TriggerEvent: string(env.Type),
-			TriggerID:    string(env.ID),
-			Reactive:     true,
-			Error:        dispatchErr.Error(),
-			FailureKind:  failureKind,
-			Stderr:       stderr,
-			DurationMS:   durationMS,
-			ChainDepth:   chainDepth,
+			Persona:        handlerName,
+			TriggerEvent:   string(env.Type),
+			TriggerID:      string(env.ID),
+			Reactive:       true,
+			Error:          dispatchErr.Error(),
+			FailureKind:    failureKind,
+			Stderr:         stderr,
+			DurationMS:     durationMS,
+			ChainDepth:     chainDepth,
+			HandlerVersion: buildinfo.Version(),
 		})).
 			WithCausation(env.ID).
 			WithCorrelation(env.CorrelationID).

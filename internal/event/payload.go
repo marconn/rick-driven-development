@@ -217,17 +217,22 @@ const (
 // ones (handler error). Stderr captures the last bytes of subprocess output
 // when available (backend-driven failures); it is bounded and may be
 // truncated. Both fields are optional for backward compatibility.
+//
+// HandlerVersion carries the VCS revision of the binary that emitted this
+// failure — populated from internal/buildinfo.Version(). It is omitted from
+// PersonaCompletedPayload because fleet drift questions only arise on failures.
 type PersonaFailedPayload struct {
-	Persona      string      `json:"persona"`
-	Phase        string      `json:"phase,omitempty"`
-	TriggerEvent string      `json:"trigger_event"`
-	TriggerID    string      `json:"trigger_id"`
-	Reactive     bool        `json:"reactive"`
-	Error        string      `json:"error"`
-	FailureKind  FailureKind `json:"failure_kind,omitempty"`
-	Stderr       string      `json:"stderr,omitempty"`
-	DurationMS   int64       `json:"duration_ms"`
-	ChainDepth   int         `json:"chain_depth"`
+	Persona        string      `json:"persona"`
+	Phase          string      `json:"phase,omitempty"`
+	TriggerEvent   string      `json:"trigger_event"`
+	TriggerID      string      `json:"trigger_id"`
+	Reactive       bool        `json:"reactive"`
+	Error          string      `json:"error"`
+	FailureKind    FailureKind `json:"failure_kind,omitempty"`
+	Stderr         string      `json:"stderr,omitempty"`
+	DurationMS     int64       `json:"duration_ms"`
+	ChainDepth     int         `json:"chain_depth"`
+	HandlerVersion string      `json:"handler_version,omitempty"`
 }
 
 // CompensationPayload is emitted during rollback.
