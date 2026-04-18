@@ -30,6 +30,12 @@ type WorkflowAggregate struct {
 	CompletedPersonas map[string]bool   // set of persona names that have completed
 	FeedbackCount     map[string]int    // tracks feedback iterations per target persona
 	FeedbackPending   map[string]string // persona → target that must re-complete before this persona can be re-tracked (stale event guard)
+	// AutoRetries counts how many times the engine has emitted an automatic
+	// WorkflowRetried (from decidePersonaFailed's transient-failure branch)
+	// for each persona. Capped at MaxAutoRetriesPerPersona so a deterministic
+	// failure can't loop forever. Operator-initiated retries via
+	// rick_retry_workflow don't increment this counter.
+	AutoRetries       map[string]int
 	TokensUsed        int
 	TokenBudget       int
 	MaxIterations     int
@@ -39,6 +45,12 @@ type WorkflowAggregate struct {
 	Ticket            string
 }
 
+// MaxAutoRetriesPerPersona caps how many automatic retries the engine
+// will emit for a single persona on a single workflow. One retry is
+// enough to rescue transient failures (the feedback doc's core request)
+// while stopping a deterministic crash from spinning indefinitely.
+const MaxAutoRetriesPerPersona = 1
+
 // NewWorkflowAggregate creates a new empty aggregate ready for event replay.
 func NewWorkflowAggregate(id string) *WorkflowAggregate {
 	return &WorkflowAggregate{
@@ -47,6 +59,7 @@ func NewWorkflowAggregate(id string) *WorkflowAggregate {
 		CompletedPersonas: make(map[string]bool),
 		FeedbackCount:     make(map[string]int),
 		FeedbackPending:   make(map[string]string),
+		AutoRetries:       make(map[string]int),
 		MaxIterations:     3,
 	}
 }
@@ -96,6 +109,12 @@ func (w *WorkflowAggregate) Apply(env event.Envelope) {
 					delete(w.FeedbackPending, src)
 				}
 			}
+		}
+		if p.Automatic && p.FromPhase != "" {
+			if w.AutoRetries == nil {
+				w.AutoRetries = make(map[string]int)
+			}
+			w.AutoRetries[p.FromPhase]++
 		}
 		w.Status = StatusRunning
 
@@ -255,6 +274,17 @@ func (w *WorkflowAggregate) decidePersonaFailed(env event.Envelope) ([]event.Env
 		return nil, nil
 	}
 
+	// Transient-failure auto-retry: when the backend subprocess went
+	// silent (idle_timeout), a single retry often succeeds — the
+	// feedback doc's top operator complaint. We emit WorkflowRetried
+	// instead of WorkflowFailed so the existing retry machinery
+	// (PersonaRunner re-dispatch, DAG-downstream invalidation) runs
+	// unchanged. Capped per persona so a deterministic crash with the
+	// same symptom shape can't loop forever.
+	if retry, ok := w.maybeAutoRetry(env, p); ok {
+		return []event.Envelope{retry}, nil
+	}
+
 	payload := event.MustMarshal(event.WorkflowFailedPayload{
 		Reason: fmt.Sprintf("persona %s failed: %s", p.Persona, p.Error),
 		Phase:  p.Persona,
@@ -266,6 +296,46 @@ func (w *WorkflowAggregate) decidePersonaFailed(env event.Envelope) ([]event.Env
 			WithCorrelation(env.CorrelationID).
 			WithSource("engine:aggregate"),
 	}, nil
+}
+
+// maybeAutoRetry returns a WorkflowRetried envelope when the failed
+// persona's FailureKind is a transient shape AND the per-persona
+// auto-retry cap hasn't been hit yet. Returns (_, false) when the
+// caller should fall through to WorkflowFailed.
+//
+// Transient kinds: FailureKindIdleTimeout. WallTimeout is deliberately
+// excluded — a 20-minute wall-timeout is less likely to succeed on
+// immediate retry than a 2-minute idle stall. Cancelled and
+// HandlerError are skipped because they indicate operator intent or a
+// code-level bug, neither of which retries help.
+func (w *WorkflowAggregate) maybeAutoRetry(env event.Envelope, p event.PersonaFailedPayload) (event.Envelope, bool) {
+	if p.FailureKind != event.FailureKindIdleTimeout {
+		return event.Envelope{}, false
+	}
+	if w.AutoRetries[p.Persona] >= MaxAutoRetriesPerPersona {
+		return event.Envelope{}, false
+	}
+	// Must be in the workflow's DAG — otherwise DownstreamOf returns an
+	// empty set and the retry does nothing.
+	if _, inGraph := w.WorkflowDef.Graph[p.Persona]; !inGraph {
+		return event.Envelope{}, false
+	}
+
+	invalidated := w.WorkflowDef.DownstreamOf(p.Persona)
+	reason := fmt.Sprintf("engine: auto-retry on transient %s (attempt %d/%d)",
+		p.FailureKind, w.AutoRetries[p.Persona]+1, MaxAutoRetriesPerPersona)
+
+	retry := event.New(event.WorkflowRetried, 1, event.MustMarshal(event.WorkflowRetriedPayload{
+		FromPhase:           p.Persona,
+		InvalidatedPersonas: invalidated,
+		Reason:              reason,
+		Automatic:           true,
+	})).
+		WithAggregate(w.ID, w.Version+1).
+		WithCausation(env.ID).
+		WithCorrelation(env.CorrelationID).
+		WithSource("engine:aggregate")
+	return retry, true
 }
 
 func (w *WorkflowAggregate) decideVerdictRendered(env event.Envelope) ([]event.Envelope, error) {

@@ -81,6 +81,12 @@ type WorkflowRetriedPayload struct {
 	FromPhase           string   `json:"from_phase"`
 	InvalidatedPersonas []string `json:"invalidated_personas"`
 	Reason              string   `json:"reason,omitempty"`
+	// Automatic=true marks retries emitted by the engine itself (e.g.,
+	// auto-retry on transient idle_timeout). The aggregate counts these
+	// separately so a single persona can't trigger more than one automatic
+	// retry per workflow — operator-initiated retries via rick_retry_workflow
+	// leave Automatic=false and do NOT count against the cap.
+	Automatic bool `json:"automatic,omitempty"`
 }
 
 // OperatorGuidancePayload is emitted when an operator injects context into a workflow.
