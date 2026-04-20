@@ -177,7 +177,11 @@ func (e *ClaudePrintExtractor) handleStreamEvent(innerType string, delta claudeS
 			// A real text token arrived — signal progress. Non-text deltas
 			// (tool_use_delta, etc.) intentionally do not trigger this: they
 			// would reset the idle watchdog without any text ever emerging.
-			if e.progress != nil {
+			// Empty-text deltas (keep-alive / cache-fetch heartbeats from
+			// Claude CLI) are likewise excluded: they carry no generation
+			// progress and indefinitely extended the 2m watchdog during the
+			// 2026-04-20 developer-stall recurrence.
+			if e.progress != nil && delta.Text != "" {
 				e.progress()
 			}
 			return delta.Text, true
@@ -248,7 +252,10 @@ func (e *ClaudePrintExtractor) handleFlatEvent(line []byte) (string, bool) {
 			e.sawText = true
 			// Real text token — count as progress. Protocol-only events
 			// (tool_use, message_start, etc.) intentionally do not fire this.
-			if e.progress != nil {
+			// Empty-text events are likewise excluded so an empty "assistant/text"
+			// heartbeat cannot keep a wedged generator alive (symmetric with
+			// the stream_event content_block_delta guard — see 2026-04-20 fix).
+			if e.progress != nil && ev.Text != "" {
 				e.progress()
 			}
 			return ev.Text, true

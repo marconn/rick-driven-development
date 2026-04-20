@@ -246,6 +246,76 @@ sleep 10
 	}
 }
 
+// TestClaude_Run_IdleTimeout_EmptyTextDeltasDoNotResetWatchdog is the
+// regression test for the 2026-04-20 developer-stall recurrence. The initial
+// 2026-04-18 fix threaded progress() into the extractor to reject protocol
+// noise, but still fired progress() on every content_block_delta whose
+// delta.type was "text_delta" — regardless of whether delta.text was empty.
+// Claude CLI under internal stall (cache fetch, network retry, etc.) dribbles
+// empty text_delta frames that kept the 2m idle watchdog alive indefinitely
+// while producing zero tokens. Operator had to cancel manually.
+//
+// The fix adds a delta.Text != "" guard so empty deltas no longer count as
+// generation progress. This test emits only empty text_delta frames followed
+// by a long sleep; the watchdog must fire within stallTimeout.
+func TestClaude_Run_IdleTimeout_EmptyTextDeltasDoNotResetWatchdog(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("claude backend is linux/macos only — script-based fake binary not portable to windows")
+	}
+
+	// The script emits content_block_delta frames whose inner delta.type is
+	// "text_delta" but whose delta.text is empty, pacing them so the stream
+	// continues well past the stallTimeout window. This reproduces the
+	// 2026-04-20 stall shape: a wedged Claude session dribbles empty deltas
+	// faster than stallTimeout, indefinitely resetting the watchdog in the
+	// pre-fix code while producing zero tokens. The watchdog must fire on
+	// the *generation progress* (empty deltas are not progress), not on raw
+	// stdout activity — so it should fire even while the stream is active.
+	script := `#!/bin/sh
+# Emit empty-text content_block_delta frames at 50ms intervals, far faster
+# than stallTimeout (300ms). Pre-fix, each frame calls progress() because
+# delta.type == "text_delta", so the watchdog never fires and this loop
+# runs for the full budget. Post-fix, the empty-text guard skips progress()
+# and the watchdog fires within stallTimeout.
+i=0
+while [ $i -lt 100 ]; do
+  printf '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}}\n'
+  sleep 0.05
+  i=$((i+1))
+done
+`
+	binPath := writeFakeBinary(t, "fake-claude-empty-delta.sh", script)
+
+	c := NewClaude(binPath)
+	// 300ms stall window + 50ms delta interval → a broken watchdog would run
+	// the full 5s script; a working watchdog fires within ~350ms. A 2s ceiling
+	// comfortably distinguishes the two.
+	c.stallTimeout = 300 * time.Millisecond
+
+	start := time.Now()
+	resp, err := c.Run(context.Background(), Request{
+		SystemPrompt: "sys",
+		UserPrompt:   "hello",
+	})
+	elapsed := time.Since(start)
+
+	if resp != nil {
+		t.Fatalf("want nil response on idle timeout, got %#v", resp)
+	}
+	if err == nil {
+		t.Fatal("want ErrIdleTimeout, got nil")
+	}
+	// Must time out well before the 5s script ends. 2s ceiling is ~6× the
+	// stallTimeout — generous for CI jitter while still catching the
+	// regression (which would take the full script duration).
+	if elapsed > 2*time.Second {
+		t.Errorf("Run took %s — empty text_delta frames reset the idle watchdog (regression of 2026-04-20 bug)", elapsed)
+	}
+	if !errors.Is(err, ErrIdleTimeout) {
+		t.Errorf("want ErrIdleTimeout, got %v", err)
+	}
+}
+
 // writeFakeBinary drops a POSIX shell script into t.TempDir and returns its
 // absolute path. The script becomes the "claude binary" passed to NewClaude
 // — the real Run() still exec's it as a child process, so the full chain
