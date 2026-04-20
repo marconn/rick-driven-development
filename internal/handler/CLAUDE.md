@@ -35,7 +35,7 @@ Defines the `Handler` plugin interface and the concrete handler implementations 
 ### pr-review
 - `pr_workspace.go` — fires on `workflow.started.pr-review`; parses `gh:owner/repo#N` Source, fetches PR branch via `gh`, calls `workspace.SetupWorkspace` in isolated mode.
 - `pr_jira_context.go` — extracts Jira key from PR title/body/branch via regex, fetches the issue, emits `ContextEnrichment`. Missing ticket is non-fatal.
-- `pr_consolidator.go` — joins on `pr-architect`/`pr-reviewer`/`pr-qa` (the three review personas reused from the AI handlers), calls AI to merge findings into one comment, posts via `gh pr comment`. Only handler in this DAG with an external side-effect.
+- `pr_consolidator.go` — joins on the 11 category-reviewer outputs, calls AI to emit a structured JSON review (summary, event, inline comments, unanchored findings), validates each inline comment against the live PR diff, then posts a single GitHub **pull request review** via `gh api POST repos/:o/:r/pulls/:n/reviews`. Inline comments that don't anchor cleanly fold into the review body. Falls back to `gh pr comment` only when the AI output isn't parseable JSON. Only handler in this DAG with an external side-effect.
 - `pr_cleanup.go` — best-effort removal of the isolated workspace dir after consolidation.
 - (`architect`, `reviewer`, `qa` themselves are the same `AIHandler`/`ReviewHandler` instances reused via DAG scoping.)
 
