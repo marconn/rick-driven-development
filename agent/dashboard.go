@@ -53,6 +53,10 @@ type WorkflowDetail struct {
 }
 
 // PhaseEntry mirrors the rick_phase_timeline tool response.
+// Failure fields are populated only when Status == "failed"; they carry the
+// watchdog-kill telemetry the backend captured (FailureKind classifies the
+// failure shape, Stderr holds a bounded tail of subprocess stderr) so the
+// operator can diagnose an idle_timeout without leaving the UI.
 type PhaseEntry struct {
 	Phase       string `json:"phase"`
 	Status      string `json:"status"`
@@ -60,6 +64,9 @@ type PhaseEntry struct {
 	StartedAt   string `json:"started_at,omitempty"`
 	CompletedAt string `json:"completed_at,omitempty"`
 	DurationMS  int64  `json:"duration_ms,omitempty"`
+	Error       string `json:"error,omitempty"`
+	FailureKind string `json:"failure_kind,omitempty"`
+	Stderr      string `json:"stderr,omitempty"`
 }
 
 // TokenUsage mirrors the rick_token_usage tool response.

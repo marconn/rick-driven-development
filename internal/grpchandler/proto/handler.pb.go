@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v6.33.4
-// source: internal/grpchandler/proto/handler.proto
+// source: handler.proto
 
 package handlerpb
 
@@ -39,7 +39,7 @@ type HandlerMessage struct {
 
 func (x *HandlerMessage) Reset() {
 	*x = HandlerMessage{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[0]
+	mi := &file_handler_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -51,7 +51,7 @@ func (x *HandlerMessage) String() string {
 func (*HandlerMessage) ProtoMessage() {}
 
 func (x *HandlerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[0]
+	mi := &file_handler_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -64,7 +64,7 @@ func (x *HandlerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandlerMessage.ProtoReflect.Descriptor instead.
 func (*HandlerMessage) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{0}
+	return file_handler_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *HandlerMessage) GetMsg() isHandlerMessage_Msg {
@@ -208,7 +208,7 @@ type HandlerRegistration struct {
 
 func (x *HandlerRegistration) Reset() {
 	*x = HandlerRegistration{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[1]
+	mi := &file_handler_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -220,7 +220,7 @@ func (x *HandlerRegistration) String() string {
 func (*HandlerRegistration) ProtoMessage() {}
 
 func (x *HandlerRegistration) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[1]
+	mi := &file_handler_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -233,7 +233,7 @@ func (x *HandlerRegistration) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandlerRegistration.ProtoReflect.Descriptor instead.
 func (*HandlerRegistration) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{1}
+	return file_handler_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *HandlerRegistration) GetName() string {
@@ -289,7 +289,7 @@ type HandlerResult struct {
 
 func (x *HandlerResult) Reset() {
 	*x = HandlerResult{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[2]
+	mi := &file_handler_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -301,7 +301,7 @@ func (x *HandlerResult) String() string {
 func (*HandlerResult) ProtoMessage() {}
 
 func (x *HandlerResult) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[2]
+	mi := &file_handler_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -314,7 +314,7 @@ func (x *HandlerResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandlerResult.ProtoReflect.Descriptor instead.
 func (*HandlerResult) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{2}
+	return file_handler_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *HandlerResult) GetDispatchId() string {
@@ -355,7 +355,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[3]
+	mi := &file_handler_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -367,7 +367,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[3]
+	mi := &file_handler_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -380,7 +380,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{3}
+	return file_handler_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Heartbeat) GetTimestampMs() int64 {
@@ -407,7 +407,7 @@ type DispatchMessage struct {
 
 func (x *DispatchMessage) Reset() {
 	*x = DispatchMessage{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[4]
+	mi := &file_handler_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -419,7 +419,7 @@ func (x *DispatchMessage) String() string {
 func (*DispatchMessage) ProtoMessage() {}
 
 func (x *DispatchMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[4]
+	mi := &file_handler_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -432,7 +432,7 @@ func (x *DispatchMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchMessage.ProtoReflect.Descriptor instead.
 func (*DispatchMessage) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{4}
+	return file_handler_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *DispatchMessage) GetMsg() isDispatchMessage_Msg {
@@ -549,7 +549,7 @@ type DisplacedNotification struct {
 
 func (x *DisplacedNotification) Reset() {
 	*x = DisplacedNotification{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[5]
+	mi := &file_handler_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -561,7 +561,7 @@ func (x *DisplacedNotification) String() string {
 func (*DisplacedNotification) ProtoMessage() {}
 
 func (x *DisplacedNotification) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[5]
+	mi := &file_handler_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -574,7 +574,7 @@ func (x *DisplacedNotification) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DisplacedNotification.ProtoReflect.Descriptor instead.
 func (*DisplacedNotification) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{5}
+	return file_handler_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *DisplacedNotification) GetHandler() string {
@@ -602,7 +602,7 @@ type RegistrationAck struct {
 
 func (x *RegistrationAck) Reset() {
 	*x = RegistrationAck{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[6]
+	mi := &file_handler_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -614,7 +614,7 @@ func (x *RegistrationAck) String() string {
 func (*RegistrationAck) ProtoMessage() {}
 
 func (x *RegistrationAck) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[6]
+	mi := &file_handler_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -627,7 +627,7 @@ func (x *RegistrationAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegistrationAck.ProtoReflect.Descriptor instead.
 func (*RegistrationAck) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{6}
+	return file_handler_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RegistrationAck) GetName() string {
@@ -661,7 +661,7 @@ type DispatchRequest struct {
 
 func (x *DispatchRequest) Reset() {
 	*x = DispatchRequest{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[7]
+	mi := &file_handler_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -673,7 +673,7 @@ func (x *DispatchRequest) String() string {
 func (*DispatchRequest) ProtoMessage() {}
 
 func (x *DispatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[7]
+	mi := &file_handler_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -686,7 +686,7 @@ func (x *DispatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DispatchRequest.ProtoReflect.Descriptor instead.
 func (*DispatchRequest) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{7}
+	return file_handler_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DispatchRequest) GetDispatchId() string {
@@ -725,7 +725,7 @@ type InjectEventRequest struct {
 
 func (x *InjectEventRequest) Reset() {
 	*x = InjectEventRequest{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[8]
+	mi := &file_handler_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -737,7 +737,7 @@ func (x *InjectEventRequest) String() string {
 func (*InjectEventRequest) ProtoMessage() {}
 
 func (x *InjectEventRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[8]
+	mi := &file_handler_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -750,7 +750,7 @@ func (x *InjectEventRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InjectEventRequest.ProtoReflect.Descriptor instead.
 func (*InjectEventRequest) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{8}
+	return file_handler_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *InjectEventRequest) GetRequestId() string {
@@ -781,7 +781,7 @@ type InjectEventResult struct {
 
 func (x *InjectEventResult) Reset() {
 	*x = InjectEventResult{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[9]
+	mi := &file_handler_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -793,7 +793,7 @@ func (x *InjectEventResult) String() string {
 func (*InjectEventResult) ProtoMessage() {}
 
 func (x *InjectEventResult) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[9]
+	mi := &file_handler_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -806,7 +806,7 @@ func (x *InjectEventResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InjectEventResult.ProtoReflect.Descriptor instead.
 func (*InjectEventResult) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{9}
+	return file_handler_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *InjectEventResult) GetRequestId() string {
@@ -861,7 +861,7 @@ type RegisterWorkflowRequest struct {
 
 func (x *RegisterWorkflowRequest) Reset() {
 	*x = RegisterWorkflowRequest{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[10]
+	mi := &file_handler_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -873,7 +873,7 @@ func (x *RegisterWorkflowRequest) String() string {
 func (*RegisterWorkflowRequest) ProtoMessage() {}
 
 func (x *RegisterWorkflowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[10]
+	mi := &file_handler_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -886,7 +886,7 @@ func (x *RegisterWorkflowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterWorkflowRequest.ProtoReflect.Descriptor instead.
 func (*RegisterWorkflowRequest) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{10}
+	return file_handler_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *RegisterWorkflowRequest) GetRequestId() string {
@@ -942,7 +942,7 @@ type RegisterWorkflowResult struct {
 
 func (x *RegisterWorkflowResult) Reset() {
 	*x = RegisterWorkflowResult{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[11]
+	mi := &file_handler_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -954,7 +954,7 @@ func (x *RegisterWorkflowResult) String() string {
 func (*RegisterWorkflowResult) ProtoMessage() {}
 
 func (x *RegisterWorkflowResult) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[11]
+	mi := &file_handler_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -967,7 +967,7 @@ func (x *RegisterWorkflowResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterWorkflowResult.ProtoReflect.Descriptor instead.
 func (*RegisterWorkflowResult) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{11}
+	return file_handler_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RegisterWorkflowResult) GetRequestId() string {
@@ -1016,7 +1016,7 @@ type WatchRequest struct {
 
 func (x *WatchRequest) Reset() {
 	*x = WatchRequest{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[12]
+	mi := &file_handler_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1028,7 +1028,7 @@ func (x *WatchRequest) String() string {
 func (*WatchRequest) ProtoMessage() {}
 
 func (x *WatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[12]
+	mi := &file_handler_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1041,7 +1041,7 @@ func (x *WatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchRequest.ProtoReflect.Descriptor instead.
 func (*WatchRequest) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{12}
+	return file_handler_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *WatchRequest) GetCorrelationIds() []string {
@@ -1062,7 +1062,7 @@ type UnwatchRequest struct {
 
 func (x *UnwatchRequest) Reset() {
 	*x = UnwatchRequest{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[13]
+	mi := &file_handler_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1074,7 +1074,7 @@ func (x *UnwatchRequest) String() string {
 func (*UnwatchRequest) ProtoMessage() {}
 
 func (x *UnwatchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[13]
+	mi := &file_handler_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1087,7 +1087,7 @@ func (x *UnwatchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnwatchRequest.ProtoReflect.Descriptor instead.
 func (*UnwatchRequest) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{13}
+	return file_handler_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *UnwatchRequest) GetCorrelationIds() []string {
@@ -1119,7 +1119,7 @@ type WorkflowNotification struct {
 
 func (x *WorkflowNotification) Reset() {
 	*x = WorkflowNotification{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[14]
+	mi := &file_handler_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1131,7 +1131,7 @@ func (x *WorkflowNotification) String() string {
 func (*WorkflowNotification) ProtoMessage() {}
 
 func (x *WorkflowNotification) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[14]
+	mi := &file_handler_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1144,7 +1144,7 @@ func (x *WorkflowNotification) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkflowNotification.ProtoReflect.Descriptor instead.
 func (*WorkflowNotification) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{14}
+	return file_handler_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *WorkflowNotification) GetCorrelationId() string {
@@ -1232,19 +1232,27 @@ func (x *WorkflowNotification) GetVerdicts() []*VerdictDetail {
 }
 
 // PhaseSummary provides per-phase timing and status in a WorkflowNotification.
+// Failure diagnostics (error, failure_kind, stderr) populate when status=="failed"
+// so gRPC watchers (e.g. the desktop agent UI) can surface the same watchdog-kill
+// telemetry the MCP phase_timeline tool already exposes — instead of reducing a
+// silent idle_timeout to "status: failed" with no cause visible.
 type PhaseSummary struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Phase         string                 `protobuf:"bytes,1,opt,name=phase,proto3" json:"phase,omitempty"`
-	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"` // "done", "failed"
-	Iterations    int32                  `protobuf:"varint,3,opt,name=iterations,proto3" json:"iterations,omitempty"`
-	DurationMs    int64                  `protobuf:"varint,4,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Phase      string                 `protobuf:"bytes,1,opt,name=phase,proto3" json:"phase,omitempty"`
+	Status     string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"` // "done", "failed"
+	Iterations int32                  `protobuf:"varint,3,opt,name=iterations,proto3" json:"iterations,omitempty"`
+	DurationMs int64                  `protobuf:"varint,4,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	// Populated only when status=="failed".
+	Error         string `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`                                // raw PersonaFailed error string
+	FailureKind   string `protobuf:"bytes,6,opt,name=failure_kind,json=failureKind,proto3" json:"failure_kind,omitempty"` // idle_timeout | wall_timeout | cancelled | backend_error | handler_error
+	Stderr        string `protobuf:"bytes,7,opt,name=stderr,proto3" json:"stderr,omitempty"`                              // bounded stderr tail from BackendError (≤ MaxStderrCapture)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PhaseSummary) Reset() {
 	*x = PhaseSummary{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[15]
+	mi := &file_handler_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1256,7 +1264,7 @@ func (x *PhaseSummary) String() string {
 func (*PhaseSummary) ProtoMessage() {}
 
 func (x *PhaseSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[15]
+	mi := &file_handler_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1269,7 +1277,7 @@ func (x *PhaseSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PhaseSummary.ProtoReflect.Descriptor instead.
 func (*PhaseSummary) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{15}
+	return file_handler_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PhaseSummary) GetPhase() string {
@@ -1300,6 +1308,27 @@ func (x *PhaseSummary) GetDurationMs() int64 {
 	return 0
 }
 
+func (x *PhaseSummary) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *PhaseSummary) GetFailureKind() string {
+	if x != nil {
+		return x.FailureKind
+	}
+	return ""
+}
+
+func (x *PhaseSummary) GetStderr() string {
+	if x != nil {
+		return x.Stderr
+	}
+	return ""
+}
+
 // VerdictDetail provides per-phase review verdict data in a WorkflowNotification.
 type VerdictDetail struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1314,7 +1343,7 @@ type VerdictDetail struct {
 
 func (x *VerdictDetail) Reset() {
 	*x = VerdictDetail{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[16]
+	mi := &file_handler_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1326,7 +1355,7 @@ func (x *VerdictDetail) String() string {
 func (*VerdictDetail) ProtoMessage() {}
 
 func (x *VerdictDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[16]
+	mi := &file_handler_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1339,7 +1368,7 @@ func (x *VerdictDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerdictDetail.ProtoReflect.Descriptor instead.
 func (*VerdictDetail) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{16}
+	return file_handler_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *VerdictDetail) GetPhase() string {
@@ -1391,7 +1420,7 @@ type IssueSummary struct {
 
 func (x *IssueSummary) Reset() {
 	*x = IssueSummary{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[17]
+	mi := &file_handler_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1403,7 +1432,7 @@ func (x *IssueSummary) String() string {
 func (*IssueSummary) ProtoMessage() {}
 
 func (x *IssueSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[17]
+	mi := &file_handler_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1416,7 +1445,7 @@ func (x *IssueSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IssueSummary.ProtoReflect.Descriptor instead.
 func (*IssueSummary) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{17}
+	return file_handler_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *IssueSummary) GetSeverity() string {
@@ -1473,7 +1502,7 @@ type EventEnvelope struct {
 
 func (x *EventEnvelope) Reset() {
 	*x = EventEnvelope{}
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[18]
+	mi := &file_handler_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1485,7 +1514,7 @@ func (x *EventEnvelope) String() string {
 func (*EventEnvelope) ProtoMessage() {}
 
 func (x *EventEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_grpchandler_proto_handler_proto_msgTypes[18]
+	mi := &file_handler_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1498,7 +1527,7 @@ func (x *EventEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventEnvelope.ProtoReflect.Descriptor instead.
 func (*EventEnvelope) Descriptor() ([]byte, []int) {
-	return file_internal_grpchandler_proto_handler_proto_rawDescGZIP(), []int{18}
+	return file_handler_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *EventEnvelope) GetId() string {
@@ -1571,11 +1600,11 @@ func (x *EventEnvelope) GetPayload() []byte {
 	return nil
 }
 
-var File_internal_grpchandler_proto_handler_proto protoreflect.FileDescriptor
+var File_handler_proto protoreflect.FileDescriptor
 
-const file_internal_grpchandler_proto_handler_proto_rawDesc = "" +
+const file_handler_proto_rawDesc = "" +
 	"\n" +
-	"(internal/grpchandler/proto/handler.proto\x12\x0frick.handler.v1\"\xe5\x03\n" +
+	"\rhandler.proto\x12\x0frick.handler.v1\"\xe5\x03\n" +
 	"\x0eHandlerMessage\x12J\n" +
 	"\fregistration\x18\x01 \x01(\v2$.rick.handler.v1.HandlerRegistrationH\x00R\fregistration\x128\n" +
 	"\x06result\x18\x02 \x01(\v2\x1e.rick.handler.v1.HandlerResultH\x00R\x06result\x12:\n" +
@@ -1670,7 +1699,7 @@ const file_internal_grpchandler_proto_handler_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\x1aB\n" +
 	"\x14TokensByBackendEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"}\n" +
+	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\xce\x01\n" +
 	"\fPhaseSummary\x12\x14\n" +
 	"\x05phase\x18\x01 \x01(\tR\x05phase\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12\x1e\n" +
@@ -1678,7 +1707,10 @@ const file_internal_grpchandler_proto_handler_proto_rawDesc = "" +
 	"iterations\x18\x03 \x01(\x05R\n" +
 	"iterations\x12\x1f\n" +
 	"\vduration_ms\x18\x04 \x01(\x03R\n" +
-	"durationMs\"\xb3\x01\n" +
+	"durationMs\x12\x14\n" +
+	"\x05error\x18\x05 \x01(\tR\x05error\x12!\n" +
+	"\ffailure_kind\x18\x06 \x01(\tR\vfailureKind\x12\x16\n" +
+	"\x06stderr\x18\a \x01(\tR\x06stderr\"\xb3\x01\n" +
 	"\rVerdictDetail\x12\x14\n" +
 	"\x05phase\x18\x01 \x01(\tR\x05phase\x12!\n" +
 	"\fsource_phase\x18\x02 \x01(\tR\vsourcePhase\x12\x18\n" +
@@ -1707,19 +1739,19 @@ const file_internal_grpchandler_proto_handler_proto_rawDesc = "" +
 	"\fHandleStream\x12\x1f.rick.handler.v1.HandlerMessage\x1a .rick.handler.v1.DispatchMessage(\x010\x01BWZUgithub.com/marconn/rick-event-driven-development/internal/grpchandler/proto;handlerpbb\x06proto3"
 
 var (
-	file_internal_grpchandler_proto_handler_proto_rawDescOnce sync.Once
-	file_internal_grpchandler_proto_handler_proto_rawDescData []byte
+	file_handler_proto_rawDescOnce sync.Once
+	file_handler_proto_rawDescData []byte
 )
 
-func file_internal_grpchandler_proto_handler_proto_rawDescGZIP() []byte {
-	file_internal_grpchandler_proto_handler_proto_rawDescOnce.Do(func() {
-		file_internal_grpchandler_proto_handler_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_internal_grpchandler_proto_handler_proto_rawDesc), len(file_internal_grpchandler_proto_handler_proto_rawDesc)))
+func file_handler_proto_rawDescGZIP() []byte {
+	file_handler_proto_rawDescOnce.Do(func() {
+		file_handler_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_handler_proto_rawDesc), len(file_handler_proto_rawDesc)))
 	})
-	return file_internal_grpchandler_proto_handler_proto_rawDescData
+	return file_handler_proto_rawDescData
 }
 
-var file_internal_grpchandler_proto_handler_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
-var file_internal_grpchandler_proto_handler_proto_goTypes = []any{
+var file_handler_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_handler_proto_goTypes = []any{
 	(*HandlerMessage)(nil),          // 0: rick.handler.v1.HandlerMessage
 	(*HandlerRegistration)(nil),     // 1: rick.handler.v1.HandlerRegistration
 	(*HandlerResult)(nil),           // 2: rick.handler.v1.HandlerResult
@@ -1742,7 +1774,7 @@ var file_internal_grpchandler_proto_handler_proto_goTypes = []any{
 	nil,                             // 19: rick.handler.v1.WorkflowNotification.TokensByPhaseEntry
 	nil,                             // 20: rick.handler.v1.WorkflowNotification.TokensByBackendEntry
 }
-var file_internal_grpchandler_proto_handler_proto_depIdxs = []int32{
+var file_handler_proto_depIdxs = []int32{
 	1,  // 0: rick.handler.v1.HandlerMessage.registration:type_name -> rick.handler.v1.HandlerRegistration
 	2,  // 1: rick.handler.v1.HandlerMessage.result:type_name -> rick.handler.v1.HandlerResult
 	3,  // 2: rick.handler.v1.HandlerMessage.heartbeat:type_name -> rick.handler.v1.Heartbeat
@@ -1773,12 +1805,12 @@ var file_internal_grpchandler_proto_handler_proto_depIdxs = []int32{
 	0,  // [0:21] is the sub-list for field type_name
 }
 
-func init() { file_internal_grpchandler_proto_handler_proto_init() }
-func file_internal_grpchandler_proto_handler_proto_init() {
-	if File_internal_grpchandler_proto_handler_proto != nil {
+func init() { file_handler_proto_init() }
+func file_handler_proto_init() {
+	if File_handler_proto != nil {
 		return
 	}
-	file_internal_grpchandler_proto_handler_proto_msgTypes[0].OneofWrappers = []any{
+	file_handler_proto_msgTypes[0].OneofWrappers = []any{
 		(*HandlerMessage_Registration)(nil),
 		(*HandlerMessage_Result)(nil),
 		(*HandlerMessage_Heartbeat)(nil),
@@ -1787,7 +1819,7 @@ func file_internal_grpchandler_proto_handler_proto_init() {
 		(*HandlerMessage_Unwatch)(nil),
 		(*HandlerMessage_RegisterWorkflow)(nil),
 	}
-	file_internal_grpchandler_proto_handler_proto_msgTypes[4].OneofWrappers = []any{
+	file_handler_proto_msgTypes[4].OneofWrappers = []any{
 		(*DispatchMessage_Ack)(nil),
 		(*DispatchMessage_Dispatch)(nil),
 		(*DispatchMessage_InjectResult)(nil),
@@ -1799,17 +1831,17 @@ func file_internal_grpchandler_proto_handler_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_grpchandler_proto_handler_proto_rawDesc), len(file_internal_grpchandler_proto_handler_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_handler_proto_rawDesc), len(file_handler_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_internal_grpchandler_proto_handler_proto_goTypes,
-		DependencyIndexes: file_internal_grpchandler_proto_handler_proto_depIdxs,
-		MessageInfos:      file_internal_grpchandler_proto_handler_proto_msgTypes,
+		GoTypes:           file_handler_proto_goTypes,
+		DependencyIndexes: file_handler_proto_depIdxs,
+		MessageInfos:      file_handler_proto_msgTypes,
 	}.Build()
-	File_internal_grpchandler_proto_handler_proto = out.File
-	file_internal_grpchandler_proto_handler_proto_goTypes = nil
-	file_internal_grpchandler_proto_handler_proto_depIdxs = nil
+	File_handler_proto = out.File
+	file_handler_proto_goTypes = nil
+	file_handler_proto_depIdxs = nil
 }

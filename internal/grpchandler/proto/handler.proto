@@ -211,11 +211,20 @@ message WorkflowNotification {
 }
 
 // PhaseSummary provides per-phase timing and status in a WorkflowNotification.
+// Failure diagnostics (error, failure_kind, stderr) populate when status=="failed"
+// so gRPC watchers (e.g. the desktop agent UI) can surface the same watchdog-kill
+// telemetry the MCP phase_timeline tool already exposes — instead of reducing a
+// silent idle_timeout to "status: failed" with no cause visible.
 message PhaseSummary {
   string phase       = 1;
   string status      = 2;   // "done", "failed"
   int32  iterations  = 3;
   int64  duration_ms = 4;
+
+  // Populated only when status=="failed".
+  string error        = 5;  // raw PersonaFailed error string
+  string failure_kind = 6;  // idle_timeout | wall_timeout | cancelled | backend_error | handler_error
+  string stderr       = 7;  // bounded stderr tail from BackendError (≤ MaxStderrCapture)
 }
 
 // VerdictDetail provides per-phase review verdict data in a WorkflowNotification.

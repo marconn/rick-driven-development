@@ -378,6 +378,103 @@ func TestBroker_FailedWorkflowNotification(t *testing.T) {
 	}
 }
 
+// TestBroker_FailedPhaseCarriesStderrAndFailureKind pins the gRPC surface for
+// the 2026-04-20 gemini feedback-analyzer idle_timeout report. Before this
+// wiring, WorkflowNotification.Phases reduced a silent watchdog kill to
+// {status: "failed"} with no cause visible — operators watching via the
+// desktop agent UI had to leave the workflow view and grep raw events to
+// see the stderr banner. This test locks the three diagnostic fields
+// (error, failure_kind, stderr) onto every failed PhaseSummary so that
+// wiring cannot regress.
+func TestBroker_FailedPhaseCarriesStderrAndFailureKind(t *testing.T) {
+	broker, bus, workflows, _, timelines, _ := newBrokerTestEnv(t)
+
+	ctx := context.Background()
+
+	// Seed running workflow.
+	req := event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+		Prompt: "test", WorkflowID: "test-wf",
+	})).WithAggregate("wf-idle", 1).WithCorrelation("wf-idle")
+	_ = workflows.Handle(ctx, req)
+
+	started := event.New(event.WorkflowStarted, 1, event.MustMarshal(event.WorkflowStartedPayload{
+		WorkflowID: "test-wf", Phases: []string{"feedback-analyzer"},
+	})).WithAggregate("wf-idle", 2).WithCorrelation("wf-idle")
+	_ = workflows.Handle(ctx, started)
+
+	// Seed the PhaseTimelineProjection with a PersonaFailed carrying the
+	// exact shape that gemini.go emits on an idle_timeout kill: a bounded
+	// stderr tail, FailureKindIdleTimeout, and the wrapped error string
+	// with the stall= marker.
+	const wantStderr = "YOLO mode is enabled. All tool calls will be automatically approved.\nBoth GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY.\n"
+	const wantError = "handler feedback-analyzer: backend: gemini: backend: idle timeout exceeded (stall=2m0s)"
+	failed := event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
+		Persona:     "feedback-analyzer",
+		Error:       wantError,
+		FailureKind: event.FailureKindIdleTimeout,
+		Stderr:      wantStderr,
+		DurationMS:  150_095,
+		Reactive:    true,
+	})).WithAggregate("wf-idle:persona:feedback-analyzer", 1).WithCorrelation("wf-idle")
+	if err := timelines.Handle(ctx, failed); err != nil {
+		t.Fatalf("timelines.Handle: %v", err)
+	}
+
+	sendCh := make(chan *pb.DispatchMessage, 16)
+	broker.Watch("idle-watcher", []string{"wf-idle"}, sendCh)
+
+	workflowFailed := event.New(event.WorkflowFailed, 1, event.MustMarshal(event.WorkflowFailedPayload{
+		Reason: "persona feedback-analyzer failed: " + wantError,
+		Phase:  "feedback-analyzer",
+	})).WithAggregate("wf-idle", 3).WithCorrelation("wf-idle")
+	_ = workflows.Handle(ctx, workflowFailed)
+
+	if err := bus.Publish(ctx, workflowFailed); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case msg := <-sendCh:
+		notif := msg.GetNotification()
+		if notif == nil {
+			t.Fatal("expected WorkflowNotification")
+		}
+		if notif.FailedPhase != "feedback-analyzer" {
+			t.Errorf("FailedPhase = %q; want feedback-analyzer", notif.FailedPhase)
+		}
+		if len(notif.Phases) == 0 {
+			t.Fatal("expected phase timeline data")
+		}
+
+		var failedSummary *pb.PhaseSummary
+		for _, ph := range notif.Phases {
+			if ph.Phase == "feedback-analyzer" {
+				failedSummary = ph
+				break
+			}
+		}
+		if failedSummary == nil {
+			t.Fatal("feedback-analyzer phase missing from PhaseSummary slice")
+		}
+		if failedSummary.Status != "failed" {
+			t.Errorf("Status = %q; want failed", failedSummary.Status)
+		}
+		if failedSummary.FailureKind != string(event.FailureKindIdleTimeout) {
+			t.Errorf("FailureKind = %q; want idle_timeout — watchdog classification must round-trip to gRPC watchers",
+				failedSummary.FailureKind)
+		}
+		if failedSummary.Error != wantError {
+			t.Errorf("Error = %q; want %q", failedSummary.Error, wantError)
+		}
+		if failedSummary.Stderr != wantStderr {
+			t.Errorf("Stderr = %q; want %q — stderr tail must reach the agent UI for operator diagnosis",
+				failedSummary.Stderr, wantStderr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for failed notification")
+	}
+}
+
 func TestBroker_NotificationIncludesVerdicts(t *testing.T) {
 	broker, bus, workflows, _, _, verdicts := newBrokerTestEnv(t)
 

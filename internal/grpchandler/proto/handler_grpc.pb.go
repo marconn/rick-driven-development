@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.1
 // - protoc             v6.33.4
-// source: internal/grpchandler/proto/handler.proto
+// source: handler.proto
 
 package handlerpb
 
@@ -133,5 +133,5 @@ var PersonaService_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "internal/grpchandler/proto/handler.proto",
+	Metadata: "handler.proto",
 }

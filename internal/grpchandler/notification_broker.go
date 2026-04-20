@@ -338,12 +338,23 @@ func (b *NotificationBroker) enrichPhases(notif *pb.WorkflowNotification, correl
 	}
 	notif.Phases = make([]*pb.PhaseSummary, len(phases))
 	for i, pt := range phases {
-		notif.Phases[i] = &pb.PhaseSummary{
+		summary := &pb.PhaseSummary{
 			Phase:      pt.Phase,
 			Status:     pt.Status,
 			Iterations: int32(pt.Iterations),
 			DurationMs: pt.Duration.Milliseconds(),
 		}
+		// Surface failure diagnostics on failed phases so gRPC watchers see
+		// the same watchdog-kill telemetry (idle_timeout + stderr tail) the
+		// MCP phase_timeline tool already exposes. Skipping this turns every
+		// idle_timeout into a silent "status: failed" in the agent UI — the
+		// exact gap in the 2026-04-20 gemini feedback-analyzer report.
+		if pt.Status == "failed" {
+			summary.Error = pt.Error
+			summary.FailureKind = pt.FailureKind
+			summary.Stderr = pt.Stderr
+		}
+		notif.Phases[i] = summary
 	}
 }
 

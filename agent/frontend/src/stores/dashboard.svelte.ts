@@ -29,6 +29,12 @@ export interface PhaseEntry {
   started_at?: string
   completed_at?: string
   duration_ms?: number
+  // Populated only when status === "failed". Let the operator diagnose a
+  // silent watchdog kill (idle_timeout) directly from the timeline instead
+  // of clicking through to rick_persona_output.
+  error?: string
+  failure_kind?: string
+  stderr?: string
 }
 
 export interface TokenUsage {

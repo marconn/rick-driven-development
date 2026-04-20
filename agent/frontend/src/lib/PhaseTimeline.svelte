@@ -61,5 +61,17 @@
         {/if}
       </span>
     </div>
+    {#if phase.status === 'failed' && (phase.failure_kind || phase.error || phase.stderr)}
+      <details class="ml-46 text-sm text-red-600">
+        <summary class="cursor-pointer select-none">
+          {phase.failure_kind ?? 'failed'}{phase.error ? ` — ${phase.error.split('\n')[0].slice(0, 160)}` : ''}
+        </summary>
+        {#if phase.stderr}
+          <pre class="mt-1 whitespace-pre-wrap text-xs text-gray-600 bg-gray-50 rounded p-2 max-h-48 overflow-auto">{phase.stderr}</pre>
+        {:else if phase.error}
+          <pre class="mt-1 whitespace-pre-wrap text-xs text-gray-600 bg-gray-50 rounded p-2 max-h-48 overflow-auto">{phase.error}</pre>
+        {/if}
+      </details>
+    {/if}
   {/each}
 </div>
