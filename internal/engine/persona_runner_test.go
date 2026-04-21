@@ -357,6 +357,90 @@ func TestPersonaRunnerDispatchDroppedOnEventDedup(t *testing.T) {
 	}
 }
 
+// TestEmitDispatchDroppedAllReasons directly exercises the emitter across
+// every drop_reason constant so schema/payload breakage is caught regardless
+// of which full-dispatch path actually fires the reason in a given commit.
+// Complements the e2e dedup test above — both layers covered.
+func TestEmitDispatchDroppedAllReasons(t *testing.T) {
+	runner, store, _, _ := newTestPersonaRunner(t)
+	runner.Start(context.Background(), handler.NewRegistry())
+
+	trigger := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation("corr-all").WithSource("test")
+
+	cases := []struct {
+		reason      string
+		missing     []string
+		fingerprint string
+		detail      string
+	}{
+		{dropReasonEventDedup, nil, "", ""},
+		{dropReasonJoinUnsatisfied, []string{"reviewer", "qa"}, "", ""},
+		{dropReasonJoinGateDedup, nil, "fp-123|fp-456", ""},
+		{dropReasonCtxCancelled, nil, "", "context canceled"},
+		{dropReasonStoreError, nil, "", "load correlation chain: i/o timeout"},
+	}
+
+	for _, c := range cases {
+		runner.emitDispatchDropped("documenter", trigger, c.reason, c.missing, c.fingerprint, c.detail)
+	}
+
+	drops, err := store.Load(context.Background(), "corr-all:drops")
+	if err != nil {
+		t.Fatalf("load drops aggregate: %v", err)
+	}
+	if len(drops) != len(cases) {
+		t.Fatalf("want %d DispatchDropped events, got %d", len(cases), len(drops))
+	}
+
+	for i, c := range cases {
+		var p event.DispatchDroppedPayload
+		if err := json.Unmarshal(drops[i].Payload, &p); err != nil {
+			t.Fatalf("case %d (%s): unmarshal: %v", i, c.reason, err)
+		}
+		if p.DropReason != c.reason {
+			t.Errorf("case %d: want drop_reason=%q, got %q", i, c.reason, p.DropReason)
+		}
+		if p.Handler != "documenter" {
+			t.Errorf("case %d: want handler=documenter, got %q", i, p.Handler)
+		}
+		if drops[i].Version != i+1 {
+			t.Errorf("case %d: want version %d, got %d", i, i+1, drops[i].Version)
+		}
+	}
+}
+
+// TestEmitDispatchDroppedUsesBackgroundContext verifies that the helper
+// still persists DispatchDropped events after the runner's context is
+// cancelled. The ctx_cancelled drop reason is exactly the case where
+// operators most need a durable record — if emitDispatchDropped used
+// r.ctx it would silently fail during shutdown diagnostics.
+func TestEmitDispatchDroppedUsesBackgroundContext(t *testing.T) {
+	runner, store, _, _ := newTestPersonaRunner(t)
+	// Deliberately cancel the runner context BEFORE emitting. This mimics
+	// the ctx_cancelled drop path where r.ctx.Err() != nil.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runner.ctx = ctx
+	// runner.cancel is not set since we manually assigned ctx; that's OK for
+	// this test — we just need a cancelled ctx on the receiver.
+
+	trigger := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation("corr-cancelled").WithSource("test")
+
+	runner.emitDispatchDropped("documenter", trigger, dropReasonCtxCancelled, nil, "", "context canceled")
+
+	drops, err := store.Load(context.Background(), "corr-cancelled:drops")
+	if err != nil {
+		t.Fatalf("load drops aggregate: %v", err)
+	}
+	if len(drops) != 1 {
+		t.Fatalf("want 1 DispatchDropped event despite cancelled runner ctx, got %d", len(drops))
+	}
+}
+
 func TestPersonaRunnerEmitsPersonaCompleted(t *testing.T) {
 	runner, _, bus, reg := newTestPersonaRunner(t)
 

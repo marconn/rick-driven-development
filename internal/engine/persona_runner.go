@@ -39,13 +39,14 @@ const (
 	PriorityDefault           = 30
 )
 
-// Dispatch-drop reason taxonomy. Emitted alongside DispatchDropped events and
-// structured Warn logs so operators can grep / count / alert on specific
-// drop paths in production. All four paths used to log at Debug which was
-// effectively invisible under the default rick-server slog.LevelInfo handler;
-// elevating to Warn without a structured reason would have created
-// unfilterable noise on every pr-review fan-out (10 legitimate join-gate
-// dedup drops per consolidator join), hence the taxonomy.
+// Dispatch-drop reason taxonomy. Every drop path emits a DispatchDropped
+// event to the {correlationID}:drops aggregate and a structured log line
+// tagged with drop_reason. Log levels are calibrated: reasons that fire
+// during normal parallel fan-out stay at Debug (join_unsatisfied,
+// join_gate_dedup) so live log tails don't drown in expected chatter,
+// while anomalous reasons (event_dedup, ctx_cancelled, store_error) log
+// at Warn/Error. The DispatchDropped event is always persisted regardless
+// of log level, so post-hoc SQL analysis is unaffected.
 const (
 	// dropReasonEventDedup: the same (handler, event.ID) pair was already
 	// admitted. Expected on retriggers that hit the same event twice.
@@ -616,13 +617,12 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 		if len(afterPersonas) > 0 && env.CorrelationID != "" {
 			satisfied, fingerprint, missing, joinErr := r.resolver.checkJoinCondition(r.ctx, afterPersonas, env.CorrelationID)
 			if joinErr != nil {
-				// Retry once — transient store errors look identical to
-				// legit "not satisfied" without this distinction, and a
-				// silently-dropped store hiccup is indistinguishable from
-				// a true DAG wedge in post-hoc analysis.
-				satisfied, fingerprint, missing, joinErr = r.resolver.checkJoinCondition(r.ctx, afterPersonas, env.CorrelationID)
-			}
-			if joinErr != nil {
+				// Transient store error. Unlatch the idempotency entry so a
+				// subsequent event (e.g., the next PersonaCompleted from a
+				// sibling predecessor) can re-admit this same event ID and
+				// retry naturally. Without the Remove, the dispatch is lost
+				// forever — dedup at step 4 already registered the eventID.
+				r.seen.Remove(h.Name(), string(env.ID))
 				r.logger.Error("persona runner: dispatch dropped",
 					slog.String("drop_reason", dropReasonStoreError),
 					slog.String("handler", h.Name()),
@@ -635,7 +635,11 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 				return nil
 			}
 			if !satisfied {
-				r.logger.Warn("persona runner: dispatch dropped",
+				// join_unsatisfied is expected on parallel fan-out (pr-review's
+				// 11-way consolidator sees up to 10 of these per dispatch before
+				// the final join completes). Debug-level keeps log noise down;
+				// the DispatchDropped event persists for post-hoc queries.
+				r.logger.Debug("persona runner: dispatch dropped",
 					slog.String("drop_reason", dropReasonJoinUnsatisfied),
 					slog.String("handler", h.Name()),
 					slog.String("event_type", string(env.Type)),
@@ -651,7 +655,11 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 			// satisfy the same join, dispatch only once per unique set.
 			if len(afterPersonas) > 1 && env.Type == event.PersonaCompleted {
 				if !r.seen.Add(h.Name()+":join", fingerprint) {
-					r.logger.Warn("persona runner: dispatch dropped",
+					// join_gate_dedup is the expected second-wave noise from
+					// parallel fan-out — N-1 drops per N-way join by design.
+					// Debug keeps log volume sane; the DispatchDropped event
+					// still persists for post-hoc queries.
+					r.logger.Debug("persona runner: dispatch dropped",
 						slog.String("drop_reason", dropReasonJoinGateDedup),
 						slog.String("handler", h.Name()),
 						slog.String("event_type", string(env.Type)),
@@ -1333,6 +1341,12 @@ func (r *PersonaRunner) persistAndPublishResultOnly(handlerName string, env even
 // Never published on the bus: no handler subscribes to DispatchDropped
 // (registered in internalEvents). Best-effort — errors are swallowed since
 // observability must not fail a dispatch.
+//
+// Uses a short-lived background context (NOT r.ctx) so the diagnostic
+// record still persists when the runner is shutting down. The ctx_cancelled
+// drop reason is exactly the case where operators most need a durable
+// record, and using r.ctx here would burn all retries on context errors
+// before landing a single byte.
 func (r *PersonaRunner) emitDispatchDropped(handlerName string, trigger event.Envelope, reason string, missing []string, fingerprint, detail string) {
 	if trigger.CorrelationID == "" {
 		return // no correlation → no diagnostic aggregate to write to
@@ -1354,18 +1368,21 @@ func (r *PersonaRunner) emitDispatchDropped(handlerName string, trigger event.En
 		WithCausation(trigger.ID).
 		WithSource("persona-runner")
 
+	// Short-lived background context so this write survives runner shutdown
+	// and context cancellation — the diagnostic aggregate must record
+	// ctx_cancelled drops even when r.ctx is already done.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
 	aggregateID := trigger.CorrelationID + ":drops"
-	// Append with optimistic concurrency; retry up to 3 times on
-	// ErrConcurrencyConflict. This aggregate is write-mostly by this helper
-	// alone, so conflicts are rare but can happen under parallel fan-out.
 	const maxAttempts = 3
 	for range maxAttempts {
 		currentVersion := 0
-		if existing, err := r.store.Load(r.ctx, aggregateID); err == nil && len(existing) > 0 {
+		if existing, err := r.store.Load(ctx, aggregateID); err == nil && len(existing) > 0 {
 			currentVersion = existing[len(existing)-1].Version
 		}
 		versioned := evt.WithAggregate(aggregateID, currentVersion+1)
-		if err := r.store.Append(r.ctx, aggregateID, currentVersion, []event.Envelope{versioned}); err == nil {
+		if err := r.store.Append(ctx, aggregateID, currentVersion, []event.Envelope{versioned}); err == nil {
 			return
 		}
 	}
