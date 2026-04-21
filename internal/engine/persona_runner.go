@@ -825,7 +825,7 @@ func (r *PersonaRunner) executeDispatch(h handler.Handler, env event.Envelope, c
 
 	// Build PersonaCompleted or PersonaFailed
 	if dispatchErr != nil {
-		failureKind, stderr := classifyDispatchFailure(dispatchCtx, dispatchErr)
+		failureKind, stderr, backendName := classifyDispatchFailure(dispatchCtx, dispatchErr)
 		allEvents = append(allEvents, event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
 			Persona:        h.Name(),
 			TriggerEvent:   string(env.Type),
@@ -833,6 +833,7 @@ func (r *PersonaRunner) executeDispatch(h handler.Handler, env event.Envelope, c
 			Reactive:       true,
 			Error:          dispatchErr.Error(),
 			FailureKind:    failureKind,
+			Backend:        backendName,
 			Stderr:         stderr,
 			DurationMS:     durationMS,
 			ChainDepth:     chainDepth,
@@ -1201,7 +1202,7 @@ func (r *PersonaRunner) executeHint(hinter handler.Hinter, h handler.Handler, en
 
 	var allEvents []event.Envelope
 	if err != nil {
-		failureKind, stderr := classifyDispatchFailure(hintCtx, err)
+		failureKind, stderr, backendName := classifyDispatchFailure(hintCtx, err)
 		allEvents = append(allEvents, event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
 			Persona:        h.Name(),
 			TriggerEvent:   string(env.Type),
@@ -1209,6 +1210,7 @@ func (r *PersonaRunner) executeHint(hinter handler.Hinter, h handler.Handler, en
 			Reactive:       true,
 			Error:          fmt.Sprintf("hint failed: %s", err.Error()),
 			FailureKind:    failureKind,
+			Backend:        backendName,
 			Stderr:         stderr,
 			DurationMS:     durationMS,
 			ChainDepth:     chainDepth,
@@ -1272,7 +1274,7 @@ func (r *PersonaRunner) executeHintApprovedDispatch(handlerName string, env even
 	}
 
 	if dispatchErr != nil {
-		failureKind, stderr := classifyDispatchFailure(dispatchCtx, dispatchErr)
+		failureKind, stderr, backendName := classifyDispatchFailure(dispatchCtx, dispatchErr)
 		allEvents = append(allEvents, event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
 			Persona:        handlerName,
 			TriggerEvent:   string(env.Type),
@@ -1280,6 +1282,7 @@ func (r *PersonaRunner) executeHintApprovedDispatch(handlerName string, env even
 			Reactive:       true,
 			Error:          dispatchErr.Error(),
 			FailureKind:    failureKind,
+			Backend:        backendName,
 			Stderr:         stderr,
 			DurationMS:     durationMS,
 			ChainDepth:     chainDepth,

@@ -250,6 +250,9 @@ func (s *Server) toolSearchWorkflows(ctx context.Context, raw json.RawMessage) (
 				Source:      ws.Source,
 				Ticket:      ws.Ticket,
 				FailReason:  ws.FailReason,
+				FailPhase:   ws.FailPhase,
+				FailureKind: ws.FailureKind,
+				FailBackend: ws.FailBackend,
 			}
 			if !ws.StartedAt.IsZero() {
 				summary.StartedAt = ws.StartedAt.UTC().Format("2006-01-02T15:04:05Z")

@@ -448,6 +448,80 @@ func TestToolWorkflowStatus(t *testing.T) {
 	}
 }
 
+// TestToolWorkflowStatus_SurfacesFailureDetail locks the 2026-04-20
+// docs-only silent-stall fix: when a workflow ends in status=="failed",
+// rick_workflow_status must return a structured failure block carrying
+// FailureKind, Backend, and Stderr — not just status:"failed" with no
+// cause visible. The operator in the report had to grep the raw event
+// stream to see what went wrong; this test guarantees the actionable
+// signal is now one MCP call away.
+func TestToolWorkflowStatus_SurfacesFailureDetail(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+
+	aggregateID := "wf-failure-detail"
+	ctx := context.Background()
+
+	reqEvt := event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+		Prompt: "docs-only task", WorkflowID: "workspace-dev", Source: "test",
+	})).WithAggregate(aggregateID, 1).WithCorrelation(aggregateID).WithSource("test")
+	startEvt := event.New(event.WorkflowStartedFor("workspace-dev"), 1,
+		event.MustMarshal(event.WorkflowStartedPayload{WorkflowID: "workspace-dev"})).
+		WithAggregate(aggregateID, 2).WithCorrelation(aggregateID).WithSource("engine")
+	// WorkflowFailed with the new diagnostic fields populated.
+	failEvt := event.New(event.WorkflowFailed, 1, event.MustMarshal(event.WorkflowFailedPayload{
+		Reason:      "persona developer failed: handler developer: backend: claude: backend: idle timeout exceeded (stall=2m0s)",
+		Phase:       "developer",
+		FailureKind: event.FailureKindIdleTimeout,
+		Backend:     "claude",
+		Stderr:      "YOLO mode is enabled. All tool calls will be automatically approved.",
+	})).WithAggregate(aggregateID, 3).WithCorrelation(aggregateID).WithSource("engine:aggregate")
+
+	if err := deps.Store.Append(ctx, aggregateID, 0, []event.Envelope{reqEvt, startEvt, failEvt}); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
+		Name:      "rick_workflow_status",
+		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s"}`, aggregateID)),
+	}))
+
+	resp := parseResponse(t, lines[0])
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	_ = json.Unmarshal(data, &result)
+	if result.IsError {
+		t.Fatalf("tool error: %s", result.Content[0].Text)
+	}
+
+	var status workflowStatusResult
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "failed" {
+		t.Fatalf("status = %q; want failed", status.Status)
+	}
+	if status.Failure == nil {
+		t.Fatal("Failure block missing — rick_workflow_status must surface failure detail so operators don't have to grep raw events")
+	}
+	if status.Failure.FailureKind != "idle_timeout" {
+		t.Errorf("Failure.FailureKind = %q; want idle_timeout", status.Failure.FailureKind)
+	}
+	if status.Failure.Backend != "claude" {
+		t.Errorf("Failure.Backend = %q; want claude", status.Failure.Backend)
+	}
+	if status.Failure.Phase != "developer" {
+		t.Errorf("Failure.Phase = %q; want developer", status.Failure.Phase)
+	}
+	if status.Failure.Stderr == "" {
+		t.Error("Failure.Stderr empty — the captured tail must reach the MCP caller")
+	}
+	if status.Failure.Reason == "" {
+		t.Error("Failure.Reason empty — human-readable summary must be present")
+	}
+}
+
 func TestToolWorkflowStatusNotFound(t *testing.T) {
 	deps, cleanup := testDeps(t)
 	defer cleanup()

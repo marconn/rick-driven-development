@@ -62,6 +62,13 @@ const (
 	// aggregate replay without re-querying persona-scoped aggregates.
 	// Never published to the bus — use PersonaCompleted for bus dispatch.
 	PersonaTracked Type = "persona.tracked"
+	// PersonaFailedTracked is the storage-only mirror of PersonaFailed on the
+	// workflow aggregate. It gives operators a workflow-scoped breadcrumb of
+	// which persona failed (and why) alongside PersonaTracked successes —
+	// `rick events <workflow_agg>` previously showed a silent gap between the
+	// last tracked completion and WorkflowRetried / WorkflowFailed. Never
+	// published to the bus; carries the same payload shape as PersonaFailed.
+	PersonaFailedTracked Type = "persona.failed.tracked"
 
 	// Compensation
 	CompensationStarted   Type = "compensation.started"

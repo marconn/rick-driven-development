@@ -52,11 +52,19 @@ func (r *RoundRobin) Name() string { return r.name }
 // different backends, three different sets of issues, developer never
 // converges" failure mode seen in production.
 func (r *RoundRobin) Run(ctx context.Context, req Request) (*Response, error) {
+	n := len(r.backends)
 	var idx int
 	if key := stickyKey(ctx); key != "" {
-		idx = stickyIndex(key, len(r.backends))
+		idx = stickyIndex(key, n)
+		// Auto-retry path: the AIHandler passes a non-zero rotation offset
+		// so the retry lands on a different slot deterministically instead
+		// of re-hashing a modified key (which has a 1/n chance of colliding
+		// back to the same slot when n is small).
+		if off := rotateOffset(ctx); off > 0 {
+			idx = (idx + off) % n
+		}
 	} else {
-		idx = int((r.counter.Add(1) - 1) % uint64(len(r.backends)))
+		idx = int((r.counter.Add(1) - 1) % uint64(n))
 	}
 	return r.backends[idx].Run(ctx, req)
 }

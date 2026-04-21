@@ -98,7 +98,7 @@ func (h *AIHandler) Subscribes() []event.Type { return nil }
 // 6. Returning AIResponseReceived (or a bundle including request/started events
 //    when no Bus is wired)
 func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Envelope, error) {
-	pctx, err := h.buildPromptContext(ctx, env)
+	pctx, autoRetryAttempt, err := h.buildPromptContext(ctx, env)
 	if err != nil {
 		return nil, fmt.Errorf("handler %s: build context: %w", h.name, err)
 	}
@@ -156,8 +156,21 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 	// all iterations of a feedback loop so the developer isn't chasing
 	// three different backends' opinions on three different runs.
 	// Harmless for non-rotating backends — the key is simply ignored.
+	//
+	// Auto-retry rotation: when the engine has fired
+	// WorkflowRetried{FromPhase==h.name, Automatic==true} earlier in this
+	// correlation, the retry attempt count is passed as a deterministic
+	// rotation offset so RoundRobin picks a strictly different inner
+	// backend for the retry. We use WithRotateOffset rather than baking the
+	// attempt into the key because FNV % n with n=3 has a 1/3 collision
+	// probability — an operator on their last auto-retry budget can't
+	// afford to land back on the CLI that just silently stalled. Offset of
+	// N shifts to slot (base+N) mod n, guaranteeing a different slot for
+	// N ∈ [1, n-1]. Single-backend deployments are unaffected (n=1 absorbs
+	// any offset).
 	if env.CorrelationID != "" {
 		backendCtx = backend.WithStickyKey(backendCtx, env.CorrelationID+":"+h.persona)
+		backendCtx = backend.WithRotateOffset(backendCtx, autoRetryAttempt)
 	}
 
 	// AIRequestStarted: marks the exact moment before backend.Run is invoked
@@ -251,20 +264,25 @@ func (h *AIHandler) persistRequestEvent(ctx context.Context, env event.Envelope,
 
 // buildPromptContext loads workflow state from the event store and constructs
 // a PromptContext for prompt building. It reads the correlation chain to find
-// previous phase outputs and any feedback for the current phase.
-func (h *AIHandler) buildPromptContext(ctx context.Context, env event.Envelope) (persona.PromptContext, error) {
+// previous phase outputs and any feedback for the current phase. The second
+// return value is the number of automatic WorkflowRetried events that have
+// already targeted this handler earlier in the correlation — callers fold it
+// into the backend sticky key so RoundRobin rotations pick a fresh CLI on
+// retry instead of re-running the same one that just silently stalled.
+func (h *AIHandler) buildPromptContext(ctx context.Context, env event.Envelope) (persona.PromptContext, int, error) {
 	if env.CorrelationID == "" {
-		return persona.PromptContext{}, nil
+		return persona.PromptContext{}, 0, nil
 	}
 
 	events, err := h.store.LoadByCorrelation(ctx, env.CorrelationID)
 	if err != nil {
-		return persona.PromptContext{}, fmt.Errorf("load correlation chain: %w", err)
+		return persona.PromptContext{}, 0, fmt.Errorf("load correlation chain: %w", err)
 	}
 
 	pctx := persona.PromptContext{
 		Outputs: make(map[string]string),
 	}
+	autoRetryAttempt := 0
 
 	for _, e := range events {
 		switch e.Type {
@@ -334,10 +352,18 @@ func (h *AIHandler) buildPromptContext(ctx context.Context, env event.Envelope) 
 					pctx.Feedback += "## Operator Guidance\n" + p.Content
 				}
 			}
+
+		case event.WorkflowRetried:
+			var p event.WorkflowRetriedPayload
+			if err := json.Unmarshal(e.Payload, &p); err == nil {
+				if p.Automatic && p.FromPhase == h.name {
+					autoRetryAttempt++
+				}
+			}
 		}
 	}
 
-	return pctx, nil
+	return pctx, autoRetryAttempt, nil
 }
 
 // marshalOutput converts LLM text output to JSON for AIResponsePayload.Output.

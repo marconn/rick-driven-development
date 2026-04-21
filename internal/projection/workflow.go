@@ -93,6 +93,10 @@ func (p *WorkflowStatusProjection) Handle(_ context.Context, env event.Envelope)
 		ws.Status = "failed"
 		ws.CompletedAt = env.Timestamp
 		ws.FailReason = payload.Reason
+		ws.FailPhase = payload.Phase
+		ws.FailureKind = string(payload.FailureKind)
+		ws.FailBackend = payload.Backend
+		ws.FailStderr = payload.Stderr
 
 	case env.Type == event.WorkflowCancelled:
 		ws.Status = "cancelled"

@@ -651,6 +651,21 @@ type workflowStatusResult struct {
 	FeedbackCount     map[string]int       `json:"feedback_count"`
 	PendingHints      []pendingHintSummary `json:"pending_hints,omitempty"`
 	RunningPhases     []runningPhaseSummary `json:"running_phases,omitempty"`
+	Failure           *workflowFailureDetail `json:"failure,omitempty"`
+}
+
+// workflowFailureDetail surfaces the cause of a WorkflowFailed event directly
+// on the rick_workflow_status response, so operators do not have to replay
+// the event chain to figure out why a workflow failed. FailureKind / Backend
+// are the machine-readable classifiers that should drive operator runbooks;
+// Reason / Stderr are human-readable context. Only populated when status ==
+// "failed".
+type workflowFailureDetail struct {
+	Reason      string `json:"reason"`
+	Phase       string `json:"phase,omitempty"`
+	FailureKind string `json:"failure_kind,omitempty"`
+	Backend     string `json:"backend,omitempty"`
+	Stderr      string `json:"stderr,omitempty"`
 }
 
 func (s *Server) toolWorkflowStatus(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -702,7 +717,63 @@ func (s *Server) toolWorkflowStatus(ctx context.Context, raw json.RawMessage) (a
 		}
 	}
 
+	// Surface the failure payload directly on the status response so operators
+	// do not need a separate `rick events` pass to see why a workflow failed.
+	// Prefer the projection (fastest, already indexed) and fall back to
+	// scanning the aggregate's events so new failures surface even if the
+	// projection is cold.
+	if agg.Status == engine.StatusFailed {
+		result.Failure = s.loadWorkflowFailure(args.WorkflowID, events)
+	}
+
 	return result, nil
+}
+
+// loadWorkflowFailure resolves a structured failure descriptor for a failed
+// workflow. Preference order: the WorkflowStatus projection (O(1), updated by
+// the live subscription), then the latest WorkflowFailed envelope in the
+// workflow aggregate's event slice (deterministic fallback on projection
+// restart). Returns nil if neither source carries a reason — e.g., an event
+// written before WorkflowFailedPayload gained FailureKind / Backend / Stderr
+// and whose Reason was never set.
+func (s *Server) loadWorkflowFailure(workflowID string, events []event.Envelope) *workflowFailureDetail {
+	if s.deps.Workflows != nil {
+		if ws, ok := s.deps.Workflows.Get(workflowID); ok && ws.Status == "failed" {
+			if ws.FailReason != "" || ws.FailureKind != "" || ws.FailBackend != "" {
+				return &workflowFailureDetail{
+					Reason:      ws.FailReason,
+					Phase:       ws.FailPhase,
+					FailureKind: ws.FailureKind,
+					Backend:     ws.FailBackend,
+					Stderr:      ws.FailStderr,
+				}
+			}
+		}
+	}
+	// Fallback: scan for the latest WorkflowFailed envelope. The aggregate
+	// only keeps one terminal transition, but the slice may carry more than
+	// one if a superseded failure was overwritten by a retry that itself
+	// failed — take the newest for the true cause.
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != event.WorkflowFailed {
+			continue
+		}
+		var p event.WorkflowFailedPayload
+		if err := json.Unmarshal(events[i].Payload, &p); err != nil {
+			continue
+		}
+		if p.Reason == "" && p.FailureKind == "" {
+			continue
+		}
+		return &workflowFailureDetail{
+			Reason:      p.Reason,
+			Phase:       p.Phase,
+			FailureKind: string(p.FailureKind),
+			Backend:     p.Backend,
+			Stderr:      p.Stderr,
+		}
+	}
+	return nil
 }
 
 type listWorkflowsResult struct {
@@ -725,6 +796,9 @@ type workflowSummary struct {
 	Source            string `json:"source,omitempty"`
 	Ticket            string `json:"ticket,omitempty"`
 	FailReason        string `json:"fail_reason,omitempty"`
+	FailPhase         string `json:"fail_phase,omitempty"`
+	FailureKind       string `json:"failure_kind,omitempty"`
+	FailBackend       string `json:"fail_backend,omitempty"`
 	StartedAt         string `json:"started_at,omitempty"`
 	CompletedAt       string `json:"completed_at,omitempty"`
 	PendingHintsCount int    `json:"pending_hints_count,omitempty"`
@@ -807,6 +881,9 @@ func (s *Server) toolListWorkflows(_ context.Context, _ json.RawMessage) (any, e
 			Source:            ws.Source,
 			Ticket:            ws.Ticket,
 			FailReason:        ws.FailReason,
+			FailPhase:         ws.FailPhase,
+			FailureKind:       ws.FailureKind,
+			FailBackend:       ws.FailBackend,
 			PendingHintsCount: ws.PendingHintsCount,
 		}
 		if !ws.StartedAt.IsZero() {

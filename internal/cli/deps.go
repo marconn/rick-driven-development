@@ -79,6 +79,40 @@ func newReviewBackend(logger *slog.Logger, recorder backend.Recorder) backend.Ba
 	return fallback
 }
 
+// newDeveloperBackend returns the backend used by the developer phase (and
+// any other single-backend AI handler). When RICK_DEVELOPER_BACKENDS is set
+// and yields ≥2 valid names, it builds a RoundRobin that — combined with
+// AIHandler's retry-aware sticky key — lands on a different inner CLI each
+// time the engine auto-retries after an idle_timeout. When the env var is
+// unset, empty, or yields a single name, the primary backend (from
+// --backend) is returned unchanged so default single-backend deployments
+// see no behavior change.
+//
+// Parse errors log and fall back to the primary: rotation is a bug-fix
+// upgrade, not a hard dependency. Operators already running on one CLI
+// should never fail to boot because of a typo in the rotation list.
+func newDeveloperBackend(primary backend.Backend, logger *slog.Logger, recorder backend.Recorder) backend.Backend {
+	raw := os.Getenv("RICK_DEVELOPER_BACKENDS")
+	names := backend.ParseReviewBackendsEnv(raw) // reused — same comma-split semantics
+	if len(names) == 0 {
+		return primary
+	}
+	be, err := backend.NewReviewBackendWithRecorder(names, recorder)
+	if err != nil {
+		logger.Warn("RICK_DEVELOPER_BACKENDS invalid, falling back to primary backend",
+			slog.String("value", raw),
+			slog.String("primary", primary.Name()),
+			slog.Any("error", err),
+		)
+		return primary
+	}
+	logger.Info("developer backend rotation enabled",
+		slog.String("name", be.Name()),
+		slog.String("primary", primary.Name()),
+	)
+	return be
+}
+
 // openEstimationStore opens the estimation SQLite DB.
 // Returns nil (non-fatal) when the DB path is unavailable.
 func openEstimationStore(logger *slog.Logger) *estimation.Store {

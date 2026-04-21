@@ -48,9 +48,20 @@ type WorkflowCompletedPayload struct {
 }
 
 // WorkflowFailedPayload is emitted when a workflow fails.
+//
+// FailureKind, Backend, and Stderr are populated when the failure originated
+// from a PersonaFailed event. They let `rick_workflow_status` return an
+// actionable signal (idle_timeout / wall_timeout / handler_error / ...) and
+// the subprocess stderr tail without forcing operators to replay the raw
+// event chain. All three fields are optional for back-compat with events
+// written before they existed (aggregate-level failures like
+// TokenBudgetExceeded or hint rejections leave them empty).
 type WorkflowFailedPayload struct {
-	Reason string `json:"reason"`
-	Phase  string `json:"phase,omitempty"` // which phase caused failure
+	Reason      string      `json:"reason"`
+	Phase       string      `json:"phase,omitempty"` // which phase caused failure
+	FailureKind FailureKind `json:"failure_kind,omitempty"`
+	Backend     string      `json:"backend,omitempty"`
+	Stderr      string      `json:"stderr,omitempty"`
 }
 
 // WorkflowCancelledPayload is emitted when an operator cancels a workflow.
@@ -243,6 +254,11 @@ type PersonaFailedPayload struct {
 	Reactive       bool        `json:"reactive"`
 	Error          string      `json:"error"`
 	FailureKind    FailureKind `json:"failure_kind,omitempty"`
+	// Backend names the driver that produced the failure when the error came
+	// from a BackendError (claude, gemini, codex, or a round-robin composite
+	// name like "round-robin(claude,gemini,codex)"). Empty when the failure
+	// originated outside a backend call (handler-local error, context cancel).
+	Backend        string      `json:"backend,omitempty"`
 	Stderr         string      `json:"stderr,omitempty"`
 	DurationMS     int64       `json:"duration_ms"`
 	ChainDepth     int         `json:"chain_depth"`

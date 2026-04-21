@@ -124,6 +124,13 @@ func (r *Runner) Position() int64 {
 }
 
 // WorkflowStatus represents the current state of a workflow.
+//
+// FailReason is the human-readable failure summary. FailureKind, FailBackend,
+// and FailStderr are populated when the terminal WorkflowFailed event carried
+// a persona-originated failure — they let MCP status callers see
+// "idle_timeout on claude" without replaying the event chain. Empty on
+// aggregate-level failures (TokenBudgetExceeded, hint rejections) where the
+// fields are not meaningful.
 type WorkflowStatus struct {
 	AggregateID      string
 	WorkflowID       string
@@ -135,6 +142,10 @@ type WorkflowStatus struct {
 	StartedAt        time.Time
 	CompletedAt      time.Time
 	FailReason       string
+	FailureKind      string
+	FailBackend      string
+	FailStderr       string
+	FailPhase        string
 	PendingHintsCount int // count of HintEmitted without matching HintApproved/HintRejected
 }
 

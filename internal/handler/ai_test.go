@@ -25,12 +25,20 @@ type mockBackend struct {
 	response *backend.Response
 	err      error
 	lastReq  backend.Request
+	// lastStickyKey + lastRotateOffset capture the backend-context routing
+	// hints AIHandler plants before calling Run. Tests assert these so the
+	// auto-retry rotation contract (different key/offset on retry) is
+	// covered end-to-end, not just at the attempt-counter layer.
+	lastStickyKey    string
+	lastRotateOffset int
 }
 
 func (m *mockBackend) Name() string { return m.name }
 
-func (m *mockBackend) Run(_ context.Context, req backend.Request) (*backend.Response, error) {
+func (m *mockBackend) Run(ctx context.Context, req backend.Request) (*backend.Response, error) {
 	m.lastReq = req
+	m.lastStickyKey = backend.StickyKeyFromContext(ctx)
+	m.lastRotateOffset = backend.RotateOffsetFromContext(ctx)
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -637,7 +645,7 @@ func TestBuildPromptContextWorkspaceReady(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	pctx, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
+	pctx, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
 	}
@@ -678,7 +686,7 @@ func TestBuildPromptContextCodebase(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	pctx, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
+	pctx, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
 	}
@@ -714,7 +722,7 @@ func TestBuildPromptContextSchema(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	pctx, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
+	pctx, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
 	}
@@ -750,7 +758,7 @@ func TestBuildPromptContextGit(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	pctx, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
+	pctx, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
 	}
@@ -797,7 +805,7 @@ func TestBuildPromptContextEnrichment(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	pctx, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
+	pctx, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
 	}
@@ -843,7 +851,7 @@ func TestBuildPromptContextOperatorGuidanceMatching(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	pctx, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
+	pctx, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
 	}
@@ -857,6 +865,145 @@ func TestBuildPromptContextOperatorGuidanceMatching(t *testing.T) {
 	// Should NOT have the review-targeted guidance.
 	if strings.Contains(pctx.Feedback, "Ignore this for developer") {
 		t.Errorf("Feedback should NOT contain review-targeted guidance, got: %q", pctx.Feedback)
+	}
+}
+
+// TestBuildPromptContextAutoRetryAttempt verifies that buildPromptContext
+// counts automatic WorkflowRetried events targeting this handler so the
+// caller can fold it into the backend sticky key and flip RoundRobin
+// selection on retry. Operator-initiated retries (Automatic=false) and
+// retries targeting other handlers are both ignored.
+func TestBuildPromptContextAutoRetryAttempt(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-auto-retry"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "implement",
+		})).WithCorrelation(corrID),
+		// First silent stall → engine emits automatic retry for developer.
+		event.New(event.WorkflowRetried, 1, event.MustMarshal(event.WorkflowRetriedPayload{
+			FromPhase: "developer",
+			Automatic: true,
+		})).WithCorrelation(corrID),
+		// Operator-initiated retry for reviewer — must NOT count.
+		event.New(event.WorkflowRetried, 1, event.MustMarshal(event.WorkflowRetriedPayload{
+			FromPhase: "reviewer",
+			Automatic: false,
+		})).WithCorrelation(corrID),
+		// Automatic retry for reviewer — different persona, must NOT count.
+		event.New(event.WorkflowRetried, 1, event.MustMarshal(event.WorkflowRetriedPayload{
+			FromPhase: "reviewer",
+			Automatic: true,
+		})).WithCorrelation(corrID),
+		// Second automatic retry for developer — counted.
+		event.New(event.WorkflowRetried, 1, event.MustMarshal(event.WorkflowRetriedPayload{
+			FromPhase: "developer",
+			Automatic: true,
+		})).WithCorrelation(corrID),
+	}
+
+	h := NewAIHandler(AIHandlerConfig{
+		Name:     "developer",
+		Phase:    "develop",
+		Persona:  persona.Developer,
+		Backend:  &mockBackend{name: "claude", response: &backend.Response{Output: "ok"}},
+		Store:    store,
+		Personas: persona.DefaultRegistry(),
+		Builder:  persona.NewPromptBuilder(),
+	})
+
+	_, attempt, err := h.buildPromptContext(context.Background(),
+		event.New(event.WorkflowRetried, 1, nil).WithCorrelation(corrID))
+	if err != nil {
+		t.Fatalf("buildPromptContext: %v", err)
+	}
+	if attempt != 2 {
+		t.Errorf("autoRetryAttempt = %d; want 2 (only Automatic=true + FromPhase=developer count)", attempt)
+	}
+}
+
+// TestAIHandler_AutoRetryFlipsBackendStickyOffset is the end-to-end
+// regression guard for the 2026-04-20 docs-only silent-stall auto-retry
+// rotation fix. The attempt-counter alone is not load-bearing — what
+// matters is the backend context the handler plants before Run. A
+// future change that removes WithRotateOffset (or folds the counter
+// into the key via FNV re-hash, which can collide with 1/n probability)
+// would regress into the original bug without failing any of the
+// pure-counter tests. This test proves the key is stable AND the offset
+// tracks the retry attempt.
+func TestAIHandler_AutoRetryFlipsBackendStickyOffset(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-flip"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "ship",
+		})).WithCorrelation(corrID),
+	}
+
+	mb := &mockBackend{name: "claude", response: &backend.Response{Output: "ok"}}
+	h := NewAIHandler(AIHandlerConfig{
+		Name:     "developer",
+		Phase:    "develop",
+		Persona:  persona.Developer,
+		Backend:  mb,
+		Store:    store,
+		Personas: persona.DefaultRegistry(),
+		Builder:  persona.NewPromptBuilder(),
+	})
+
+	// Attempt 0: no WorkflowRetried yet.
+	_, err := h.Handle(context.Background(), event.New(event.PersonaCompleted, 1, nil).
+		WithCorrelation(corrID))
+	if err != nil {
+		t.Fatalf("first Handle: %v", err)
+	}
+	wantKey := corrID + ":" + persona.Developer
+	if mb.lastStickyKey != wantKey {
+		t.Errorf("first call sticky key = %q; want %q (must pin per-persona without attempt suffix)",
+			mb.lastStickyKey, wantKey)
+	}
+	if mb.lastRotateOffset != 0 {
+		t.Errorf("first call rotate offset = %d; want 0 (no auto-retry recorded)", mb.lastRotateOffset)
+	}
+
+	// Record an automatic retry for the developer persona; attempt 1 should
+	// now apply offset=1 while keeping the same sticky key.
+	store.correlationEvents[corrID] = append(store.correlationEvents[corrID],
+		event.New(event.WorkflowRetried, 1, event.MustMarshal(event.WorkflowRetriedPayload{
+			FromPhase: "developer",
+			Automatic: true,
+		})).WithCorrelation(corrID),
+	)
+
+	_, err = h.Handle(context.Background(), event.New(event.PersonaCompleted, 1, nil).
+		WithCorrelation(corrID))
+	if err != nil {
+		t.Fatalf("retry Handle: %v", err)
+	}
+	if mb.lastStickyKey != wantKey {
+		t.Errorf("retry sticky key = %q; want %q (key must be stable — rotation is via offset, not key suffix)",
+			mb.lastStickyKey, wantKey)
+	}
+	if mb.lastRotateOffset != 1 {
+		t.Errorf("retry rotate offset = %d; want 1 (auto-retry attempt must flip RoundRobin slot deterministically)",
+			mb.lastRotateOffset)
+	}
+
+	// Operator-initiated retry must NOT bump the offset.
+	store.correlationEvents[corrID] = append(store.correlationEvents[corrID],
+		event.New(event.WorkflowRetried, 1, event.MustMarshal(event.WorkflowRetriedPayload{
+			FromPhase: "developer",
+			Automatic: false, // operator-initiated
+		})).WithCorrelation(corrID),
+	)
+	_, err = h.Handle(context.Background(), event.New(event.PersonaCompleted, 1, nil).
+		WithCorrelation(corrID))
+	if err != nil {
+		t.Fatalf("operator-retry Handle: %v", err)
+	}
+	if mb.lastRotateOffset != 1 {
+		t.Errorf("operator retry rotate offset = %d; want 1 (only Automatic=true retries bump the offset)",
+			mb.lastRotateOffset)
 	}
 }
 

@@ -405,6 +405,42 @@ func (e *Engine) tryProcessDecision(ctx context.Context, aggID string, env event
 		}
 	}
 
+	// Mirror PersonaFailed onto the workflow aggregate as PersonaFailedTracked
+	// so `rick events <workflow_agg>` shows the failure breadcrumb alongside
+	// the PersonaTracked successes. Without this, operators inspecting the
+	// workflow aggregate (the default view in MCP / agent UI) see the last
+	// PersonaTracked and then a bare WorkflowRetried or WorkflowFailed — the
+	// failure payload lives on the persona-scoped aggregate and is invisible
+	// to the workflow-scoped view.
+	//
+	// Gating: only mirror when the persona is required AND the workflow is
+	// still Running. Non-required hook/enricher failures are consciously
+	// ignored by decidePersonaFailed (returning nil, nil) and writing a
+	// mirror anyway would imply a required-persona failure where none
+	// occurred. Similarly, a PersonaFailed arriving for a cancelled / paused
+	// workflow is a dangling side-effect from a pre-terminal dispatch —
+	// mirroring it would re-open the event trail on a workflow the operator
+	// already signed off on.
+	//
+	// Storage-only; not published to the bus, since PersonaRunner already
+	// published PersonaFailed for dispatch consumers. Applying the envelope
+	// in-memory keeps the aggregate Version monotonic so the subsequent
+	// Decide() call numbers its output events consistently (same pattern as
+	// PersonaTracked above).
+	if env.Type == event.PersonaFailed && aggID != env.AggregateID {
+		var failPayload event.PersonaFailedPayload
+		decodeErr := json.Unmarshal(env.Payload, &failPayload)
+		if decodeErr == nil && agg.Status == StatusRunning && agg.isRequiredPersona(failPayload.Persona) {
+			mirror := event.New(event.PersonaFailedTracked, 1, env.Payload).
+				WithAggregate(agg.ID, agg.Version+1).
+				WithCausation(env.ID).
+				WithCorrelation(env.CorrelationID).
+				WithSource("engine:tracking")
+			allEvents = append(allEvents, mirror)
+			agg.Apply(mirror)
+		}
+	}
+
 	newEvents, err := agg.Decide(env)
 	if err != nil {
 		return nil, fmt.Errorf("engine: decide: %w", err)

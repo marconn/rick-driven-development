@@ -93,6 +93,13 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 		return err
 	}
 
+	// Developer-phase handler uses a single backend by default. When
+	// RICK_DEVELOPER_BACKENDS is set with ≥2 names, wrap into a RoundRobin
+	// so the auto-retry path (AIHandler sticky key includes attempt index)
+	// lands on a different CLI when the first one silently stalls. Single-
+	// backend deployments see no change.
+	be = newDeveloperBackend(be, logger, saturation)
+
 	// Review-phase handlers use a configurable rotation (default: claude,
 	// gemini, codex). Override via RICK_REVIEW_BACKENDS=a,b,c.
 	reviewBe := newReviewBackend(logger, saturation)

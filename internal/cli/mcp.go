@@ -76,6 +76,11 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 		return err
 	}
 
+	// Developer-phase handler opts into RoundRobin rotation via
+	// RICK_DEVELOPER_BACKENDS. Single-backend deployments keep their current
+	// behavior.
+	be = newDeveloperBackend(be, logger, saturation)
+
 	// Review-phase handlers use a configurable rotation (default: claude,
 	// gemini, codex). Override via RICK_REVIEW_BACKENDS=a,b,c.
 	reviewBe := newReviewBackend(logger, saturation)

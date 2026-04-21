@@ -49,6 +49,90 @@ func TestRoundRobinRotation(t *testing.T) {
 	}
 }
 
+// TestRoundRobinRotateOffset_FlipsDeterministically locks the auto-retry
+// rotation contract: when a sticky key + rotation offset are both present,
+// Run lands on slot (base + offset) mod n. With n=3, offsets 1 and 2 each
+// guarantee a different slot than offset 0 — which is the whole point of
+// WithRotateOffset over re-hashing a modified key (FNV hash collision on
+// n=3 is 1/3).
+func TestRoundRobinRotateOffset_FlipsDeterministically(t *testing.T) {
+	a := &stubBackend{name: "a"}
+	b := &stubBackend{name: "b"}
+	c := &stubBackend{name: "c"}
+
+	rr, err := NewRoundRobin(a, b, c)
+	if err != nil {
+		t.Fatalf("NewRoundRobin: %v", err)
+	}
+
+	key := "corr-1:developer"
+	base := stickyIndex(key, 3)
+
+	baseCtx := WithStickyKey(context.Background(), key)
+	if _, err := rr.Run(baseCtx, Request{}); err != nil {
+		t.Fatalf("base: %v", err)
+	}
+
+	retry1Ctx := WithRotateOffset(baseCtx, 1)
+	if _, err := rr.Run(retry1Ctx, Request{}); err != nil {
+		t.Fatalf("retry1: %v", err)
+	}
+
+	retry2Ctx := WithRotateOffset(baseCtx, 2)
+	if _, err := rr.Run(retry2Ctx, Request{}); err != nil {
+		t.Fatalf("retry2: %v", err)
+	}
+
+	// Verify that the three calls landed on three distinct backends.
+	backends := []*stubBackend{a, b, c}
+	hit := []int{-1, -1, -1}
+	for i, be := range backends {
+		if be.calls > 0 {
+			// Figure out in which order this backend was hit (1/2/3 rounds).
+			for round, stub := range backends {
+				_ = stub
+				if round < 3 && i == (base+round)%3 {
+					hit[round] = i
+				}
+			}
+		}
+	}
+	if hit[0] == -1 || hit[1] == -1 || hit[2] == -1 {
+		t.Fatalf("rotation did not hit all three slots: base=%d a=%d b=%d c=%d",
+			base, a.calls, b.calls, c.calls)
+	}
+	if hit[0] == hit[1] || hit[1] == hit[2] || hit[0] == hit[2] {
+		t.Fatalf("rotation collided: hit=%v (WithRotateOffset must guarantee distinct slots for offset 1..n-1)", hit)
+	}
+}
+
+// TestRoundRobinRotateOffset_ZeroIsNoOp guards against the retry helper
+// accidentally rotating a first-attempt (attempt=0) call. AIHandler calls
+// WithRotateOffset unconditionally with the auto-retry counter; zero must
+// not shift the slot.
+func TestRoundRobinRotateOffset_ZeroIsNoOp(t *testing.T) {
+	a := &stubBackend{name: "a"}
+	b := &stubBackend{name: "b"}
+
+	rr, err := NewRoundRobin(a, b)
+	if err != nil {
+		t.Fatalf("NewRoundRobin: %v", err)
+	}
+
+	key := "corr-1:developer"
+	base := stickyIndex(key, 2)
+	want := []*stubBackend{a, b}[base]
+
+	ctx := WithRotateOffset(WithStickyKey(context.Background(), key), 0)
+	if _, err := rr.Run(ctx, Request{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if want.calls != 1 {
+		t.Errorf("base slot %d (%s) not hit: a=%d b=%d — offset=0 must be a no-op",
+			base, want.Name(), a.calls, b.calls)
+	}
+}
+
 func TestRoundRobinName(t *testing.T) {
 	rr, err := NewRoundRobin(&stubBackend{name: "a"}, &stubBackend{name: "b"})
 	if err != nil {

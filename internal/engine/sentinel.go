@@ -22,6 +22,7 @@ var internalEvents = map[event.Type]bool{
 	event.WorkflowRerouted:      true,
 	event.PersonaCompleted:      true,
 	event.PersonaFailed:         true,
+	event.PersonaFailedTracked:  true,
 	event.VerdictRendered:       true,
 	event.FeedbackGenerated:     true,
 	event.FeedbackConsumed:      true,

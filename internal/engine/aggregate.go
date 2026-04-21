@@ -285,9 +285,20 @@ func (w *WorkflowAggregate) decidePersonaFailed(env event.Envelope) ([]event.Env
 		return []event.Envelope{retry}, nil
 	}
 
+	// Surface FailureKind / Backend / Stderr from the PersonaFailed payload so
+	// operators can tell idle_timeout from handler_error (and attribute to a
+	// specific CLI) directly from rick_workflow_status / the WorkflowFailed
+	// event — without replaying the persona-scoped aggregate. Prior to this,
+	// WorkflowFailed carried only a reason string shaped like
+	// "persona developer failed: handler developer: backend: claude: backend:
+	// idle timeout exceeded (stall=2m0s) (after 2m0s)" — readable but not
+	// machine-parsable, and the stderr tail was lost entirely.
 	payload := event.MustMarshal(event.WorkflowFailedPayload{
-		Reason: fmt.Sprintf("persona %s failed: %s", p.Persona, p.Error),
-		Phase:  p.Persona,
+		Reason:      fmt.Sprintf("persona %s failed: %s", p.Persona, p.Error),
+		Phase:       p.Persona,
+		FailureKind: p.FailureKind,
+		Backend:     p.Backend,
+		Stderr:      p.Stderr,
 	})
 	return []event.Envelope{
 		event.New(event.WorkflowFailed, 1, payload).
