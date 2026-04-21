@@ -112,9 +112,9 @@ func TestDeveloperNoWorkspacePassThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// AI returns AIRequestSent + AIResponseReceived — no verdict appended.
-	if len(got) != 2 {
-		t.Fatalf("expected 2 AI events, got %d", len(got))
+	// AI returns AIRequestSent + AIRequestStarted + AIResponseReceived — no verdict appended.
+	if len(got) != 3 {
+		t.Fatalf("expected 3 AI events, got %d", len(got))
 	}
 	for _, e := range got {
 		if e.Type == event.VerdictRendered {
@@ -148,8 +148,8 @@ func TestDeveloperWithUncommittedChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 AI events (uncommitted changes detected), got %d", len(got))
+	if len(got) != 3 {
+		t.Fatalf("expected 3 AI events (uncommitted changes detected), got %d", len(got))
 	}
 	for _, e := range got {
 		if e.Type == event.VerdictRendered {
@@ -194,8 +194,8 @@ func TestDeveloperWithUnpushedCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 AI events (unpushed commit detected), got %d", len(got))
+	if len(got) != 3 {
+		t.Fatalf("expected 3 AI events (unpushed commit detected), got %d", len(got))
 	}
 	for _, e := range got {
 		if e.Type == event.VerdictRendered {
@@ -227,12 +227,12 @@ func TestDeveloperCleanWorkspaceEmitsVerdictFail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// 2 AI events + 1 VerdictRendered.
-	if len(got) != 3 {
-		t.Fatalf("expected 3 events (2 AI + 1 verdict), got %d: %v", len(got), eventTypes(got))
+	// 3 AI events (Sent, Started, Response) + 1 VerdictRendered.
+	if len(got) != 4 {
+		t.Fatalf("expected 4 events (3 AI + 1 verdict), got %d: %v", len(got), eventTypes(got))
 	}
 
-	verdictEvt := got[2]
+	verdictEvt := got[3]
 	if verdictEvt.Type != event.VerdictRendered {
 		t.Fatalf("expected VerdictRendered as last event, got %s", verdictEvt.Type)
 	}
@@ -327,8 +327,8 @@ func TestDeveloperResolveWorkspaceError(t *testing.T) {
 		t.Fatalf("handler should absorb store failure, got: %v", err)
 	}
 	// AI events returned unchanged — no VerdictRendered on infra failure.
-	if len(got) != 2 {
-		t.Fatalf("expected 2 AI events on store error, got %d", len(got))
+	if len(got) != 3 {
+		t.Fatalf("expected 3 AI events on store error, got %d", len(got))
 	}
 	for _, e := range got {
 		if e.Type == event.VerdictRendered {
@@ -357,8 +357,8 @@ func TestDeveloperGitCheckError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler should absorb git failure, got: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 AI events on git error, got %d", len(got))
+	if len(got) != 3 {
+		t.Fatalf("expected 3 AI events on git error, got %d", len(got))
 	}
 	for _, e := range got {
 		if e.Type == event.VerdictRendered {

@@ -59,22 +59,25 @@ func TestReviewHandlerPassVerdict(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
-	// Expect: AIRequestSent, AIResponseReceived, VerdictRendered
-	if len(results) != 3 {
-		t.Fatalf("want 3 events, got %d", len(results))
+	// Expect: AIRequestSent, AIRequestStarted, AIResponseReceived, VerdictRendered
+	if len(results) != 4 {
+		t.Fatalf("want 4 events, got %d", len(results))
 	}
 	if results[0].Type != event.AIRequestSent {
 		t.Errorf("event[0]: want AIRequestSent, got %s", results[0].Type)
 	}
-	if results[1].Type != event.AIResponseReceived {
-		t.Errorf("event[1]: want AIResponseReceived, got %s", results[1].Type)
+	if results[1].Type != event.AIRequestStarted {
+		t.Errorf("event[1]: want AIRequestStarted, got %s", results[1].Type)
 	}
-	if results[2].Type != event.VerdictRendered {
-		t.Errorf("event[2]: want VerdictRendered, got %s", results[2].Type)
+	if results[2].Type != event.AIResponseReceived {
+		t.Errorf("event[2]: want AIResponseReceived, got %s", results[2].Type)
+	}
+	if results[3].Type != event.VerdictRendered {
+		t.Errorf("event[3]: want VerdictRendered, got %s", results[3].Type)
 	}
 
 	var verdict event.VerdictPayload
-	if err := json.Unmarshal(results[2].Payload, &verdict); err != nil {
+	if err := json.Unmarshal(results[3].Payload, &verdict); err != nil {
 		t.Fatalf("unmarshal verdict: %v", err)
 	}
 	if verdict.Outcome != event.VerdictPass {
@@ -139,12 +142,12 @@ VERDICT: FAIL
 		t.Fatalf("Handle: %v", err)
 	}
 
-	if len(results) != 3 {
-		t.Fatalf("want 3 events, got %d", len(results))
+	if len(results) != 4 {
+		t.Fatalf("want 4 events, got %d", len(results))
 	}
 
 	var verdict event.VerdictPayload
-	if err := json.Unmarshal(results[2].Payload, &verdict); err != nil {
+	if err := json.Unmarshal(results[3].Payload, &verdict); err != nil {
 		t.Fatalf("unmarshal verdict: %v", err)
 	}
 	if verdict.Outcome != event.VerdictFail {
@@ -215,7 +218,7 @@ func TestQAHandlerFailVerdict(t *testing.T) {
 	}
 
 	var verdict event.VerdictPayload
-	_ = json.Unmarshal(results[2].Payload, &verdict)
+	_ = json.Unmarshal(results[3].Payload, &verdict)
 	if verdict.SourcePhase != "qa" {
 		t.Errorf("want source phase 'qa', got %q", verdict.SourcePhase)
 	}
@@ -298,7 +301,7 @@ func TestReviewHandlerEventSource(t *testing.T) {
 	}
 
 	// VerdictRendered should have handler:reviewer source
-	verdictEvt := results[2]
+	verdictEvt := results[3]
 	if verdictEvt.Source != "handler:reviewer" {
 		t.Errorf("want source 'handler:reviewer', got %q", verdictEvt.Source)
 	}
@@ -355,7 +358,7 @@ func TestReviewHandlerPRCategoryReviewFiltersUngroundedIssues(t *testing.T) {
 	}
 
 	var verdict event.VerdictPayload
-	if err := json.Unmarshal(results[2].Payload, &verdict); err != nil {
+	if err := json.Unmarshal(results[3].Payload, &verdict); err != nil {
 		t.Fatalf("unmarshal verdict: %v", err)
 	}
 	if verdict.Outcome != event.VerdictPass {
@@ -422,7 +425,7 @@ func TestReviewHandlerPRCategoryReviewKeepsGroundedIssues(t *testing.T) {
 	}
 
 	var verdict event.VerdictPayload
-	if err := json.Unmarshal(results[2].Payload, &verdict); err != nil {
+	if err := json.Unmarshal(results[3].Payload, &verdict); err != nil {
 		t.Fatalf("unmarshal verdict: %v", err)
 	}
 	if verdict.Outcome != event.VerdictFail {

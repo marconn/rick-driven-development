@@ -27,6 +27,7 @@ var internalEvents = map[event.Type]bool{
 	event.FeedbackConsumed:      true,
 	event.TokenBudgetExceeded:   true,
 	event.AIRequestSent:         true,
+	event.AIRequestStarted:      true,
 	event.AIResponseReceived:    true,
 	event.AIStructuredOutput:    true,
 	event.CompensationStarted:   true,

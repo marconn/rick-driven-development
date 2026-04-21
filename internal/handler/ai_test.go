@@ -150,8 +150,8 @@ func TestAIHandlerHandle(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
-	if len(results) != 2 {
-		t.Fatalf("want 2 events, got %d", len(results))
+	if len(results) != 3 {
+		t.Fatalf("want 3 events (request, started, response), got %d", len(results))
 	}
 
 	// Verify AIRequestSent
@@ -175,12 +175,27 @@ func TestAIHandlerHandle(t *testing.T) {
 		t.Error("prompt hash should not be empty")
 	}
 
+	// Verify AIRequestStarted
+	if results[1].Type != event.AIRequestStarted {
+		t.Errorf("event[1]: want AIRequestStarted, got %s", results[1].Type)
+	}
+	var startPayload event.AIRequestStartedPayload
+	if err := json.Unmarshal(results[1].Payload, &startPayload); err != nil {
+		t.Fatalf("unmarshal AIRequestStartedPayload: %v", err)
+	}
+	if startPayload.SpawnUnixNano == 0 {
+		t.Error("SpawnUnixNano should be set")
+	}
+	if startPayload.PromptHash != reqPayload.PromptHash {
+		t.Errorf("prompt hash mismatch: request=%s started=%s", reqPayload.PromptHash, startPayload.PromptHash)
+	}
+
 	// Verify AIResponseReceived
-	if results[1].Type != event.AIResponseReceived {
-		t.Errorf("event[1]: want AIResponseReceived, got %s", results[1].Type)
+	if results[2].Type != event.AIResponseReceived {
+		t.Errorf("event[2]: want AIResponseReceived, got %s", results[2].Type)
 	}
 	var respPayload event.AIResponsePayload
-	if err := json.Unmarshal(results[1].Payload, &respPayload); err != nil {
+	if err := json.Unmarshal(results[2].Payload, &respPayload); err != nil {
 		t.Fatalf("unmarshal AIResponsePayload: %v", err)
 	}
 	if respPayload.Phase != "research" {
@@ -246,7 +261,7 @@ func TestAIHandlerStructuredOutput(t *testing.T) {
 	}
 
 	var respPayload event.AIResponsePayload
-	if err := json.Unmarshal(results[1].Payload, &respPayload); err != nil {
+	if err := json.Unmarshal(results[2].Payload, &respPayload); err != nil {
 		t.Fatalf("unmarshal AIResponsePayload: %v", err)
 	}
 
@@ -499,16 +514,16 @@ func TestAIHandlerTokensUsedPropagated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if len(results) != 2 {
-		t.Fatalf("want 2 events, got %d", len(results))
+	if len(results) != 3 {
+		t.Fatalf("want 3 events, got %d", len(results))
 	}
 
-	// AIResponseReceived is the second event.
-	if results[1].Type != event.AIResponseReceived {
-		t.Fatalf("event[1]: want AIResponseReceived, got %s", results[1].Type)
+	// AIResponseReceived is the third event (after AIRequestSent, AIRequestStarted).
+	if results[2].Type != event.AIResponseReceived {
+		t.Fatalf("event[2]: want AIResponseReceived, got %s", results[2].Type)
 	}
 	var respPayload event.AIResponsePayload
-	if err := json.Unmarshal(results[1].Payload, &respPayload); err != nil {
+	if err := json.Unmarshal(results[2].Payload, &respPayload); err != nil {
 		t.Fatalf("unmarshal AIResponsePayload: %v", err)
 	}
 	if respPayload.TokensUsed != wantTokens {
@@ -922,7 +937,7 @@ func TestAIHandlerPlainTextOutput(t *testing.T) {
 	}
 
 	var respPayload event.AIResponsePayload
-	if err := json.Unmarshal(results[1].Payload, &respPayload); err != nil {
+	if err := json.Unmarshal(results[2].Payload, &respPayload); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 
@@ -1043,24 +1058,37 @@ func TestAIHandlerEmitsRequestBeforeBackend(t *testing.T) {
 	}
 
 	// Snapshot the bus + store BEFORE the backend timeout fires.
+	// Both AIRequestSent AND AIRequestStarted must be published before Run —
+	// AIRequestSent for the pre-flight trail, AIRequestStarted for the exact
+	// subprocess-spawn moment. Operators distinguish handler-pre-flight
+	// stalls from subprocess-side hangs via this pair.
 	pubs := bus.snapshot()
-	if len(pubs) != 1 {
-		t.Fatalf("want 1 published event before backend.Run, got %d", len(pubs))
+	if len(pubs) != 2 {
+		t.Fatalf("want 2 published events before backend.Run (sent+started), got %d", len(pubs))
 	}
 	if pubs[0].Type != event.AIRequestSent {
 		t.Errorf("want AIRequestSent published first, got %s", pubs[0].Type)
 	}
+	if pubs[1].Type != event.AIRequestStarted {
+		t.Errorf("want AIRequestStarted published second, got %s", pubs[1].Type)
+	}
 
 	aggregateID := corrID + ":persona:developer"
 	stored := store.aggregateEvents[aggregateID]
-	if len(stored) != 1 {
-		t.Fatalf("want 1 event persisted to %s, got %d", aggregateID, len(stored))
+	if len(stored) != 2 {
+		t.Fatalf("want 2 events persisted to %s (sent+started), got %d", aggregateID, len(stored))
 	}
 	if stored[0].Type != event.AIRequestSent {
-		t.Errorf("want AIRequestSent persisted, got %s", stored[0].Type)
+		t.Errorf("want AIRequestSent persisted first, got %s", stored[0].Type)
+	}
+	if stored[1].Type != event.AIRequestStarted {
+		t.Errorf("want AIRequestStarted persisted second, got %s", stored[1].Type)
 	}
 	if stored[0].Version != 1 {
-		t.Errorf("want version 1, got %d", stored[0].Version)
+		t.Errorf("want AIRequestSent version 1, got %d", stored[0].Version)
+	}
+	if stored[1].Version != 2 {
+		t.Errorf("want AIRequestStarted version 2, got %d", stored[1].Version)
 	}
 	if stored[0].CorrelationID != corrID {
 		t.Errorf("want correlation %q, got %q", corrID, stored[0].CorrelationID)
@@ -1078,6 +1106,67 @@ func TestAIHandlerEmitsRequestBeforeBackend(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Handle did not return after backend timeout")
+	}
+}
+
+// TestAIRequestStartedEmittedEvenOnBackendError is the core observability
+// regression: when the backend returns an error (idle_timeout, wall_timeout,
+// or handler error), AIRequestStarted must still be persisted + published so
+// operators can distinguish "handler never reached backend.Run" from
+// "backend was invoked and then hung". Without this pair, a 6-minute
+// subprocess stall looks identical to a pre-flight stall in the event log.
+func TestAIRequestStartedEmittedEvenOnBackendError(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-err-started"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "trigger backend error",
+		})).WithCorrelation(corrID),
+	}
+
+	bus := &recordingBus{}
+	h := NewAIHandler(AIHandlerConfig{
+		Name:     "developer",
+		Phase:    "develop",
+		Persona:  persona.Developer,
+		Backend:  &mockBackend{name: "claude", err: errors.New("simulated idle_timeout")},
+		Store:    store,
+		Bus:      bus,
+		Personas: persona.DefaultRegistry(),
+		Builder:  persona.NewPromptBuilder(),
+	})
+
+	env := event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID)
+	_, err := h.Handle(context.Background(), env)
+	if err == nil {
+		t.Fatal("want backend error, got nil")
+	}
+
+	// Both events must have reached the bus + store despite the backend failure.
+	pubs := bus.snapshot()
+	if len(pubs) != 2 {
+		t.Fatalf("want 2 published events (sent+started), got %d", len(pubs))
+	}
+	if pubs[0].Type != event.AIRequestSent || pubs[1].Type != event.AIRequestStarted {
+		t.Errorf("want [AIRequestSent, AIRequestStarted], got [%s, %s]", pubs[0].Type, pubs[1].Type)
+	}
+
+	aggregateID := corrID + ":persona:developer"
+	stored := store.aggregateEvents[aggregateID]
+	if len(stored) != 2 {
+		t.Fatalf("want 2 stored events (sent+started), got %d", len(stored))
+	}
+	if stored[0].Type != event.AIRequestSent || stored[1].Type != event.AIRequestStarted {
+		t.Errorf("want [AIRequestSent, AIRequestStarted] stored, got [%s, %s]", stored[0].Type, stored[1].Type)
+	}
+
+	// SpawnUnixNano must be non-zero — it's the diagnostic timestamp.
+	var sp event.AIRequestStartedPayload
+	if err := json.Unmarshal(stored[1].Payload, &sp); err != nil {
+		t.Fatalf("unmarshal AIRequestStartedPayload: %v", err)
+	}
+	if sp.SpawnUnixNano == 0 {
+		t.Error("SpawnUnixNano must be set on AIRequestStarted")
 	}
 }
 

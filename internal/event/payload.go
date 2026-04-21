@@ -146,6 +146,20 @@ type AIRequestPayload struct {
 	PromptHash string `json:"prompt_hash"` // for dedup, not the full prompt
 }
 
+// AIRequestStartedPayload is emitted at the moment backend.Run is invoked —
+// i.e., the subprocess is about to be exec'd. The gap between AIRequestSent
+// and AIRequestStarted is handler pre-flight (prompt build, context load,
+// request-event persist). The gap between AIRequestStarted and
+// AIResponseReceived is the subprocess itself (stream read, extractor,
+// watchdog). Operators diagnose stalls by counting which gap dominates.
+type AIRequestStartedPayload struct {
+	Phase         string `json:"phase"`
+	Backend       string `json:"backend"`
+	Persona       string `json:"persona"`
+	PromptHash    string `json:"prompt_hash"`
+	SpawnUnixNano int64  `json:"spawn_unix_nano"` // time.Now().UnixNano() at spawn call
+}
+
 // AIResponsePayload is emitted when an AI backend returns.
 type AIResponsePayload struct {
 	Phase      string          `json:"phase"`

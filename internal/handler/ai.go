@@ -91,9 +91,12 @@ func (h *AIHandler) Subscribes() []event.Type { return nil }
 // Handle processes a triggering event by:
 // 1. Loading workflow context from the event store (previous outputs, feedback)
 // 2. Building system + user prompts via the persona system
-// 3. Persisting+publishing AIRequestSent (so a hung backend still leaves a trail)
-// 4. Calling the AI backend (with optional timeout)
-// 5. Returning AIResponseReceived (or [AIRequestSent, AIResponseReceived] when no Bus is wired)
+// 3. Persisting+publishing AIRequestSent (so a hung handler still leaves a trail)
+// 4. Persisting+publishing AIRequestStarted immediately before backend.Run
+//    (distinguishes pre-spawn stalls from subprocess-side hangs)
+// 5. Calling the AI backend (with optional timeout)
+// 6. Returning AIResponseReceived (or a bundle including request/started events
+//    when no Bus is wired)
 func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Envelope, error) {
 	pctx, err := h.buildPromptContext(ctx, env)
 	if err != nil {
@@ -157,6 +160,26 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		backendCtx = backend.WithStickyKey(backendCtx, env.CorrelationID+":"+h.persona)
 	}
 
+	// AIRequestStarted: marks the exact moment before backend.Run is invoked
+	// (subprocess exec). Paired with AIRequestSent, the gap between them
+	// measures handler pre-flight; the gap between AIRequestStarted and
+	// AIResponseReceived measures subprocess runtime. Operators diagnose
+	// pre-spawn vs. subprocess-side stalls by which gap dominates.
+	startEvt := event.New(event.AIRequestStarted, 1, event.MustMarshal(event.AIRequestStartedPayload{
+		Phase:         h.phase,
+		Backend:       h.backend.Name(),
+		Persona:       h.persona,
+		PromptHash:    promptHash,
+		SpawnUnixNano: time.Now().UnixNano(),
+	})).WithSource("handler:" + h.name)
+	startEmittedInline := false
+	if emittedInline {
+		if persisted, ok := h.persistRequestEvent(ctx, env, startEvt); ok {
+			startEvt = persisted
+			startEmittedInline = true
+		}
+	}
+
 	// Call backend
 	resp, err := h.backend.Run(backendCtx, backend.Request{
 		SystemPrompt: systemPrompt,
@@ -187,10 +210,16 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		Output:     output,
 	})).WithSource("handler:" + h.name)
 
+	// Return events not already persisted inline. emittedInline implies
+	// reqEvt was published; startEmittedInline implies startEvt was published.
+	// When the Bus isn't wired (tests), bundle everything with the response.
 	if emittedInline {
-		return []event.Envelope{respEvt}, nil
+		if startEmittedInline {
+			return []event.Envelope{respEvt}, nil
+		}
+		return []event.Envelope{startEvt, respEvt}, nil
 	}
-	return []event.Envelope{reqEvt, respEvt}, nil
+	return []event.Envelope{reqEvt, startEvt, respEvt}, nil
 }
 
 // persistRequestEvent appends AIRequestSent to the persona-scoped aggregate

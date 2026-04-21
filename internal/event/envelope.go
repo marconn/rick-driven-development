@@ -34,6 +34,15 @@ const (
 
 	// AI operations
 	AIRequestSent      Type = "ai.request.sent"
+	// AIRequestStarted is emitted at the exact moment backend.Run is invoked
+	// (subprocess exec). Paired with AIRequestSent (emitted BEFORE prompt
+	// assembly and backend setup) it lets operators tell handler pre-flight
+	// stalls apart from subprocess-side hangs: if AIRequestSent exists but
+	// AIRequestStarted does not, the handler died between event persist and
+	// backend.Run — prompt build, context load, system-prompt load, or
+	// persistRequestEvent itself. If both exist but AIResponseReceived does
+	// not, the subprocess was invoked and then stalled.
+	AIRequestStarted   Type = "ai.request.started"
 	AIResponseReceived Type = "ai.response.received"
 	AIStructuredOutput Type = "ai.structured_output"
 

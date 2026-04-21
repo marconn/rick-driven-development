@@ -166,9 +166,9 @@ func TestCommitterWithUncommittedChanges(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// AI handler returns AIRequestSent + AIResponseReceived.
-	if len(got) != 2 {
-		t.Fatalf("expected 2 AI events, got %d", len(got))
+	// AI handler returns AIRequestSent + AIRequestStarted + AIResponseReceived.
+	if len(got) != 3 {
+		t.Fatalf("expected 3 AI events, got %d", len(got))
 	}
 	hasReq := false
 	hasResp := false
@@ -224,8 +224,8 @@ func TestCommitterWithUnpushedCommits(t *testing.T) {
 	}
 
 	// Should delegate to AI (has unpushed commits).
-	if len(got) != 2 {
-		t.Fatalf("expected 2 AI events for unpushed commits, got %d", len(got))
+	if len(got) != 3 {
+		t.Fatalf("expected 3 AI events for unpushed commits, got %d", len(got))
 	}
 }
 
@@ -248,8 +248,8 @@ func TestCommitterNoWorkspaceSkipsCheck(t *testing.T) {
 	}
 
 	// No workspace → skip change check → delegate to AI.
-	if len(got) != 2 {
-		t.Fatalf("expected 2 AI events for prompt-only workflow, got %d", len(got))
+	if len(got) != 3 {
+		t.Fatalf("expected 3 AI events for prompt-only workflow, got %d", len(got))
 	}
 }
 
@@ -309,8 +309,8 @@ func TestCommitterAlreadyPushedDelegatesToAI(t *testing.T) {
 	}
 
 	// Should delegate to AI (diverged from base), not emit VerdictFail.
-	if len(got) != 2 {
-		t.Fatalf("expected 2 AI events for already-pushed branch, got %d", len(got))
+	if len(got) != 3 {
+		t.Fatalf("expected 3 AI events for already-pushed branch, got %d", len(got))
 	}
 	hasReq := false
 	hasResp := false

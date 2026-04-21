@@ -115,6 +115,7 @@ func DefaultRegistry() *Registry {
 	r.Register(WorkflowCancelled, "Workflow is cancelled", 1)
 	r.Register(WorkflowRetried, "Workflow is retried from a specific phase", 1)
 	r.Register(AIRequestSent, "AI backend call is made", 1)
+	r.Register(AIRequestStarted, "AI backend subprocess is exec'd", 1)
 	r.Register(AIResponseReceived, "AI backend returns", 1)
 	r.Register(AIStructuredOutput, "Structured output extracted from AI response", 1)
 	r.Register(VerdictRendered, "Review/QA verdict is rendered", 1)
