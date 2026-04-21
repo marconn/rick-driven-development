@@ -305,6 +305,31 @@ type UnhandledEventPayload struct {
 	Source        string `json:"source"`
 }
 
+// DispatchDroppedPayload records a PersonaRunner admission-gate drop. Written
+// to the dedicated diagnostic aggregate {correlationID}:drops so operators
+// can post-hoc analyze why a dispatch didn't happen without having to replay
+// the full event chain or grep log output. Fields:
+//
+//   - Handler: target handler name that was filtered out
+//   - DroppedEventID: the triggering event that would have dispatched
+//   - DroppedEventType: that event's type (e.g., "persona.completed")
+//   - DropReason: one of the engine's drop_reason constants (event_dedup,
+//     join_unsatisfied, join_gate_dedup, ctx_cancelled, store_error)
+//   - MissingPredecessors: for join_unsatisfied, the personas absent from
+//     latestByPersona at check time. Empty for other reasons.
+//   - Fingerprint: for join_gate_dedup, the sorted|joined predecessor event
+//     IDs that matched a previously-dispatched join. Empty for other reasons.
+//   - Detail: free-form text for store_error (wrapped error) or other reasons.
+type DispatchDroppedPayload struct {
+	Handler             string   `json:"handler"`
+	DroppedEventID      string   `json:"dropped_event_id"`
+	DroppedEventType    string   `json:"dropped_event_type"`
+	DropReason          string   `json:"drop_reason"`
+	MissingPredecessors []string `json:"missing_predecessors,omitempty"`
+	Fingerprint         string   `json:"fingerprint,omitempty"`
+	Detail              string   `json:"detail,omitempty"`
+}
+
 // --- Child workflow payloads ---
 
 // ChildWorkflowCompletedPayload is injected by external systems when a child

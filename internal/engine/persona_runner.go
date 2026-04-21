@@ -39,6 +39,36 @@ const (
 	PriorityDefault           = 30
 )
 
+// Dispatch-drop reason taxonomy. Emitted alongside DispatchDropped events and
+// structured Warn logs so operators can grep / count / alert on specific
+// drop paths in production. All four paths used to log at Debug which was
+// effectively invisible under the default rick-server slog.LevelInfo handler;
+// elevating to Warn without a structured reason would have created
+// unfilterable noise on every pr-review fan-out (10 legitimate join-gate
+// dedup drops per consolidator join), hence the taxonomy.
+const (
+	// dropReasonEventDedup: the same (handler, event.ID) pair was already
+	// admitted. Expected on retriggers that hit the same event twice.
+	dropReasonEventDedup = "event_dedup"
+	// dropReasonJoinUnsatisfied: handler has DAG predecessors that haven't
+	// yet completed. Expected — handler will re-evaluate when each missing
+	// predecessor completes. If this fires repeatedly for the same handler
+	// after all predecessors HAVE completed, that's a wedge.
+	dropReasonJoinUnsatisfied = "join_unsatisfied"
+	// dropReasonJoinGateDedup: the same set of predecessor completions
+	// already triggered this handler. Expected on parallel fan-out (N-1
+	// drops per N-way join). A single dispatch is guaranteed.
+	dropReasonJoinGateDedup = "join_gate_dedup"
+	// dropReasonCtxCancelled: the runner's context was cancelled
+	// (shutdown, workflow cancel). No more dispatches will be admitted.
+	dropReasonCtxCancelled = "ctx_cancelled"
+	// dropReasonStoreError: checkJoinCondition's LoadByCorrelation failed.
+	// The dispatch is retried once; if the retry also fails, this reason
+	// fires and the dispatch is dropped. Transient store errors look
+	// identical to "join unsatisfied" without this distinction.
+	dropReasonStoreError = "store_error"
+)
+
 // eventPriority maps an event type to its dispatch priority.
 func eventPriority(t event.Type) int {
 	switch t {
@@ -260,7 +290,10 @@ func (r *PersonaRunner) RecoverDispatch(handlerName string, env event.Envelope) 
 	// Safety: verify join condition against the store.
 	afterPersonas := r.resolver.effectiveAfterPersonas(h, env.CorrelationID, r.hooks)
 	if len(afterPersonas) > 0 && env.CorrelationID != "" {
-		satisfied, _ := r.resolver.checkJoinCondition(r.ctx, afterPersonas, env.CorrelationID)
+		satisfied, _, _, err := r.resolver.checkJoinCondition(r.ctx, afterPersonas, env.CorrelationID)
+		if err != nil {
+			return fmt.Errorf("persona runner: recover dispatch: join check store error: %w", err)
+		}
 		if !satisfied {
 			return fmt.Errorf("persona runner: recover dispatch: join unsatisfied for %q", handlerName)
 		}
@@ -560,12 +593,14 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 
 		// 4. Event dedup
 		if !r.seen.Add(h.Name(), string(env.ID)) {
-			r.logger.Debug("persona runner: dispatch dropped (event dedup)",
+			r.logger.Warn("persona runner: dispatch dropped",
+				slog.String("drop_reason", dropReasonEventDedup),
 				slog.String("handler", h.Name()),
 				slog.String("event_type", string(env.Type)),
 				slog.String("event_id", string(env.ID)),
 				slog.String("correlation", env.CorrelationID),
 			)
+			r.emitDispatchDropped(h.Name(), env, dropReasonEventDedup, nil, "", "")
 			return nil
 		}
 
@@ -579,26 +614,51 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 		// 6. Join condition check (DAG deps + hooks)
 		afterPersonas := r.resolver.effectiveAfterPersonas(h, env.CorrelationID, r.hooks)
 		if len(afterPersonas) > 0 && env.CorrelationID != "" {
-			satisfied, fingerprint := r.resolver.checkJoinCondition(r.ctx, afterPersonas, env.CorrelationID)
-			if !satisfied {
-				r.logger.Debug("persona runner: dispatch dropped (join unsatisfied)",
+			satisfied, fingerprint, missing, joinErr := r.resolver.checkJoinCondition(r.ctx, afterPersonas, env.CorrelationID)
+			if joinErr != nil {
+				// Retry once — transient store errors look identical to
+				// legit "not satisfied" without this distinction, and a
+				// silently-dropped store hiccup is indistinguishable from
+				// a true DAG wedge in post-hoc analysis.
+				satisfied, fingerprint, missing, joinErr = r.resolver.checkJoinCondition(r.ctx, afterPersonas, env.CorrelationID)
+			}
+			if joinErr != nil {
+				r.logger.Error("persona runner: dispatch dropped",
+					slog.String("drop_reason", dropReasonStoreError),
 					slog.String("handler", h.Name()),
 					slog.String("event_type", string(env.Type)),
 					slog.String("event_id", string(env.ID)),
 					slog.String("correlation", env.CorrelationID),
+					slog.String("error", joinErr.Error()),
 				)
+				r.emitDispatchDropped(h.Name(), env, dropReasonStoreError, nil, "", joinErr.Error())
+				return nil
+			}
+			if !satisfied {
+				r.logger.Warn("persona runner: dispatch dropped",
+					slog.String("drop_reason", dropReasonJoinUnsatisfied),
+					slog.String("handler", h.Name()),
+					slog.String("event_type", string(env.Type)),
+					slog.String("event_id", string(env.ID)),
+					slog.String("correlation", env.CorrelationID),
+					slog.Any("required_after", afterPersonas),
+					slog.Any("missing_predecessors", missing),
+				)
+				r.emitDispatchDropped(h.Name(), env, dropReasonJoinUnsatisfied, missing, "", "")
 				return nil
 			}
 			// Join-gate dedup: when multiple PersonaCompleted events
 			// satisfy the same join, dispatch only once per unique set.
 			if len(afterPersonas) > 1 && env.Type == event.PersonaCompleted {
 				if !r.seen.Add(h.Name()+":join", fingerprint) {
-					r.logger.Debug("persona runner: dispatch dropped (join-gate dedup)",
+					r.logger.Warn("persona runner: dispatch dropped",
+						slog.String("drop_reason", dropReasonJoinGateDedup),
 						slog.String("handler", h.Name()),
 						slog.String("event_type", string(env.Type)),
 						slog.String("correlation", env.CorrelationID),
 						slog.String("fingerprint", fingerprint),
 					)
+					r.emitDispatchDropped(h.Name(), env, dropReasonJoinGateDedup, nil, fingerprint, "")
 					return nil
 				}
 			}
@@ -612,11 +672,13 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 
 		// 8. Check runner context
 		if r.ctx.Err() != nil {
-			r.logger.Debug("persona runner: dispatch dropped (context cancelled)",
+			r.logger.Warn("persona runner: dispatch dropped",
+				slog.String("drop_reason", dropReasonCtxCancelled),
 				slog.String("handler", h.Name()),
 				slog.String("event_type", string(env.Type)),
 				slog.String("correlation", env.CorrelationID),
 			)
+			r.emitDispatchDropped(h.Name(), env, dropReasonCtxCancelled, nil, "", r.ctx.Err().Error())
 			return nil
 		}
 
@@ -1259,6 +1321,59 @@ func (r *PersonaRunner) persistAndPublishResultOnly(handlerName string, env even
 	}
 
 	r.persister.persistAndPublish(r.ctx, aggregateID, allEvents)
+}
+
+// emitDispatchDropped persists a DispatchDropped event to the dedicated
+// diagnostic aggregate {correlationID}:drops. Operators can count/query
+// drops per workflow via SQL without replaying the correlation chain or
+// grepping log output. Writing to a separate aggregate avoids version
+// contention on the main workflow aggregate — critical for pr-review's
+// 11-way parallel fan-out (10 join-gate dedup drops per consolidator).
+//
+// Never published on the bus: no handler subscribes to DispatchDropped
+// (registered in internalEvents). Best-effort — errors are swallowed since
+// observability must not fail a dispatch.
+func (r *PersonaRunner) emitDispatchDropped(handlerName string, trigger event.Envelope, reason string, missing []string, fingerprint, detail string) {
+	if trigger.CorrelationID == "" {
+		return // no correlation → no diagnostic aggregate to write to
+	}
+	if r.store == nil {
+		return
+	}
+	payload := event.DispatchDroppedPayload{
+		Handler:             handlerName,
+		DroppedEventID:      string(trigger.ID),
+		DroppedEventType:    string(trigger.Type),
+		DropReason:          reason,
+		MissingPredecessors: missing,
+		Fingerprint:         fingerprint,
+		Detail:              detail,
+	}
+	evt := event.New(event.DispatchDropped, 1, event.MustMarshal(payload)).
+		WithCorrelation(trigger.CorrelationID).
+		WithCausation(trigger.ID).
+		WithSource("persona-runner")
+
+	aggregateID := trigger.CorrelationID + ":drops"
+	// Append with optimistic concurrency; retry up to 3 times on
+	// ErrConcurrencyConflict. This aggregate is write-mostly by this helper
+	// alone, so conflicts are rare but can happen under parallel fan-out.
+	const maxAttempts = 3
+	for range maxAttempts {
+		currentVersion := 0
+		if existing, err := r.store.Load(r.ctx, aggregateID); err == nil && len(existing) > 0 {
+			currentVersion = existing[len(existing)-1].Version
+		}
+		versioned := evt.WithAggregate(aggregateID, currentVersion+1)
+		if err := r.store.Append(r.ctx, aggregateID, currentVersion, []event.Envelope{versioned}); err == nil {
+			return
+		}
+	}
+	// Persistence failed after retries — log but don't fail the dispatch.
+	r.logger.Debug("persona runner: failed to persist DispatchDropped",
+		slog.String("handler", handlerName),
+		slog.String("correlation", trigger.CorrelationID),
+	)
 }
 
 // =============================================================================

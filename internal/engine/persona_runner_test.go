@@ -299,6 +299,64 @@ func TestPersonaRunnerEventDedup(t *testing.T) {
 	}
 }
 
+// TestPersonaRunnerDispatchDroppedOnEventDedup verifies that DispatchDropped
+// is persisted to the {correlationID}:drops diagnostic aggregate whenever
+// the event-dedup gate fires. Gives operators a way to count drops per
+// workflow via SQL without grepping logs.
+func TestPersonaRunnerDispatchDroppedOnEventDedup(t *testing.T) {
+	runner, store, bus, reg := newTestPersonaRunner(t)
+
+	h := &stubHandler{
+		name: "documenter",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			return nil, nil
+		},
+	}
+	if err := reg.Register(h); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	runner.Start(context.Background(), reg)
+
+	// Publish the same event twice — first passes, second is deduped.
+	evt := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer", ChainDepth: 0,
+	})).WithCorrelation("corr-drops").WithSource("test")
+
+	for range 2 {
+		if err := bus.Publish(context.Background(), evt); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	drops, err := store.Load(context.Background(), "corr-drops:drops")
+	if err != nil {
+		t.Fatalf("load drops aggregate: %v", err)
+	}
+	if len(drops) != 1 {
+		t.Fatalf("expected exactly 1 DispatchDropped event, got %d", len(drops))
+	}
+	if drops[0].Type != event.DispatchDropped {
+		t.Errorf("want DispatchDropped, got %s", drops[0].Type)
+	}
+
+	var payload event.DispatchDroppedPayload
+	if err := json.Unmarshal(drops[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal DispatchDroppedPayload: %v", err)
+	}
+	if payload.DropReason != "event_dedup" {
+		t.Errorf("want drop_reason=event_dedup, got %q", payload.DropReason)
+	}
+	if payload.Handler != "documenter" {
+		t.Errorf("want handler=documenter, got %q", payload.Handler)
+	}
+	if payload.DroppedEventID != string(evt.ID) {
+		t.Errorf("want dropped_event_id=%s, got %s", evt.ID, payload.DroppedEventID)
+	}
+}
+
 func TestPersonaRunnerEmitsPersonaCompleted(t *testing.T) {
 	runner, _, bus, reg := newTestPersonaRunner(t)
 

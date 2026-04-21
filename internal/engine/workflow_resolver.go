@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sort"
@@ -265,14 +266,22 @@ func (w *workflowResolver) effectiveAfterPersonas(h handler.Handler, correlation
 
 // checkJoinCondition returns true when all requiredPersonas have a
 // PersonaCompleted event recorded under the given correlationID.
-func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPersonas []string, correlationID string) (bool, string) {
+//
+// Return contract:
+//   - satisfied=true: all predecessors are complete; dispatch proceeds.
+//     fingerprint is the sorted joined predecessor event IDs (for join-gate
+//     dedup). missing and err are nil.
+//   - satisfied=false, err=nil: legitimate "not ready yet" — one or more
+//     predecessors haven't emitted PersonaCompleted. missing lists which
+//     personas are absent from latestByPersona.
+//   - satisfied=false, err!=nil: store failure (LoadByCorrelation). Caller
+//     should retry once before giving up; the error case is distinguishable
+//     from legit unsatisfaction so transient store hiccups don't look like
+//     wedges in the drop-reason telemetry.
+func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPersonas []string, correlationID string) (bool, string, []string, error) {
 	events, err := w.store.LoadByCorrelation(ctx, correlationID)
 	if err != nil {
-		w.logger.Error("persona runner: join check failed",
-			slog.String("correlation", correlationID),
-			slog.String("error", err.Error()),
-		)
-		return false, ""
+		return false, "", nil, fmt.Errorf("load correlation chain: %w", err)
 	}
 
 	var wfDef *WorkflowDef
@@ -372,17 +381,25 @@ func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPerso
 	}
 
 	ids := make([]string, 0, len(requiredPersonas))
+	var missing []string
 	for _, req := range requiredPersonas {
 		id, ok := latestByPersona[req]
 		if !ok {
-			return false, ""
+			missing = append(missing, req)
+			continue
 		}
 		if vt := verdicts[req]; vt != nil && vt.active && wfDef != nil && len(wfDef.RetriggeredBy) > 0 {
-			return false, ""
+			// An active (fail) verdict is pending feedback — predecessor is
+			// effectively not complete from the join's perspective.
+			missing = append(missing, req+"(pending_feedback)")
+			continue
 		}
 		ids = append(ids, id)
 	}
+	if len(missing) > 0 {
+		return false, "", missing, nil
+	}
 
 	sort.Strings(ids)
-	return true, strings.Join(ids, "|")
+	return true, strings.Join(ids, "|"), nil, nil
 }

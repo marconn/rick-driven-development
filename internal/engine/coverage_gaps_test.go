@@ -1096,7 +1096,7 @@ func TestCheckJoinCondition_FeedbackInvalidatesStale(t *testing.T) {
 
 	// quality-gate joins on [reviewer, qa]. Both completed in round 1 but
 	// FeedbackGenerated invalidated them. Join must NOT be satisfied.
-	satisfied, _ := resolver.checkJoinCondition(ctx, []string{"reviewer", "qa"}, corrID)
+	satisfied, _, _, _ := resolver.checkJoinCondition(ctx, []string{"reviewer", "qa"}, corrID)
 	if satisfied {
 		t.Error("join should NOT be satisfied — reviewer and qa completions are stale (before FeedbackGenerated)")
 	}
@@ -1163,7 +1163,7 @@ func TestCheckJoinCondition_FreshAfterFeedback(t *testing.T) {
 	seedEvent("qa", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "qa"})))
 
 	// quality-gate joins on [reviewer, qa]. Both re-completed after feedback.
-	satisfied, _ := resolver.checkJoinCondition(ctx, []string{"reviewer", "qa"}, corrID)
+	satisfied, _, _, _ := resolver.checkJoinCondition(ctx, []string{"reviewer", "qa"}, corrID)
 	if !satisfied {
 		t.Error("join should be satisfied — reviewer and qa completed AFTER FeedbackGenerated")
 	}
@@ -1222,7 +1222,7 @@ func TestCheckJoinCondition_MultipleIterations(t *testing.T) {
 	})))
 
 	// After feedback #1, stale reviewer must not satisfy join.
-	sat1, _ := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
+	sat1, _, _, _ := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
 	if sat1 {
 		t.Error("iteration 1: reviewer should be stale after first FeedbackGenerated")
 	}
@@ -1237,7 +1237,7 @@ func TestCheckJoinCondition_MultipleIterations(t *testing.T) {
 	})))
 
 	// After feedback #2, round 2 reviewer is stale again.
-	sat2, _ := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
+	sat2, _, _, _ := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
 	if sat2 {
 		t.Error("iteration 2: reviewer should be stale after second FeedbackGenerated")
 	}
@@ -1247,7 +1247,7 @@ func TestCheckJoinCondition_MultipleIterations(t *testing.T) {
 	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
 
 	// No more feedback — join should be satisfied.
-	sat3, _ := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
+	sat3, _, _, _ := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
 	if !sat3 {
 		t.Error("iteration 3: reviewer should be satisfied — no feedback after round 3")
 	}
@@ -1312,7 +1312,7 @@ func TestCheckJoinCondition_PartialRefire(t *testing.T) {
 	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
 
 	// quality-gate joins on [reviewer, qa]. qa is stale — join must NOT be satisfied.
-	satisfied, _ := resolver.checkJoinCondition(ctx, []string{"reviewer", "qa"}, corrID)
+	satisfied, _, _, _ := resolver.checkJoinCondition(ctx, []string{"reviewer", "qa"}, corrID)
 	if satisfied {
 		t.Error("join should NOT be satisfied — qa has not re-completed after feedback")
 	}

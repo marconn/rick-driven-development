@@ -91,6 +91,14 @@ const (
 	// Sentinel (unhandled event detection)
 	UnhandledEventDetected Type = "sentinel.unhandled"
 
+	// DispatchDropped records a PersonaRunner admission-gate drop: an event
+	// that would have dispatched a handler but was filtered out by dedup,
+	// join condition, context cancellation, or a store error. Written to a
+	// dedicated diagnostic aggregate {correlationID}:drops so operators can
+	// count/query drops per workflow without contending with the main
+	// workflow write path. Never published on the bus — diagnostic only.
+	DispatchDropped Type = "dispatch.dropped"
+
 	// Context snapshots (ground truth from codebase)
 	ContextCodebase    Type = "context.codebase"
 	ContextSchema      Type = "context.schema"
