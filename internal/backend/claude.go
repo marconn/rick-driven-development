@@ -131,8 +131,12 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 	if stdinPrompt != "" {
 		cmd.Stdin = strings.NewReader(stdinPrompt)
 	}
-	// Explicitly nil stdin when no stdin prompt — prevents subprocesses from
-	// inheriting stdin, which would corrupt MCP's stdio transport.
+	// When no stdin prompt is being piped, wire /dev/null explicitly so the
+	// claude CLI's startup stdin probe (~3s wait for input) sees EOF
+	// immediately instead of hanging on an inherited/ambiguous fd under
+	// systemd. See wireNullStdin in backend.go.
+	closeStdin := wireNullStdin(cmd)
+	defer closeStdin()
 
 	if err := cmd.Run(); err != nil {
 		_ = sw.Close()

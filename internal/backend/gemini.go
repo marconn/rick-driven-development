@@ -91,6 +91,9 @@ func (g *Gemini) Run(ctx context.Context, req Request) (*Response, error) {
 	if stdinPrompt != "" {
 		cmd.Stdin = strings.NewReader(stdinPrompt)
 	}
+	// Explicit /dev/null for non-piped invocations — see wireNullStdin doc.
+	closeStdin := wireNullStdin(cmd)
+	defer closeStdin()
 
 	if err := cmd.Run(); err != nil {
 		_ = sw.Close()

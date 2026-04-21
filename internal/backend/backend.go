@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 )
@@ -105,6 +107,31 @@ func (e *BackendError) Error() string {
 
 // Unwrap returns the wrapped cause so errors.Is / errors.As traverse through.
 func (e *BackendError) Unwrap() error { return e.Inner }
+
+// wireNullStdin ensures cmd.Stdin is explicitly /dev/null when no stdin
+// prompt is being piped. Go's exec package DOES open os.DevNull itself
+// when cmd.Stdin is nil, so functionally this is a defensive belt-and-
+// suspenders — but being explicit removes any ambiguity for CLIs that
+// probe stdin at startup (confirmed for Claude CLI: ~3s stdin probe per
+// H3 repro 2026-04-20) and matches the environment of direct terminal
+// invocation, where shells pass /dev/null to backgrounded processes.
+//
+// Returns a cleanup func the caller MUST defer; the opened file descriptor
+// must be closed after cmd.Run returns or it leaks. When os.Open fails
+// (extremely rare: exhausted fds, exotic sandbox), we fall through and
+// leave cmd.Stdin nil — Go's exec will then open /dev/null on its own,
+// so behavior is never worse than before.
+func wireNullStdin(cmd *exec.Cmd) func() {
+	if cmd.Stdin != nil {
+		return func() {} // caller is piping a real prompt via stdin
+	}
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		return func() {}
+	}
+	cmd.Stdin = f
+	return func() { _ = f.Close() }
+}
 
 // tailBytes returns the trailing n bytes of s. When s is shorter than n,
 // s is returned as-is. When truncated, a leading "...[truncated]..."
