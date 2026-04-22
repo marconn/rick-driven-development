@@ -40,7 +40,7 @@ type Deps struct {
 	Yolo       bool   // skip AI backend permission checks
 	// ReviewBackend is the backend used for review-related handlers (e.g.,
 	// reviewer, qa, pr-consolidator, pr-category reviewers, feedback-analyzer,
-	// pr-replier, pr-summarizer, qa-analyzer). Callers should build this via
+	// pr-replier, qa-analyzer). Callers should build this via
 	// backend.NewReviewBackend() so the rotation can be configured through
 	// RICK_REVIEW_BACKENDS. When nil, the legacy single-backend fallback is
 	// used (d.Backend if it's already gemini, otherwise a bare gemini driver).
@@ -52,7 +52,7 @@ type Deps struct {
 	BackendTimeout time.Duration
 	// ReviewBackendTimeout caps review-phase handlers (reviewer, qa,
 	// feedback-analyzer, pr-* reviewers, qa-analyzer, pr-replier,
-	// pr-summarizer, pr-consolidator, committer). Shorter than the
+	// pr-consolidator, committer). Shorter than the
 	// developer timeout because review/commit runs are typically <5 min —
 	// a hung reviewer should surface fast instead of blocking a workflow
 	// for 20 minutes. Zero falls back to handler.DefaultReviewBackendTimeout.
@@ -161,17 +161,11 @@ func RegisterAll(reg *Registry, d Deps) error {
 		// Feedback-specific AI handler.
 		NewAIHandler(reviewAiCfg("feedback-analyzer", "feedback-analyze", persona.FeedbackAnalyzer)),
 
-		// PR reply / summary composers — text-only (PlainText, Yolo=false) so
-		// the LLM cannot run `gh pr comment` itself. The matching poster
-		// handlers below are responsible for the actual GitHub side-effect.
+		// PR reply composer — text-only (PlainText, Yolo=false) so the LLM
+		// cannot run `gh pr comment` itself. The matching poster handler
+		// below is responsible for the actual GitHub side-effect.
 		func() Handler {
 			cfg := reviewAiCfg("pr-replier", "pr-reply", persona.PRReplier)
-			cfg.PlainText = true
-			cfg.Yolo = false
-			return NewAIHandler(cfg)
-		}(),
-		func() Handler {
-			cfg := reviewAiCfg("pr-summarizer", "pr-summary", persona.PRSummarizer)
 			cfg.PlainText = true
 			cfg.Yolo = false
 			return NewAIHandler(cfg)
@@ -272,8 +266,8 @@ func RegisterAll(reg *Registry, d Deps) error {
 		gh.NewFetcherHandler(d.GitHub, d.Store, d.PluginStore, logger),
 	)
 
-	// PR comment posters — always registered so the pr-feedback DAG can
-	// reference them unconditionally. When d.GitHub is nil the poster records
+	// PR comment poster — always registered so the pr-feedback DAG can
+	// reference it unconditionally. When d.GitHub is nil the poster records
 	// a PRCommentPosted{skipped=true} event instead of calling GitHub, so the
 	// DAG still advances in token-less environments.
 	var posterClient prCommentClient
@@ -285,13 +279,6 @@ func RegisterAll(reg *Registry, d Deps) error {
 			Name:     "pr-reply-poster",
 			Upstream: "pr-replier",
 			Kind:     "reply",
-			GitHub:   posterClient,
-			Store:    d.Store,
-		}),
-		NewPRCommentPoster(PRCommentPosterConfig{
-			Name:     "pr-summary-poster",
-			Upstream: "pr-summarizer",
-			Kind:     "summary",
 			GitHub:   posterClient,
 			Store:    d.Store,
 		}),

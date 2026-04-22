@@ -232,8 +232,13 @@ func TestPRFeedbackWorkflowDef_DisableQualityGate(t *testing.T) {
 
 // Regression test for the hulilabs/huli#689 duplicate-comment incident (2026-04-17).
 // Rick must own PR comment posting after the committer — the pr-feedback DAG
-// therefore terminates in two composer→poster pairs, and all four must be in
-// Required so WorkflowCompleted cannot fire until both posts are done.
+// therefore terminates in a single composer→poster pair, and both must be in
+// Required so WorkflowCompleted cannot fire until the post is done.
+//
+// The pr-summarizer/pr-summary-poster pair was removed because it produced a
+// noise-only "Rick pr-feedback run complete" comment after the substantive
+// pr-replier reply. GitHub already shows the pushed commits. If this test ever
+// re-introduces summary checks, re-read the rationale before adding handlers.
 func TestPRFeedbackWorkflowDef_RickOwnedCommentPosters(t *testing.T) {
 	def, err := selectWorkflowDef("pr-feedback")
 	if err != nil {
@@ -244,13 +249,22 @@ func TestPRFeedbackWorkflowDef_RickOwnedCommentPosters(t *testing.T) {
 	for _, r := range def.Required {
 		required[r] = true
 	}
-	for _, name := range []string{"pr-replier", "pr-reply-poster", "pr-summarizer", "pr-summary-poster"} {
+	for _, name := range []string{"pr-replier", "pr-reply-poster"} {
 		if !required[name] {
 			t.Errorf("%q missing from Required — WorkflowCompleted would fire before the comment is posted", name)
 		}
 	}
+	// Guard against accidental re-introduction of the summary pair.
+	for _, name := range []string{"pr-summarizer", "pr-summary-poster"} {
+		if required[name] {
+			t.Errorf("%q is back in Required — the noise-only summary comment was intentionally removed", name)
+		}
+		if _, ok := def.Graph[name]; ok {
+			t.Errorf("%q is back in Graph — see TestPRFeedbackWorkflowDef_RickOwnedCommentPosters comment", name)
+		}
+	}
 
-	// Strict ordering: committer → pr-replier → pr-reply-poster → pr-summarizer → pr-summary-poster.
+	// Strict ordering: committer → pr-replier → pr-reply-poster.
 	// Each must have exactly the one predecessor; any drift lets posts race or fire early.
 	checks := []struct {
 		handler string
@@ -258,8 +272,6 @@ func TestPRFeedbackWorkflowDef_RickOwnedCommentPosters(t *testing.T) {
 	}{
 		{"pr-replier", "committer"},
 		{"pr-reply-poster", "pr-replier"},
-		{"pr-summarizer", "pr-reply-poster"},
-		{"pr-summary-poster", "pr-summarizer"},
 	}
 	for _, c := range checks {
 		deps := def.Graph[c.handler]
@@ -268,14 +280,11 @@ func TestPRFeedbackWorkflowDef_RickOwnedCommentPosters(t *testing.T) {
 		}
 	}
 
-	// PhaseMap must resolve the new phases so verdict-to-handler lookups work
-	// if a reviewer ever targets the reply/summary phases. Absent entries
-	// would silently fall through to handler==phase which doesn't match.
+	// PhaseMap must resolve the reply phase so verdict-to-handler lookups work
+	// if a reviewer ever targets pr-reply. Absent entry would silently fall
+	// through to handler==phase which doesn't match.
 	if got := def.PhaseMap["pr-reply"]; got != "pr-replier" {
 		t.Errorf("PhaseMap[pr-reply] = %q, want pr-replier", got)
-	}
-	if got := def.PhaseMap["pr-summary"]; got != "pr-summarizer" {
-		t.Errorf("PhaseMap[pr-summary] = %q, want pr-summarizer", got)
 	}
 }
 

@@ -178,11 +178,11 @@ func PRReviewWorkflowDef() WorkflowDef {
 // captures codebase state, developer implements fixes, reviewer+qa validate,
 // quality-gate lints/tests, committer pushes.
 //
-// After the committer, Rick itself posts two PR comments via text-only
-// composer personas (pr-replier, pr-summarizer) piped through non-AI poster
-// handlers (pr-reply-poster, pr-summary-poster). The committer LLM is barred
-// from running `gh pr comment` directly — see the duplicate-post incident on
-// hulilabs/huli#689 (2026-04-17) and the analogous pr-consolidator comment.
+// After the committer, Rick posts a single reply comment via the text-only
+// pr-replier persona piped through the non-AI pr-reply-poster handler. The
+// committer LLM is barred from running `gh pr comment` directly — see the
+// duplicate-post incident on hulilabs/huli#689 (2026-04-17) and the analogous
+// pr-consolidator comment.
 //
 // github-pr-fetcher is always in the Required set even when GITHUB_TOKEN is
 // unset — the handler itself short-circuits with an empty enrichment in that
@@ -193,7 +193,7 @@ func PRFeedbackWorkflowDef() WorkflowDef {
 		Required: []string{
 			"workspace", "github-pr-fetcher", "feedback-analyzer", "context-snapshot",
 			"developer", "reviewer", "qa", "quality-gate", "committer",
-			"pr-replier", "pr-reply-poster", "pr-summarizer", "pr-summary-poster",
+			"pr-replier", "pr-reply-poster",
 		},
 		Graph: map[string][]string{
 			"github-pr-fetcher": {},
@@ -207,8 +207,6 @@ func PRFeedbackWorkflowDef() WorkflowDef {
 			"committer":         {"quality-gate"},
 			"pr-replier":        {"committer"},
 			"pr-reply-poster":   {"pr-replier"},
-			"pr-summarizer":     {"pr-reply-poster"},
-			"pr-summary-poster": {"pr-summarizer"},
 		},
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
@@ -221,7 +219,6 @@ func PRFeedbackWorkflowDef() WorkflowDef {
 			"feedback-verify":  "reviewer",
 			"commit":           "committer",
 			"pr-reply":         "pr-replier",
-			"pr-summary":       "pr-summarizer",
 		},
 	}
 }

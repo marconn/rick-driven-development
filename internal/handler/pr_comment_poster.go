@@ -15,11 +15,11 @@ import (
 )
 
 // PRCommentPosterHandler posts a comment to a GitHub PR on behalf of a text-only
-// upstream persona (pr-replier or pr-summarizer). It exists to solve the same
-// failure mode as pr-consolidator: when the LLM that composed the body also had
-// tool access, it would run `gh pr comment` proactively AND the handler would
-// post again, producing duplicates (see the 2026-04-17 pr-feedback incident on
-// hulilabs/huli#689).
+// upstream persona (currently pr-replier; the design accepts any text-only
+// composer). It exists to solve the same failure mode as pr-consolidator: when
+// the LLM that composed the body also had tool access, it would run
+// `gh pr comment` proactively AND the handler would post again, producing
+// duplicates (see the 2026-04-17 pr-feedback incident on hulilabs/huli#689).
 //
 // The poster:
 //  1. Loads WorkflowRequestedPayload to resolve owner/repo/PR number from Source.
@@ -33,7 +33,8 @@ import (
 //  4. Otherwise, calls github.Client.CreatePRComment and emits PRCommentPosted
 //     with the resulting comment ID.
 //
-// Registered twice — once per kind (reply, summary) with a different upstream.
+// Registered once per (Name, Upstream, Kind) tuple — currently only the
+// pr-reply-poster instance exists.
 type PRCommentPosterHandler struct {
 	name     string
 	upstream string // handler name whose AI output becomes the body
@@ -71,7 +72,7 @@ func (a PRCommentClientAdapter) GetIssueComments(ctx context.Context, owner, rep
 type PRCommentPosterConfig struct {
 	Name     string            // handler name, e.g. "pr-reply-poster"
 	Upstream string            // predecessor handler whose AI output is posted
-	Kind     string            // PRCommentPostedPayload.Kind: "reply" | "summary"
+	Kind     string            // PRCommentPostedPayload.Kind, e.g. "reply"
 	GitHub   prCommentClient   // may be nil — handler short-circuits with an enrichment-only path
 	Store    eventstore.Store  // required for loading correlation chain
 }

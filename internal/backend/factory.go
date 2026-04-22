@@ -113,7 +113,7 @@ var DefaultReviewBackends = []string{"claude", "gemini", "codex"}
 
 // NewReviewBackend builds the backend used by review-phase handlers
 // (reviewer, qa, pr-consolidator, pr-category reviewers, feedback-analyzer,
-// pr-replier, pr-summarizer, qa-analyzer).
+// pr-replier, qa-analyzer).
 //
 // Behavior:
 //   - len(names) == 0 → fall back to DefaultReviewBackends.

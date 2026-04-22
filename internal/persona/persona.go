@@ -39,11 +39,10 @@ const (
 	PRData          = "pr-data"
 	PRHygiene       = "pr-hygiene"
 
-	// PR comment composers — text-only personas whose output Rick posts on their
-	// behalf. They run with Yolo=false (no tool access) to eliminate the
+	// PR reply composer — text-only persona whose output Rick posts on its
+	// behalf. Runs with Yolo=false (no tool access) to eliminate the
 	// double-post failure mode where the LLM would run `gh pr comment` itself.
-	PRReplier    = "pr-replier"
-	PRSummarizer = "pr-summarizer"
+	PRReplier = "pr-replier"
 )
 
 // PhasePersona maps a workflow phase name to its default persona.
@@ -108,7 +107,6 @@ func DefaultRegistry() *Registry {
 		{Name: PRData, Description: "Data Integrity Reviewer"},
 		{Name: PRHygiene, Description: "Code Hygiene Reviewer"},
 		{Name: PRReplier, Description: "PR Reply Composer"},
-		{Name: PRSummarizer, Description: "PR Completion Summarizer"},
 	} {
 		_ = r.Register(&p)
 	}

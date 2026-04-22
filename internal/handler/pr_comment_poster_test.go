@@ -281,8 +281,9 @@ func TestPRCommentPoster_NoUpstreamOutputInChain(t *testing.T) {
 }
 
 // TestPRCommentPoster_IgnoresOtherUpstreams guards against a regression where
-// the pr-summary-poster might pick up pr-replier output (or vice versa).
-// The poster must filter AIResponseReceived by Source="handler:<upstream>".
+// the poster might pick up output from the wrong upstream (e.g., developer
+// instead of pr-replier). It must filter AIResponseReceived by
+// Source="handler:<upstream>".
 func TestPRCommentPoster_IgnoresOtherUpstreams(t *testing.T) {
 	store := newMockStore()
 	corr := "corr-multi"

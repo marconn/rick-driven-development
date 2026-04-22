@@ -47,7 +47,7 @@ Handlers implementing `Hinter` get two-phase dispatch: `Hint()` returns `HintEmi
 | `workspace-dev` | workspace → context-snapshot → developer → (reviewer ∥ qa) → quality-gate → committer | local dev |
 | `jira-dev` | jira-context → workspace → context-snapshot → researcher → architect → developer → (reviewer ∥ qa) → quality-gate → committer | `dag=jira-dev, ticket=PROJ-123` |
 | `pr-review` | pr-workspace → pr-jira-context → (architect ∥ reviewer ∥ qa) → pr-consolidator → pr-cleanup | `dag=pr-review, source=gh:owner/repo#N` |
-| `pr-feedback` | reads pending PR review comments, dispatches fixes via developer, posts summary | post-review |
+| `pr-feedback` | reads pending PR review comments, dispatches fixes via developer, posts reply | post-review |
 | `ci-fix` | reacts to CI failures on a PR branch | CI webhook |
 | `plan-btu` | confluence-reader → codebase-researcher → plan-architect → ⏸hint → estimator → ⏸hint → confluence-writer | `rick_plan_btu` |
 | `plan-jira` | page-reader → project-manager → ⏸hint → jira-task-creator | `dag=plan-jira, source=confluence:<id>` |
