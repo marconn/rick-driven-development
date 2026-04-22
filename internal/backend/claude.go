@@ -47,6 +47,25 @@ func (c *Claude) buildArgs(req Request) (args []string, stdinPrompt string) {
 	// Always use stream-json for structured parsing of the output.
 	args = append(args, "--output-format", "stream-json", "--verbose", "--include-partial-messages")
 
+	// Force a fixed extended-thinking budget so the model emits visible
+	// stream activity early instead of going silent for >2m of internal
+	// reasoning that the watchdog can't see. Workaround for
+	// anthropics/claude-code#20127: in CLI v2.1.8+, stream-json silently
+	// drops thinking blocks, so a model that decides to think before
+	// generating any text_delta looks identical to a wedged subprocess to
+	// our idle watchdog (internal/backend/idle_watchdog.go). Pinning a
+	// finite budget bounds the silent window — the model has to commit to
+	// emitting something within the cap rather than drifting on adaptive
+	// thinking. 31999 keeps us one token under the 32K Anthropic ceiling.
+	// --effort is the belt-and-suspenders companion: --max-thinking-tokens
+	// is a hidden/undocumented flag (absent from `claude --help` on 2.1.117)
+	// and could disappear in a future CLI release, while --effort is
+	// documented and maps to the same reasoning-budget concept. Pinning
+	// "high" keeps us on the upper end of the documented scale without
+	// going to "xhigh"/"max" which would make the silent-thinking window
+	// worse than adaptive.
+	args = append(args, "--max-thinking-tokens", "31999", "--effort", "high")
+
 	if req.Yolo {
 		args = append(args, "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions")
 	}

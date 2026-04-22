@@ -69,9 +69,44 @@ func TestClaudeBuildArgs(t *testing.T) {
 		assertContains(t, args, "stream-json")
 		assertContains(t, args, "--verbose")
 		assertContains(t, args, "--include-partial-messages")
+		assertArgPair(t, args, "--max-thinking-tokens", "31999")
 		assertContains(t, args, "Hello")
 		if stdin != "" {
 			t.Error("unexpected stdin prompt for small input")
+		}
+	})
+
+	// Regression test for the recurring developer-phase idle_timeout class
+	// (rick-bug-report-2026-04-22-jira-dev-idle-timeout-and-retry-gap.md and
+	// the four prior reports it cites). Workaround for upstream issue
+	// anthropics/claude-code#20127: the CLI's stream-json output silently
+	// drops thinking blocks in v2.1.8+, so a model that thinks before
+	// emitting any text_delta is indistinguishable from a wedged subprocess
+	// to internal/backend/idle_watchdog.go. Pinning --max-thinking-tokens to
+	// a fixed budget caps the silent window and keeps the watchdog honest.
+	// This subtest must continue to pass on every Request shape the
+	// dispatcher hands us — including resumed sessions where we skip the
+	// system prompt — so the workaround can't regress on a code path the
+	// other subtests don't exercise.
+	t.Run("max_thinking_tokens_always_set", func(t *testing.T) {
+		shapes := []Request{
+			{SystemPrompt: "sys", UserPrompt: "msg"},
+			{SystemPrompt: "sys", UserPrompt: "msg", SessionID: "latest"},
+			{SystemPrompt: "sys", UserPrompt: "msg", SessionID: "abc-123"},
+			{SystemPrompt: "sys", UserPrompt: "msg", Yolo: true},
+			{SystemPrompt: "sys", UserPrompt: strings.Repeat("x", maxArgSize+1)},
+		}
+		for i, req := range shapes {
+			args, _ := c.buildArgs(req)
+			assertArgPair(t, args, "--max-thinking-tokens", "31999")
+			// --effort high is the belt-and-suspenders companion: documented
+			// in `claude --help` (unlike --max-thinking-tokens, which is
+			// hidden) so if Anthropic ever removes the hidden flag we still
+			// pin reasoning budget via the stable CLI surface.
+			assertArgPair(t, args, "--effort", "high")
+			if t.Failed() {
+				t.Fatalf("shape %d: missing thinking-budget flags (args=%v)", i, args)
+			}
 		}
 	})
 
@@ -750,6 +785,19 @@ func assertNotContains(t *testing.T, args []string, unwanted string) {
 	if slices.Contains(args, unwanted) {
 		t.Errorf("args %v should not contain %q", args, unwanted)
 	}
+}
+
+// assertArgPair checks that flag is followed immediately by value in args.
+// Distinguishes a real flag-value pairing from two unrelated tokens that
+// happen to both be present.
+func assertArgPair(t *testing.T, args []string, flag, value string) {
+	t.Helper()
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == flag && args[i+1] == value {
+			return
+		}
+	}
+	t.Errorf("args %v should contain pair %q %q", args, flag, value)
 }
 
 func assertJSONEqual(t *testing.T, expected, actual string) {

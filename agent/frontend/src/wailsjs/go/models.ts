@@ -168,6 +168,9 @@ export namespace main {
 	    started_at?: string;
 	    completed_at?: string;
 	    duration_ms?: number;
+	    error?: string;
+	    failure_kind?: string;
+	    stderr?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new PhaseEntry(source);
@@ -181,6 +184,9 @@ export namespace main {
 	        this.started_at = source["started_at"];
 	        this.completed_at = source["completed_at"];
 	        this.duration_ms = source["duration_ms"];
+	        this.error = source["error"];
+	        this.failure_kind = source["failure_kind"];
+	        this.stderr = source["stderr"];
 	    }
 	}
 	export class TokenUsage {
@@ -310,6 +316,7 @@ export namespace main {
 	    fail_reason?: string;
 	    started_at?: string;
 	    completed_at?: string;
+	    pending_hints_count?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new WorkflowSummary(source);
@@ -323,6 +330,7 @@ export namespace main {
 	        this.fail_reason = source["fail_reason"];
 	        this.started_at = source["started_at"];
 	        this.completed_at = source["completed_at"];
+	        this.pending_hints_count = source["pending_hints_count"];
 	    }
 	}
 
