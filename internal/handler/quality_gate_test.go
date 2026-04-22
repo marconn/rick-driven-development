@@ -988,3 +988,169 @@ func assertVerdictOutcome(t *testing.T, env event.Envelope, want event.VerdictOu
 		t.Errorf("want verdict outcome %q, got %q", want, vp.Outcome)
 	}
 }
+
+// TestBuildFailureDescription_EmptyAfterFilter verifies that when
+// filterDockerNoise strips every line the description falls back to the raw
+// unfiltered tail instead of emitting an empty body. This is the root-cause
+// fix for the 2026-04-22 docs-only PR loop where quality-gate emitted
+// `./run.sh test failed:\n` with zero diagnostic content and the developer
+// had to re-run the suite manually to discover what failed.
+func TestBuildFailureDescription_EmptyAfterFilter(t *testing.T) {
+	// All lines match the docker-compose noise regex; filter collapses to
+	// empty, but the raw tail must still surface something.
+	rawAllNoise := strings.Repeat(
+		"Container deployments-mysql-1 Started\nNetwork deployments-default Created\n", 5)
+	desc := buildFailureDescription("test", rawAllNoise, "")
+	if !strings.Contains(desc, "raw tail follows") {
+		t.Errorf("expected raw-tail marker when filter empties output, got:\n%s", desc)
+	}
+	if !strings.Contains(desc, "Container") {
+		t.Errorf("raw tail should contain some of the noise we dropped, got:\n%s", desc)
+	}
+	if strings.HasSuffix(desc, "failed:\n") {
+		t.Error("description must not end at the colon-newline — empty body is the bug we're fixing")
+	}
+}
+
+// TestBuildFailureDescription_NoOutput verifies the empty-input guard —
+// when the tool emitted nothing at all we still produce a non-empty
+// description so the operator sees a machine-readable signal.
+func TestBuildFailureDescription_NoOutput(t *testing.T) {
+	desc := buildFailureDescription("test", "", "")
+	if !strings.Contains(desc, "no output captured") {
+		t.Errorf("expected no-output marker, got:\n%s", desc)
+	}
+}
+
+// TestBuildFailureDescription_CleanedPath verifies the common case — when
+// filter leaves actionable content we use it and do NOT emit the raw-tail
+// marker (that's the escape hatch, not the primary path).
+func TestBuildFailureDescription_CleanedPath(t *testing.T) {
+	raw := "Container foo Started\nFAIL: TestImporter (expected 200, got 500)\n"
+	desc := buildFailureDescription("test", raw, "")
+	if !strings.Contains(desc, "FAIL: TestImporter") {
+		t.Errorf("cleaned path should surface the FAIL line, got:\n%s", desc)
+	}
+	if strings.Contains(desc, "raw tail follows") {
+		t.Error("cleaned path must not use the raw-tail escape hatch")
+	}
+}
+
+// TestIsDocsOnlyDiff verifies the whitelist classifier — only real docs
+// files pass; a single code file disqualifies the whole diff.
+func TestIsDocsOnlyDiff(t *testing.T) {
+	cases := []struct {
+		name  string
+		files []string
+		want  bool
+	}{
+		{"single markdown", []string{"CLAUDE.md"}, true},
+		{"docs tree", []string{"docs/overview.md", "docs/api.rst"}, true},
+		{"codeowners and license", []string{"CODEOWNERS", "LICENSE"}, true},
+		{"mixed docs + code", []string{"README.md", "internal/foo.go"}, false},
+		{"pure Go", []string{"cmd/rick/main.go"}, false},
+		{"empty list", nil, false},
+		{"only blank lines", []string{"  ", ""}, false},
+		{"nested markdown", []string{"agent/frontend/README.md", ".github/ISSUE_TEMPLATE/bug.md"}, true},
+		{"dotfile config", []string{".golangci.yml"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDocsOnlyDiff(tc.files); got != tc.want {
+				t.Errorf("isDocsOnlyDiff(%v) = %v, want %v", tc.files, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestQualityGate_DocsOnlyShortCircuits verifies the end-to-end fast-pass:
+// when a ContextGit event in the correlation chain reports a docs-only
+// modified-files set, Handle must return VerdictPass without ever invoking
+// the stack binary. Uses stackBin="/nonexistent/should-never-run" so a
+// regression (gate actually spawning a subprocess) fails loudly.
+func TestQualityGate_DocsOnlyShortCircuits(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	gitPayload := event.MustMarshal(event.ContextGitPayload{
+		HEAD:          "deadbeef",
+		Branch:        "HULI-33678-add-claude-md",
+		ModifiedFiles: []string{"CLAUDE.md"},
+	})
+	store.correlationEvents["corr-docs"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-docs"),
+		event.New(event.ContextGit, 1, gitPayload).WithCorrelation("corr-docs"),
+	}
+
+	h := &QualityGateHandler{
+		store:    store,
+		name:     "quality-gate",
+		stackBin: "/nonexistent/should-never-run",
+		timeout:  300,
+		logger:   slog.Default(),
+	}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-docs")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertVerdictOutcome(t, got[0], event.VerdictPass)
+
+	var vp event.VerdictPayload
+	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(vp.Summary, "docs-only") {
+		t.Errorf("expected docs-only marker in summary, got %q", vp.Summary)
+	}
+}
+
+// TestQualityGate_MixedDiffRunsFullGate confirms the short-circuit does NOT
+// trigger when the diff contains any code file — the full gate runs and
+// returns the stack's verdict. Catches false positives from an over-broad
+// whitelist.
+func TestQualityGate_MixedDiffRunsFullGate(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeStack := writeFakeStack(t, t.TempDir(), fakeStackSuccess())
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	gitPayload := event.MustMarshal(event.ContextGitPayload{
+		ModifiedFiles: []string{"CLAUDE.md", "internal/foo.go"},
+	})
+	store.correlationEvents["corr-mixed"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-mixed"),
+		event.New(event.ContextGit, 1, gitPayload).WithCorrelation("corr-mixed"),
+	}
+
+	h := &QualityGateHandler{
+		store:    store,
+		name:     "quality-gate",
+		stackBin: fakeStack,
+		timeout:  300,
+		logger:   slog.Default(),
+	}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-mixed")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Full gate ran and passed (fakeStackSuccess).
+	assertVerdictOutcome(t, got[0], event.VerdictPass)
+	var vp event.VerdictPayload
+	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(vp.Summary, "docs-only") {
+		t.Errorf("mixed diff must not take docs-only fast-pass, got summary %q", vp.Summary)
+	}
+}

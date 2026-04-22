@@ -126,12 +126,21 @@ type Issue struct {
 }
 
 // VerdictPayload replaces heuristic text parsing with structured verdicts.
+//
+// Advisory=true signals that the verdict source does not trust its own
+// failure signal (e.g., quality-gate's local VM failed but GitHub CI is
+// green on the same SHA — almost always a local-env flake). The aggregate
+// converts advisory fails into WorkflowPaused instead of FeedbackGenerated
+// so the loop escalates to an operator rather than burning developer
+// iterations on a non-regression. Advisory is ignored on pass/unknown
+// outcomes.
 type VerdictPayload struct {
 	Phase       string         `json:"phase"`        // phase being evaluated (e.g., "develop")
 	SourcePhase string         `json:"source_phase"` // phase that rendered the verdict (e.g., "review")
 	Outcome     VerdictOutcome `json:"outcome"`
 	Issues      []Issue        `json:"issues,omitempty"`
 	Summary     string         `json:"summary"`
+	Advisory    bool           `json:"advisory,omitempty"`
 }
 
 // FeedbackGeneratedPayload is emitted when feedback is prepared for a retry.

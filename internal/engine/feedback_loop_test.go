@@ -1535,3 +1535,193 @@ func TestE2EFeedbackLoopParallelReviewersRefire(t *testing.T) {
 		t.Errorf("committer should run exactly 1 time, got %d", c)
 	}
 }
+
+// =============================================================================
+// Advisory verdict + identical-failure dedup (2026-04-22 quality-gate fix)
+// =============================================================================
+
+// TestAggregate_AdvisoryFailEscalatesImmediately verifies that a fail verdict
+// marked Advisory=true (emitted by quality-gate when GitHub CI disagrees with
+// the local run) converts to WorkflowPaused on the first occurrence — no
+// FeedbackGenerated, no developer re-trigger.
+func TestAggregate_AdvisoryFailEscalatesImmediately(t *testing.T) {
+	agg := NewWorkflowAggregate("wf-adv")
+	agg.Status = StatusRunning
+	agg.MaxIterations = 3
+	agg.WorkflowDef = &WorkflowDef{
+		Required: []string{"developer"}, MaxIterations: 3,
+		PhaseMap:          corePhaseMap,
+		EscalateOnMaxIter: true,
+	}
+
+	events, err := agg.Decide(event.Envelope{
+		Type: event.VerdictRendered, AggregateID: "wf-adv", CorrelationID: "corr-adv",
+		Payload: event.MustMarshal(event.VerdictPayload{
+			Phase:       "develop",
+			SourcePhase: "quality-gate",
+			Outcome:     event.VerdictFail,
+			Summary:     "local test failed (GitHub CI green on same SHA)",
+			Advisory:    true,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d: %v", len(events), events)
+	}
+	if events[0].Type != event.WorkflowPaused {
+		t.Fatalf("expected WorkflowPaused for advisory verdict, got %s", events[0].Type)
+	}
+	var p event.WorkflowPausedPayload
+	if err := json.Unmarshal(events[0].Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.Reason, "advisory") {
+		t.Errorf("paused reason should mention advisory, got: %s", p.Reason)
+	}
+}
+
+// TestAggregate_IdenticalVerdictDedupePauses verifies the aggregate escalates
+// on the SECOND byte-identical failing verdict rather than burning another
+// developer iteration. Reproduces the 2026-04-22 bug pattern: quality-gate
+// emitted `./run.sh test failed:\n` twice with identical payloads and each
+// triggered a developer re-run worth ~3.5M tokens.
+func TestAggregate_IdenticalVerdictDedupePauses(t *testing.T) {
+	agg := NewWorkflowAggregate("wf-dedup")
+	agg.Status = StatusRunning
+	agg.MaxIterations = 3
+	agg.WorkflowDef = &WorkflowDef{
+		Required: []string{"developer"}, MaxIterations: 3,
+		PhaseMap:          corePhaseMap,
+		EscalateOnMaxIter: true,
+	}
+
+	// First failing verdict — allowed. Emits FeedbackGenerated.
+	verdict := event.VerdictPayload{
+		Phase: "develop", SourcePhase: "quality-gate",
+		Outcome: event.VerdictFail,
+		Issues:  []event.Issue{{Severity: "major", Category: "correctness", Description: "./run.sh test failed:\n"}},
+		Summary: "test failed",
+	}
+	env1 := event.Envelope{
+		Version: 1, Type: event.VerdictRendered,
+		AggregateID: "wf-dedup", CorrelationID: "corr-dedup",
+		Payload: event.MustMarshal(verdict),
+	}
+	out1, err := agg.Decide(env1)
+	if err != nil {
+		t.Fatalf("decide 1: %v", err)
+	}
+	if len(out1) != 1 || out1[0].Type != event.FeedbackGenerated {
+		t.Fatalf("first verdict: expected FeedbackGenerated, got %v", out1)
+	}
+
+	// Apply both the verdict (fingerprint) and the feedback (count++) so the
+	// aggregate reflects the real Engine flow before the second decision.
+	agg.Apply(env1)
+	agg.Apply(event.Envelope{
+		Version: 2, Type: event.FeedbackGenerated,
+		Payload: event.MustMarshal(event.FeedbackGeneratedPayload{
+			TargetPhase: "developer", SourcePhase: "quality-gate", Iteration: 1,
+		}),
+	})
+
+	// Second verdict with byte-identical payload — must escalate.
+	env2 := event.Envelope{
+		Version: 3, Type: event.VerdictRendered,
+		AggregateID: "wf-dedup", CorrelationID: "corr-dedup",
+		Payload: event.MustMarshal(verdict),
+	}
+	out2, err := agg.Decide(env2)
+	if err != nil {
+		t.Fatalf("decide 2: %v", err)
+	}
+	if len(out2) != 1 {
+		t.Fatalf("second verdict: expected 1 event, got %d", len(out2))
+	}
+	if out2[0].Type != event.WorkflowPaused {
+		t.Fatalf("second verdict: expected WorkflowPaused on identical failure, got %s", out2[0].Type)
+	}
+	var p event.WorkflowPausedPayload
+	_ = json.Unmarshal(out2[0].Payload, &p)
+	if !strings.Contains(p.Reason, "byte-identical") {
+		t.Errorf("paused reason should mention byte-identical, got: %s", p.Reason)
+	}
+}
+
+// TestAggregate_DifferentVerdictsDoNotDedup confirms the escape hatch only
+// fires on *identical* payloads — a verdict whose issues changed gets the
+// normal feedback loop, not an escalation.
+func TestAggregate_DifferentVerdictsDoNotDedup(t *testing.T) {
+	agg := NewWorkflowAggregate("wf-diff")
+	agg.Status = StatusRunning
+	agg.MaxIterations = 3
+	agg.WorkflowDef = &WorkflowDef{
+		Required: []string{"developer"}, MaxIterations: 3, PhaseMap: corePhaseMap,
+	}
+
+	first := event.VerdictPayload{
+		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Issues:  []event.Issue{{Description: "lint error: unused var"}},
+		Summary: "lint failed",
+	}
+	env1 := event.Envelope{
+		Version: 1, Type: event.VerdictRendered,
+		AggregateID: "wf-diff", CorrelationID: "corr-diff",
+		Payload:     event.MustMarshal(first),
+	}
+	if _, err := agg.Decide(env1); err != nil {
+		t.Fatal(err)
+	}
+	agg.Apply(env1)
+	agg.Apply(event.Envelope{
+		Version: 2, Type: event.FeedbackGenerated,
+		Payload: event.MustMarshal(event.FeedbackGeneratedPayload{TargetPhase: "developer", SourcePhase: "quality-gate"}),
+	})
+
+	second := event.VerdictPayload{
+		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Issues:  []event.Issue{{Description: "test failed: TestFoo"}}, // different
+		Summary: "test failed",
+	}
+	out, err := agg.Decide(event.Envelope{
+		Version: 3, Type: event.VerdictRendered,
+		AggregateID: "wf-diff", CorrelationID: "corr-diff",
+		Payload:     event.MustMarshal(second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].Type != event.FeedbackGenerated {
+		t.Fatalf("different verdict should generate feedback, got %v", out)
+	}
+}
+
+// TestAggregate_PassClearsFingerprint verifies that a pass verdict clears
+// the fingerprint slot so a later regression with the same description
+// doesn't get misclassified as identical-to-previous and skipped.
+func TestAggregate_PassClearsFingerprint(t *testing.T) {
+	agg := NewWorkflowAggregate("wf-clear")
+	agg.Status = StatusRunning
+	agg.WorkflowDef = &WorkflowDef{Required: []string{"developer"}, PhaseMap: corePhaseMap}
+
+	failVerdict := event.VerdictPayload{
+		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Issues:  []event.Issue{{Description: "flake"}},
+		Summary: "test failed",
+	}
+	passVerdict := event.VerdictPayload{
+		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictPass,
+		Summary: "ok",
+	}
+
+	agg.Apply(event.Envelope{Version: 1, Type: event.VerdictRendered, Payload: event.MustMarshal(failVerdict)})
+	if agg.LastVerdictFingerprint["quality-gate|developer"] == "" {
+		t.Fatal("fail verdict should have recorded a fingerprint")
+	}
+	agg.Apply(event.Envelope{Version: 2, Type: event.VerdictRendered, Payload: event.MustMarshal(passVerdict)})
+	if fp := agg.LastVerdictFingerprint["quality-gate|developer"]; fp != "" {
+		t.Errorf("pass verdict should have cleared fingerprint, got %q", fp)
+	}
+}

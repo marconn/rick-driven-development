@@ -422,8 +422,19 @@ func (s *Server) toolWorkflowOutput(ctx context.Context, raw json.RawMessage) (a
 		return nil, fmt.Errorf("load correlation events: %w", err)
 	}
 
-	// Collect PersonaCompleted → OutputRef mappings.
-	outputRefs := make(map[string]string) // persona → outputRef event ID
+	// Collect PersonaCompleted → OutputRef mappings. We track both the handler
+	// name (Persona) and the phase verb (Phase) so the "phases" filter can
+	// match whichever label the operator supplied. Prior to this the filter
+	// only matched Persona, which quietly returned zero results whenever a
+	// caller passed a phase verb ("develop") instead of a persona name
+	// ("developer") — and the tool's JSON schema explicitly names the
+	// parameter "phases", so phase verbs are the natural thing to pass.
+	type outputSlot struct {
+		ref     string
+		persona string
+		phase   string
+	}
+	outputRefs := make(map[string]outputSlot) // persona → slot
 	for _, env := range allEvents {
 		if env.Type != event.PersonaCompleted {
 			continue
@@ -433,23 +444,38 @@ func (s *Server) toolWorkflowOutput(ctx context.Context, raw json.RawMessage) (a
 			continue
 		}
 		if p.OutputRef != "" {
-			outputRefs[p.Persona] = p.OutputRef
+			outputRefs[p.Persona] = outputSlot{ref: p.OutputRef, persona: p.Persona, phase: p.Phase}
 		}
 	}
 
-	// Filter to requested phases.
-	phaseFilter := make(map[string]bool)
+	// Filter to requested phases. Accept both phase verbs and persona names;
+	// case-insensitive so operators don't have to remember which form the
+	// payload used. An empty filter means "return every slot".
+	phaseFilter := make(map[string]bool, len(args.Phases))
 	for _, p := range args.Phases {
-		phaseFilter[p] = true
+		phaseFilter[strings.ToLower(strings.TrimSpace(p))] = true
+	}
+	matchesFilter := func(slot outputSlot) bool {
+		if len(phaseFilter) == 0 {
+			return true
+		}
+		if phaseFilter[strings.ToLower(slot.persona)] {
+			return true
+		}
+		if slot.phase != "" && phaseFilter[strings.ToLower(slot.phase)] {
+			return true
+		}
+		return false
 	}
 
 	const maxOutputLen = 10000
 	var outputs []phaseOutput
 
-	for persona, ref := range outputRefs {
-		if len(phaseFilter) > 0 && !phaseFilter[persona] {
+	for persona, slot := range outputRefs {
+		if !matchesFilter(slot) {
 			continue
 		}
+		ref := slot.ref
 
 		aiEvt, loadErr := s.deps.Store.LoadEvent(ctx, ref)
 		if loadErr != nil {

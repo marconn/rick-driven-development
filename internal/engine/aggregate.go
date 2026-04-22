@@ -1,8 +1,11 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/marconn/rick-event-driven-development/internal/event"
 )
@@ -43,6 +46,15 @@ type WorkflowAggregate struct {
 	WorkflowID        string
 	Source            string
 	Ticket            string
+	// LastVerdictFingerprint maps "<source_phase>|<target_persona>" to the
+	// fingerprint (sorted hash of Issues[].Description) of the most recent
+	// failing VerdictRendered for that pair. Used by decideVerdictRendered to
+	// escalate a loop when two consecutive failures are byte-identical — a
+	// strong signal that the developer can't fix the cited issues (test
+	// flakes, env drift, pre-existing main-branch failures). Keyed per
+	// source so a flaky quality-gate can't mask an independent reviewer
+	// failure, and vice versa.
+	LastVerdictFingerprint map[string]string
 }
 
 // MaxAutoRetriesPerPersona caps how many automatic retries the engine
@@ -54,13 +66,14 @@ const MaxAutoRetriesPerPersona = 1
 // NewWorkflowAggregate creates a new empty aggregate ready for event replay.
 func NewWorkflowAggregate(id string) *WorkflowAggregate {
 	return &WorkflowAggregate{
-		ID:                id,
-		Status:            StatusRequested,
-		CompletedPersonas: make(map[string]bool),
-		FeedbackCount:     make(map[string]int),
-		FeedbackPending:   make(map[string]string),
-		AutoRetries:       make(map[string]int),
-		MaxIterations:     3,
+		ID:                     id,
+		Status:                 StatusRequested,
+		CompletedPersonas:      make(map[string]bool),
+		FeedbackCount:          make(map[string]int),
+		FeedbackPending:        make(map[string]string),
+		AutoRetries:            make(map[string]int),
+		LastVerdictFingerprint: make(map[string]string),
+		MaxIterations:          3,
 	}
 }
 
@@ -149,6 +162,33 @@ func (w *WorkflowAggregate) Apply(env event.Envelope) {
 			// This prevents stale PersonaCompleted events (already in the FIFO)
 			// from prematurely re-tracking after feedback clears them.
 			w.FeedbackPending[p.SourcePhase] = p.TargetPhase
+		}
+
+	case event.VerdictRendered:
+		// Track fingerprint of failing verdicts so decideVerdictRendered can
+		// detect byte-identical failures across iterations. Apply is
+		// side-effect-free: we just record state so the next decision round
+		// can compare. Pass verdicts clear the slot so a transient fail
+		// followed by a pass doesn't trigger dedup on an unrelated later
+		// regression.
+		var vp event.VerdictPayload
+		_ = json.Unmarshal(env.Payload, &vp)
+		if w.WorkflowDef == nil {
+			break
+		}
+		target := w.WorkflowDef.ResolvePhase(vp.Phase)
+		source := w.WorkflowDef.ResolvePhase(vp.SourcePhase)
+		if source == "" || target == "" {
+			break
+		}
+		key := source + "|" + target
+		if w.LastVerdictFingerprint == nil {
+			w.LastVerdictFingerprint = make(map[string]string)
+		}
+		if vp.Outcome == event.VerdictFail {
+			w.LastVerdictFingerprint[key] = verdictFingerprint(vp)
+		} else {
+			delete(w.LastVerdictFingerprint, key)
 		}
 
 	default:
@@ -380,21 +420,38 @@ func (w *WorkflowAggregate) decideVerdictRendered(env event.Envelope) ([]event.E
 		return nil, nil
 	}
 
+	// Advisory verdicts (e.g., quality-gate with GitHub CI green on same SHA)
+	// signal that the source doesn't trust its own failure and wants operator
+	// review rather than a retry. Escalate immediately — no developer burn on
+	// what the gate itself flagged as likely-flake.
+	if v.Advisory {
+		return w.escalateVerdict(env, fmt.Sprintf(
+			"%s emitted advisory failure — %s (pausing for operator review instead of re-triggering %s)",
+			sourcePersona, v.Summary, targetPersona)), nil
+	}
+
+	// Identical-failure dedup: if this verdict's fingerprint matches the one
+	// stored on the aggregate for this (source, target) pair, we're in a
+	// non-convergent loop (pre-existing flake, env drift, regression the
+	// developer can't fix). Escalate on the second identical failure instead
+	// of re-triggering the developer — the common case burns ~3.5M tokens
+	// per wasted iteration on docs-only PRs. Gated on iteration >= 2 so the
+	// first retry is always granted: one legitimate retry after a transient
+	// dip is cheaper than a false escalation.
+	fpKey := sourcePersona + "|" + targetPersona
+	if w.FeedbackCount[targetPersona] >= 1 && w.LastVerdictFingerprint[fpKey] != "" &&
+		w.LastVerdictFingerprint[fpKey] == verdictFingerprint(v) {
+		return w.escalateVerdict(env, fmt.Sprintf(
+			"%s failed twice with byte-identical verdict — not converging (last summary: %q)",
+			sourcePersona, v.Summary)), nil
+	}
+
 	iteration := w.FeedbackCount[targetPersona] + 1
 	if iteration > w.MaxIterations {
 		// Escalate to operator (pause) or hard fail depending on workflow config
 		if w.WorkflowDef != nil && w.WorkflowDef.EscalateOnMaxIter {
-			payload := event.MustMarshal(event.WorkflowPausedPayload{
-				Reason: fmt.Sprintf("max iterations (%d) reached for %s — escalated to operator", w.MaxIterations, targetPersona),
-				Source: "engine:auto-escalation",
-			})
-			return []event.Envelope{
-				event.New(event.WorkflowPaused, 1, payload).
-					WithAggregate(w.ID, w.Version+1).
-					WithCausation(env.ID).
-					WithCorrelation(env.CorrelationID).
-					WithSource("engine:aggregate"),
-			}, nil
+			return w.escalateVerdict(env, fmt.Sprintf(
+				"max iterations (%d) reached for %s — escalated to operator", w.MaxIterations, targetPersona)), nil
 		}
 		payload := event.MustMarshal(event.WorkflowFailedPayload{
 			Reason: fmt.Sprintf("max iterations (%d) reached for %s", w.MaxIterations, targetPersona),
@@ -423,6 +480,47 @@ func (w *WorkflowAggregate) decideVerdictRendered(env event.Envelope) ([]event.E
 			WithCorrelation(env.CorrelationID).
 			WithSource("engine:aggregate"),
 	}, nil
+}
+
+// escalateVerdict is a small helper for emitting WorkflowPaused from the
+// three decideVerdictRendered escape hatches (advisory / identical /
+// max-iter). Keeps the payload construction in one place so operators see
+// a consistent Source tag for every auto-escalation.
+func (w *WorkflowAggregate) escalateVerdict(env event.Envelope, reason string) []event.Envelope {
+	payload := event.MustMarshal(event.WorkflowPausedPayload{
+		Reason: reason,
+		Source: "engine:auto-escalation",
+	})
+	return []event.Envelope{
+		event.New(event.WorkflowPaused, 1, payload).
+			WithAggregate(w.ID, w.Version+1).
+			WithCausation(env.ID).
+			WithCorrelation(env.CorrelationID).
+			WithSource("engine:aggregate"),
+	}
+}
+
+// verdictFingerprint produces a stable hash of the failure-identifying
+// fields of a VerdictPayload — summary + sorted issue descriptions. Issues
+// are sorted so pass-order-dependent re-sequencing (rare but possible if
+// the source persona streams them) doesn't invalidate dedup. Omits Severity,
+// Category, File, Line deliberately: the description itself carries them
+// for human-authored verdicts and including them would over-specify the
+// fingerprint and miss near-identical retries.
+func verdictFingerprint(v event.VerdictPayload) string {
+	descs := make([]string, 0, len(v.Issues))
+	for _, iss := range v.Issues {
+		descs = append(descs, iss.Description)
+	}
+	sort.Strings(descs)
+	hasher := sha256.New()
+	hasher.Write([]byte(v.Summary))
+	hasher.Write([]byte{0})
+	for _, d := range descs {
+		hasher.Write([]byte(d))
+		hasher.Write([]byte{0})
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 func (w *WorkflowAggregate) decideTokenBudgetExceeded(env event.Envelope) ([]event.Envelope, error) {

@@ -565,3 +565,86 @@ func TestTools_InvalidJSON(t *testing.T) {
 		})
 	}
 }
+
+// TestToolWorkflowOutput_FiltersByPhaseVerb is the regression for the MCP
+// filter bug reported on 2026-04-22: `phases=["developer"]` (or the verb
+// "develop") returned `count:0` because the implementation only compared
+// the filter against persona names from PersonaCompleted.Persona, ignoring
+// the phase verb. The fix accepts either form, case-insensitive.
+func TestToolWorkflowOutput_FiltersByPhaseVerb(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	corrID := "wf-filter"
+	personaAgg := corrID + ":persona:developer"
+
+	// Seed AIResponseReceived + PersonaCompleted so the output-ref path resolves.
+	aiEvt := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
+		Phase:      "develop",
+		Backend:    "claude",
+		TokensUsed: 1000,
+		DurationMS: 500,
+		Output:     json.RawMessage(`"developer wrote the code"`),
+	})).WithAggregate(personaAgg, 1).WithCorrelation(corrID)
+
+	if err := deps.Store.Append(context.Background(), personaAgg, 0, []event.Envelope{aiEvt}); err != nil {
+		t.Fatalf("seed AI response: %v", err)
+	}
+
+	completed := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona:   "developer",
+		Phase:     "develop",
+		OutputRef: string(aiEvt.ID),
+	})).WithAggregate(personaAgg, 2).WithCorrelation(corrID)
+
+	if err := deps.Store.Append(context.Background(), personaAgg, 1, []event.Envelope{completed}); err != nil {
+		t.Fatalf("seed PersonaCompleted: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		phases []string
+	}{
+		{"persona name", []string{"developer"}},
+		{"phase verb", []string{"develop"}},
+		{"phase verb uppercase", []string{"Develop"}},
+		{"multiple mixed", []string{"develop", "reviewer"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := callTool(t, s, "rick_workflow_output", map[string]any{
+				"workflow_id": corrID,
+				"phases":      tc.phases,
+			})
+			if err != nil {
+				t.Fatalf("call tool: %v", err)
+			}
+			rm, ok := result.(map[string]any)
+			if !ok {
+				t.Fatalf("unexpected result type: %T", result)
+			}
+			count, _ := rm["count"].(int)
+			if count != 1 {
+				t.Errorf("expected count=1 for phases=%v, got %d (full result: %+v)", tc.phases, count, rm)
+			}
+		})
+	}
+
+	// Sanity: a filter that matches nothing returns zero results.
+	t.Run("no match", func(t *testing.T) {
+		result, err := callTool(t, s, "rick_workflow_output", map[string]any{
+			"workflow_id": corrID,
+			"phases":      []string{"nonexistent-phase"},
+		})
+		if err != nil {
+			t.Fatalf("call tool: %v", err)
+		}
+		if rm, ok := result.(map[string]any); ok {
+			if count, _ := rm["count"].(int); count != 0 {
+				t.Errorf("expected count=0 for unmatched filter, got %d", count)
+			}
+		}
+	})
+}

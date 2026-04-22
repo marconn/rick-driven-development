@@ -11,10 +11,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/marconn/rick-event-driven-development/internal/event"
 	"github.com/marconn/rick-event-driven-development/internal/eventstore"
+	"github.com/marconn/rick-event-driven-development/internal/github"
 )
 
 // qualityCheck pairs a logical check name (used in summaries and debug filenames)
@@ -36,24 +38,66 @@ type qualityCheck struct {
 type QualityGateHandler struct {
 	store    eventstore.Store
 	name     string
-	stackBin string // path to stack binary, defaults to "stack"
-	timeout  int    // stack run --timeout in seconds, defaults to 300
-	debugDir string // directory for full debug output; empty = no debug files
+	stackBin string         // path to stack binary, defaults to "stack"
+	timeout  int            // stack run --timeout in seconds, defaults to 300
+	debugDir string         // directory for full debug output; resolved by resolveQualityGateDebugDir
+	gh       *github.Client // optional — used to cross-check local fails against GitHub CI
 	logger   *slog.Logger
 }
 
+// docsOnlyExts lists file suffixes that are purely documentation and carry
+// no build/test impact. A PR whose modified-files set is a subset of these
+// cannot have caused a runtime regression, so the gate short-circuits to pass.
+// Kept deliberately narrow — we only skip when *every* modified path matches.
+var docsOnlyExts = []string{".md", ".markdown", ".rst", ".txt"}
+
+// docsOnlyPaths lists path prefixes/filenames that are structurally docs or
+// metadata. Must-end-with-slash prefixes are matched via HasPrefix.
+var docsOnlyPaths = []string{
+	"docs/", ".github/ISSUE_TEMPLATE/", ".github/PULL_REQUEST_TEMPLATE/",
+}
+
+var docsOnlyFilenames = map[string]bool{
+	"CODEOWNERS":    true,
+	"LICENSE":       true,
+	"AUTHORS":       true,
+	"CONTRIBUTORS":  true,
+}
+
 // NewQualityGate creates a QualityGateHandler with the canonical name "quality-gate".
-// Set RICK_QUALITY_GATE_DEBUG_DIR to persist full untruncated output for inspection.
+// Set RICK_QUALITY_GATE_DEBUG_DIR to override the default debug directory
+// ($XDG_STATE_HOME/rick/quality-gate, falling back to $HOME/.local/state/rick/quality-gate).
+// Debug files are always written on failure — the default location guarantees
+// operators can recover the raw tool output even when the filtered verdict body
+// collapses to an empty string.
 func NewQualityGate(d Deps) *QualityGateHandler {
 	h := &QualityGateHandler{
 		store:    d.Store,
 		name:     "quality-gate",
 		stackBin: "stack",
 		timeout:  300,
-		debugDir: os.Getenv("RICK_QUALITY_GATE_DEBUG_DIR"),
+		debugDir: resolveQualityGateDebugDir(),
+		gh:       d.GitHub,
 		logger:   slog.Default(),
 	}
 	return h
+}
+
+// resolveQualityGateDebugDir picks the default debug directory for
+// quality-gate failure artifacts. Precedence: RICK_QUALITY_GATE_DEBUG_DIR →
+// $XDG_STATE_HOME/rick/quality-gate → $HOME/.local/state/rick/quality-gate.
+// Returns empty only if HOME is unset (practically impossible on a running host).
+func resolveQualityGateDebugDir() string {
+	if d := os.Getenv("RICK_QUALITY_GATE_DEBUG_DIR"); d != "" {
+		return d
+	}
+	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
+		return filepath.Join(x, "rick", "quality-gate")
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		return filepath.Join(home, ".local", "state", "rick", "quality-gate")
+	}
+	return ""
 }
 
 func (h *QualityGateHandler) Name() string             { return h.name }
@@ -64,6 +108,12 @@ func (h *QualityGateHandler) Subscribes() []event.Type { return nil }
 // `stack run <workspace-path> ./run.sh <check> --json`.
 // Returns VerdictRendered{pass} if both succeed, VerdictRendered{fail} with
 // captured output if either fails.
+//
+// Two fast-passes run before invoking the VM: if the PR modifies only docs
+// files we short-circuit to pass (nothing a test suite can regress on); if
+// the VM run fails but GitHub CI is green on the same SHA we flip the verdict
+// into an advisory failure that the engine escalates to the operator instead
+// of looping the developer on what is almost certainly a local-env flake.
 func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Envelope, error) {
 	wsPath, err := h.resolveWorkspacePath(ctx, env.CorrelationID)
 	if err != nil {
@@ -74,8 +124,18 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	}
 
 	runScript := filepath.Join(wsPath, "run.sh")
-	if _, err := os.Stat(runScript); os.IsNotExist(err) {
+	if _, statErr := os.Stat(runScript); os.IsNotExist(statErr) {
 		return h.passVerdict("no run.sh found, skipping quality checks"), nil
+	}
+
+	// Docs-only fast-pass: if every modified file is a .md/docs/* path,
+	// runtime checks are structurally irrelevant. We still require non-empty
+	// evidence that context-snapshot ran — an unset ModifiedFiles list means
+	// "we don't know", not "no changes", and falls through to the full gate.
+	if files, ok := h.modifiedFilesFromCorrelation(ctx, env.CorrelationID); ok && isDocsOnlyDiff(files) {
+		h.logger.Info("quality-gate: docs-only diff, skipping runtime checks",
+			"correlation", env.CorrelationID, "files", len(files))
+		return h.passVerdict(fmt.Sprintf("docs-only diff (%d file(s)), skipping runtime checks", len(files))), nil
 	}
 
 	// Run lint first, then test. Collect all failures before reporting.
@@ -107,16 +167,13 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 				return h.passVerdict(fmt.Sprintf("stack unavailable (%s), skipping quality checks", result.Code)), nil
 			}
 
-			// Save full raw output to debug file for operator inspection.
+			// Always save full raw output to debug dir. Before this change the
+			// debug artifact was env-gated, which meant the operator inspecting
+			// a `./run.sh test failed:\n` empty-body verdict had no trail back
+			// to the real stderr. The default dir is cheap — a few KB per run.
 			debugRef := h.saveDebugOutput(env.CorrelationID, check.name, result.Output)
 
-			// Filter Docker noise before truncation so actual errors survive.
-			cleaned := filterDockerNoise(result.Output)
-			desc := fmt.Sprintf("./run.sh %s failed:\n%s", check.name, truncateOutput(cleaned, 2000))
-			if debugRef != "" {
-				desc += "\n\n[full output: " + debugRef + "]"
-			}
-
+			desc := buildFailureDescription(check.name, result.Output, debugRef)
 			issues = append(issues, event.Issue{
 				Severity:    "major",
 				Category:    "correctness",
@@ -129,10 +186,197 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	// Always destroy kept VMs so the next iteration starts from a clean slate.
 	h.destroyKeptStacks(ctx, keptStacks)
 
-	if len(issues) > 0 {
-		return h.failVerdict(strings.Join(failSummaries, "; "), issues), nil
+	if len(issues) == 0 {
+		return h.passVerdict("lint and test passed"), nil
 	}
-	return h.passVerdict("lint and test passed"), nil
+
+	// Cross-check GitHub CI on the same SHA before declaring a regression.
+	// If upstream CI is green here, the likelihood of a real regression drops
+	// sharply — most local fails at this point are environment flakes
+	// (docker-compose timing, Solr reindex races, multipass cold starts).
+	// Flip to advisory so the engine pauses for operator review instead of
+	// re-spinning developer for 3M+ tokens on a non-regression.
+	summary := strings.Join(failSummaries, "; ")
+	if h.githubCIAllGreen(ctx, env.CorrelationID) {
+		h.logger.Warn("quality-gate: local failed but GitHub CI is green on same SHA — emitting advisory",
+			"correlation", env.CorrelationID)
+		return h.advisoryFailVerdict(summary+" (GitHub CI green on same SHA — likely local-env flake)", issues), nil
+	}
+	return h.failVerdict(summary, issues), nil
+}
+
+// buildFailureDescription assembles the verdict description for a failed
+// check. Two failure modes must survive: (a) normal case — keep the tail of
+// the cleaned output; (b) degenerate case — filter stripped everything, fall
+// back to the raw unfiltered tail with a marker so the body is never empty.
+// The reporter on 2026-04-22 hit (b): two identical `./run.sh test failed:\n`
+// verdicts with zero body forced the developer to re-run the suite manually
+// just to discover what failed.
+func buildFailureDescription(checkName, rawOutput, debugRef string) string {
+	const maxLen = 2000
+	cleaned := strings.TrimSpace(filterDockerNoise(rawOutput))
+	var body string
+	switch {
+	case cleaned != "":
+		body = truncateOutput(cleaned, maxLen)
+	case strings.TrimSpace(rawOutput) != "":
+		// Filter collapsed to empty but raw output had something — use it.
+		// This is the path that fixes the empty-body regression: the verdict
+		// now always carries at least the tail of whatever the tool emitted.
+		body = "[docker-noise filter stripped all lines; raw tail follows]\n" +
+			truncateOutput(strings.TrimSpace(rawOutput), maxLen)
+	default:
+		// Genuinely no output at all. Name the failure explicitly so the
+		// developer sees *something* more actionable than a bare newline.
+		body = "[no output captured — command exited non-zero with empty stdout/stderr]"
+	}
+	desc := fmt.Sprintf("./run.sh %s failed:\n%s", checkName, body)
+	if debugRef != "" {
+		desc += "\n\n[full output: " + debugRef + "]"
+	}
+	return desc
+}
+
+// modifiedFilesFromCorrelation loads the workflow's correlation chain and
+// returns the most recent non-empty ModifiedFiles list from a ContextGit
+// event. Returns (nil, false) when no context-git snapshot exists or its
+// ModifiedFiles slice is empty — callers must treat that as "unknown", not
+// "no changes", since an upstream handler may simply not have emitted yet.
+func (h *QualityGateHandler) modifiedFilesFromCorrelation(ctx context.Context, correlationID string) ([]string, bool) {
+	evts, err := h.store.LoadByCorrelation(ctx, correlationID)
+	if err != nil {
+		return nil, false
+	}
+	var latest []string
+	for _, e := range evts {
+		if e.Type != event.ContextGit {
+			continue
+		}
+		var p event.ContextGitPayload
+		if jsonErr := json.Unmarshal(e.Payload, &p); jsonErr != nil {
+			continue
+		}
+		if len(p.ModifiedFiles) > 0 {
+			latest = p.ModifiedFiles
+		}
+	}
+	if len(latest) == 0 {
+		return nil, false
+	}
+	return latest, true
+}
+
+// isDocsOnlyDiff returns true iff every file in the list is structurally
+// documentation (extension whitelist + known metadata filenames + docs/
+// prefix). A single non-doc file disqualifies the PR — the whitelist is
+// deliberately narrow because a false positive silently skips the gate.
+// An empty or blank-only list returns false: "we don't know what changed"
+// must never be treated as "nothing code-like changed".
+func isDocsOnlyDiff(files []string) bool {
+	seen := 0
+	for _, f := range files {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if !isDocFile(f) {
+			return false
+		}
+		seen++
+	}
+	return seen > 0
+}
+
+func isDocFile(path string) bool {
+	base := filepath.Base(path)
+	if docsOnlyFilenames[base] {
+		return true
+	}
+	for _, prefix := range docsOnlyPaths {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	ext := strings.ToLower(filepath.Ext(path))
+	for _, allowed := range docsOnlyExts {
+		if ext == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+// githubCIAllGreen consults GitHub's check-runs API for the current PR's HEAD
+// SHA and returns true only if at least one check completed and every
+// completed check concluded success/skipped/neutral. Any failure, any
+// queued/in-progress check, any API error — all treated as "not green", so
+// we only short-circuit the retry loop when we have positive upstream signal.
+func (h *QualityGateHandler) githubCIAllGreen(ctx context.Context, correlationID string) bool {
+	if h.gh == nil {
+		return false
+	}
+	src := h.sourceFromCorrelation(ctx, correlationID)
+	if src == "" {
+		return false
+	}
+	fullRepo, prNumberStr, err := parsePRSource(src)
+	if err != nil {
+		return false
+	}
+	parts := strings.SplitN(fullRepo, "/", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	owner, repoName := parts[0], parts[1]
+	prNumber, err := strconv.Atoi(prNumberStr)
+	if err != nil {
+		return false
+	}
+	head, err := h.gh.GetPRHead(ctx, owner, repoName, prNumber)
+	if err != nil || head == nil || head.SHA == "" {
+		h.logger.Debug("quality-gate: cross-check skipped — no PR head", "err", err)
+		return false
+	}
+	resp, err := h.gh.GetCheckRuns(ctx, owner, repoName, head.SHA)
+	if err != nil || resp == nil || resp.TotalCount == 0 {
+		h.logger.Debug("quality-gate: cross-check skipped — no check runs", "sha", head.SHA, "err", err)
+		return false
+	}
+	completed := 0
+	for _, cr := range resp.CheckRuns {
+		if cr.Status != "completed" {
+			return false // any in-flight check → no upstream verdict yet
+		}
+		completed++
+		switch cr.Conclusion {
+		case "success", "skipped", "neutral":
+			// ok
+		default:
+			return false
+		}
+	}
+	return completed > 0
+}
+
+// sourceFromCorrelation returns the Source field of the originating
+// WorkflowRequested event for this correlation. Empty string if we can't
+// find one.
+func (h *QualityGateHandler) sourceFromCorrelation(ctx context.Context, correlationID string) string {
+	evts, err := h.store.LoadByCorrelation(ctx, correlationID)
+	if err != nil {
+		return ""
+	}
+	for _, e := range evts {
+		if e.Type != event.WorkflowRequested {
+			continue
+		}
+		var p event.WorkflowRequestedPayload
+		if jsonErr := json.Unmarshal(e.Payload, &p); jsonErr != nil {
+			continue
+		}
+		return p.Source
+	}
+	return ""
 }
 
 // stackRunResult holds the parsed JSON output from `stack run --json`.
@@ -258,6 +502,22 @@ func (h *QualityGateHandler) failVerdict(summary string, issues []event.Issue) [
 			Outcome:     event.VerdictFail,
 			Issues:      issues,
 			Summary:     summary,
+		})).WithSource("handler:" + h.name),
+	}
+}
+
+// advisoryFailVerdict emits a fail verdict marked Advisory=true. The aggregate
+// treats these as "pause for operator" rather than "retrigger developer", so
+// the handler can fail without starting a feedback loop on a non-regression.
+func (h *QualityGateHandler) advisoryFailVerdict(summary string, issues []event.Issue) []event.Envelope {
+	return []event.Envelope{
+		event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+			Phase:       "develop",
+			SourcePhase: "quality-gate",
+			Outcome:     event.VerdictFail,
+			Issues:      issues,
+			Summary:     summary,
+			Advisory:    true,
 		})).WithSource("handler:" + h.name),
 	}
 }
