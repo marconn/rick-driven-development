@@ -33,6 +33,21 @@ func TestNewPRConsolidator(t *testing.T) {
 	}
 }
 
+// TestNewPRConsolidatorPinsToHaiku locks in the deterministic backend/model
+// choice. The consolidator must not drift back onto the review-phase rotation.
+func TestNewPRConsolidatorPinsToHaiku(t *testing.T) {
+	h := NewPRConsolidator(testDeps())
+	if h.model != ConsolidatorModel {
+		t.Errorf("model: want %q, got %q", ConsolidatorModel, h.model)
+	}
+	if h.backend == nil {
+		t.Fatal("backend must not be nil")
+	}
+	if h.backend.Name() != "claude" {
+		t.Errorf("backend: want 'claude' (pinned), got %q", h.backend.Name())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // extractConsolidatorInputs
 // ---------------------------------------------------------------------------
@@ -208,6 +223,7 @@ func TestPRConsolidatorCallAI(t *testing.T) {
 	reg := persona.DefaultRegistry()
 	h := &PRConsolidatorHandler{
 		backend:  mb,
+		model:    ConsolidatorModel,
 		store:    newMockStore(),
 		registry: reg,
 		builder:  persona.NewPromptBuilder(),
@@ -236,6 +252,10 @@ func TestPRConsolidatorCallAI(t *testing.T) {
 	}
 	if !strings.Contains(mb.lastReq.UserPrompt, "## PR Diff") {
 		t.Error("user prompt should include the PR diff section")
+	}
+	// Model must propagate — pins rotation-free behaviour.
+	if mb.lastReq.Model != ConsolidatorModel {
+		t.Errorf("Request.Model: want %q, got %q", ConsolidatorModel, mb.lastReq.Model)
 	}
 }
 
@@ -624,6 +644,58 @@ func TestPostConsolidatedReview_Reactive_BadAnchor_StripsInlineComments(t *testi
 	}
 	if !strings.Contains(summary, "inline comments dropped") {
 		t.Errorf("summary should mention the anchor fallback: %q", summary)
+	}
+}
+
+// Body-guard: when every finding is anchored inline and no unanchored entries
+// remain, the top-level body must collapse to the canned one-liner — prevents
+// the review page from duplicating the inline comment content.
+func TestPostConsolidatedReview_InlineOnly_CollapsesBody(t *testing.T) {
+	h, rec := newFakeHandler()
+
+	// AI emits a verbose summary that restates the inline finding — the
+	// very failure mode we're guarding against.
+	review := `{"summary":"### Code review\n\nFound 1 issue:\n\n1. ` +
+		"`a.go` line 2 is wrong — details....\",\"event\":\"COMMENT\"," +
+		`"comments":[{"path":"a.go","line":2,"side":"RIGHT","body":"nit: fix"}],"unanchored":[]}`
+	diff := "--- a/a.go\n+++ b/a.go\n@@ -1,1 +1,2 @@\n ctx\n+added\n"
+
+	if _, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", diff, review); err != nil {
+		t.Fatalf("postConsolidatedReview: %v", err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("want exactly one post, got %d", len(rec.calls))
+	}
+	if rec.calls[0].Body != inlineOnlyReviewBody {
+		t.Errorf("body: want %q (inline-only guard), got %q", inlineOnlyReviewBody, rec.calls[0].Body)
+	}
+	if len(rec.calls[0].Comments) != 1 {
+		t.Errorf("want 1 inline comment preserved, got %d", len(rec.calls[0].Comments))
+	}
+}
+
+// Body-guard negative: when there are unanchored findings, the summary must
+// still render — the guard kicks in only when all findings are inline.
+func TestPostConsolidatedReview_MixedFindings_KeepsSummary(t *testing.T) {
+	h, rec := newFakeHandler()
+
+	review := `{"summary":"Overall looks fine.","event":"COMMENT",` +
+		`"comments":[{"path":"a.go","line":2,"side":"RIGHT","body":"nit"}],` +
+		`"unanchored":["module-wide: add retry logic"]}`
+	diff := "--- a/a.go\n+++ b/a.go\n@@ -1,1 +1,2 @@\n ctx\n+added\n"
+
+	if _, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", diff, review); err != nil {
+		t.Fatalf("postConsolidatedReview: %v", err)
+	}
+	body := rec.calls[0].Body
+	if body == inlineOnlyReviewBody {
+		t.Fatal("guard should NOT fire when unanchored findings exist")
+	}
+	if !strings.Contains(body, "Overall looks fine.") {
+		t.Errorf("body should retain summary, got %q", body)
+	}
+	if !strings.Contains(body, "Additional findings") {
+		t.Errorf("body should include Additional findings section, got %q", body)
 	}
 }
 

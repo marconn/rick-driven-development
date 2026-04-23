@@ -24,6 +24,7 @@ import (
 // handler in the flow with an external side-effect (posting the review).
 type PRConsolidatorHandler struct {
 	backend  backend.Backend
+	model    string
 	store    eventstore.Store
 	registry *persona.Registry
 	builder  *persona.PromptBuilder
@@ -41,10 +42,26 @@ type PRConsolidatorHandler struct {
 	viewerDidAuthor func(ctx context.Context, fullRepo, prNumber string) (bool, error)
 }
 
+// ConsolidatorModel is the Claude model this handler pins to. The consolidator
+// does pure synthesis — dedupe findings from 11 reviewer outputs, validate
+// inline anchors against the diff — and does not need a frontier-class model.
+// Haiku is ~5× cheaper and faster; pin here (not via RICK_MODEL) so it stays
+// decoupled from the developer/reviewer defaults.
+const ConsolidatorModel = "claude-haiku-4-5-20251001"
+
 // NewPRConsolidator creates a PRConsolidatorHandler from the shared Deps.
+// The handler always runs on a dedicated Claude driver + Haiku model, ignoring
+// the review-phase rotation. Rationale: the task is summarisation plus JSON
+// conformance, and round-robin rotation made per-run attribution fuzzy and
+// amplified prompt-drift across three different models.
 func NewPRConsolidator(d Deps) *PRConsolidatorHandler {
+	b := d.Backend
+	if claude, err := backend.New("claude"); err == nil {
+		b = claude
+	}
 	return &PRConsolidatorHandler{
-		backend:         d.Backend,
+		backend:         b,
+		model:           ConsolidatorModel,
 		store:           d.Store,
 		registry:        d.Personas,
 		builder:         d.Builder,
@@ -179,6 +196,7 @@ func (h *PRConsolidatorHandler) callAI(
 	resp, err := h.backend.Run(backendCtx, backend.Request{
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
+		Model:        h.model,
 		WorkDir:      workDir,
 		Yolo:         false,
 	})
@@ -485,6 +503,11 @@ func renderReviewBody(summary string, unanchored []string) string {
 // Posting
 // ---------------------------------------------------------------------------
 
+// inlineOnlyReviewBody is the canned top-level review body we emit when every
+// finding is attached as an inline comment (no unanchored leftovers). Keeps
+// the PR tab free of duplicated content.
+const inlineOnlyReviewBody = "See inline comments."
+
 // normalizeReviewEvent coerces the AI-provided event string into a value
 // GitHub's reviews API accepts. Defaults to COMMENT on any unrecognised value.
 func normalizeReviewEvent(raw string) string {
@@ -544,7 +567,17 @@ func (h *PRConsolidatorHandler) postConsolidatedReview(
 	anchors := parseDiffAnchors(diff)
 	validComments, unanchored := splitComments(review, anchors)
 
-	body := renderReviewBody(review.Summary, unanchored)
+	// When every finding is anchored inline (no unanchored leftovers), the
+	// review body is pure framing — don't let the AI restate the same
+	// content that's already attached as inline comments. Invariant
+	// enforced here because prompt adherence drifts across models and the
+	// prompt-level "do not duplicate" rule is routinely ignored.
+	var body string
+	if len(validComments) > 0 && len(unanchored) == 0 {
+		body = inlineOnlyReviewBody
+	} else {
+		body = renderReviewBody(review.Summary, unanchored)
+	}
 	eventType := normalizeReviewEvent(review.Event)
 	originalEvent := eventType
 

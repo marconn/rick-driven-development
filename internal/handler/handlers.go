@@ -39,11 +39,13 @@ type Deps struct {
 	WorkDir    string // working directory for AI backend execution
 	Yolo       bool   // skip AI backend permission checks
 	// ReviewBackend is the backend used for review-related handlers (e.g.,
-	// reviewer, qa, pr-consolidator, pr-category reviewers, feedback-analyzer,
-	// pr-replier, qa-analyzer). Callers should build this via
-	// backend.NewReviewBackend() so the rotation can be configured through
-	// RICK_REVIEW_BACKENDS. When nil, the legacy single-backend fallback is
-	// used (d.Backend if it's already gemini, otherwise a bare gemini driver).
+	// reviewer, qa, pr-category reviewers, feedback-analyzer, pr-replier,
+	// qa-analyzer). Callers should build this via backend.NewReviewBackend()
+	// so the rotation can be configured through RICK_REVIEW_BACKENDS. When
+	// nil, the legacy single-backend fallback is used (d.Backend if it's
+	// already gemini, otherwise a bare gemini driver). pr-consolidator does
+	// NOT use this — it pins to claude+haiku internally (see
+	// NewPRConsolidator).
 	ReviewBackend backend.Backend
 	// BackendTimeout caps how long AIHandler.backend.Run may block for the
 	// developer phase (and any phase without a more specific override).
@@ -52,7 +54,7 @@ type Deps struct {
 	BackendTimeout time.Duration
 	// ReviewBackendTimeout caps review-phase handlers (reviewer, qa,
 	// feedback-analyzer, pr-* reviewers, qa-analyzer, pr-replier,
-	// pr-consolidator, committer). Shorter than the
+	// committer). Shorter than the
 	// developer timeout because review/commit runs are typically <5 min —
 	// a hung reviewer should surface fast instead of blocking a workflow
 	// for 20 minutes. Zero falls back to handler.DefaultReviewBackendTimeout.
@@ -179,21 +181,9 @@ func RegisterAll(reg *Registry, d Deps) error {
 		// PR-specific handlers.
 		NewPRWorkspace(d),
 		NewPRJiraContext(d),
-		NewPRConsolidator(Deps{
-			Backend:    reviewBackend,
-			Store:      d.Store,
-			Bus:        d.Bus,
-			Personas:   d.Personas,
-			Builder:    d.Builder,
-			Jira:       d.Jira,
-			Confluence: d.Confluence,
-			Estimation: d.Estimation,
-			MsMap:      d.MsMap,
-			GitHub:     d.GitHub,
-			Logger:     d.Logger,
-			WorkDir:    d.WorkDir,
-			Yolo:       d.Yolo,
-		}),
+		// pr-consolidator owns its own backend (claude + haiku) — ignores the
+		// review-rotation. See NewPRConsolidator for rationale.
+		NewPRConsolidator(d),
 		NewPRCleanup(d),
 
 		// PR category reviewers — dedicated single-concern reviewers for pr-review workflow.

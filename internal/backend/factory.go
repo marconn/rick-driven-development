@@ -112,8 +112,9 @@ func concurrencyLimitFor(name string) int {
 var DefaultReviewBackends = []string{"claude", "gemini", "codex"}
 
 // NewReviewBackend builds the backend used by review-phase handlers
-// (reviewer, qa, pr-consolidator, pr-category reviewers, feedback-analyzer,
-// pr-replier, qa-analyzer).
+// (reviewer, qa, pr-category reviewers, feedback-analyzer, pr-replier,
+// qa-analyzer). pr-consolidator pins to claude+haiku itself — see
+// handler.NewPRConsolidator.
 //
 // Behavior:
 //   - len(names) == 0 → fall back to DefaultReviewBackends.
