@@ -1,0 +1,11 @@
+{
+  "message": "Validation Failed",
+  "errors": [
+    {
+      "resource": "PullRequestReview",
+      "code": "custom",
+      "message": "Can not approve your own pull request"
+    }
+  ],
+  "documentation_url": "https://docs.github.com/rest/pulls/reviews#create-a-review-for-a-pull-request"
+}

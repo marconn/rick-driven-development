@@ -1,0 +1,11 @@
+{
+  "message": "Validation Failed",
+  "errors": [
+    {
+      "resource": "PullRequestReviewComment",
+      "code": "custom",
+      "message": "pull_request_review_thread.line must be part of the diff"
+    }
+  ],
+  "documentation_url": "https://docs.github.com/rest/pulls/reviews#create-a-review-for-a-pull-request"
+}

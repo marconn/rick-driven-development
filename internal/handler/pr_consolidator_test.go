@@ -3,6 +3,10 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -384,6 +388,269 @@ func TestNormalizeReviewEvent(t *testing.T) {
 		if got := normalizeReviewEvent(input); got != want {
 			t.Errorf("normalizeReviewEvent(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isSelfAuthorRejection
+// ---------------------------------------------------------------------------
+
+func TestIsSelfAuthorRejection(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"approve-self", errors.New(`gh api reviews: {"message":"Validation Failed","errors":[{"message":"Can not approve your own pull request"}]}`), true},
+		{"request-changes-self", errors.New(`gh api reviews: {"errors":[{"message":"Can not request changes on your own pull request"}]}`), true},
+		{"case-folded", errors.New(`CAN NOT APPROVE YOUR OWN PULL REQUEST`), true},
+		{"bad-anchor-422", errors.New(`gh api reviews: pull_request_review_thread.line must be part of the diff`), false},
+		{"network-error", errors.New(`gh api reviews: connection refused`), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSelfAuthorRejection(tc.err); got != tc.want {
+				t.Errorf("isSelfAuthorRejection(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// postConsolidatedReview tiered guards
+// ---------------------------------------------------------------------------
+
+// recordedReview captures what the fake runner received so tests can assert on it.
+type recordedReview struct {
+	calls []reviewPayload
+}
+
+// newFakeHandler constructs a PRConsolidatorHandler with every gh side-effect
+// replaced by a test double, so postConsolidatedReview can be exercised
+// end-to-end without shelling out.
+func newFakeHandler() (*PRConsolidatorHandler, *recordedReview) {
+	rec := &recordedReview{}
+	return &PRConsolidatorHandler{
+		postReview: func(_ context.Context, _, _ string, p reviewPayload) error {
+			rec.calls = append(rec.calls, p)
+			return nil
+		},
+		postComment:     func(context.Context, string, string, string) error { return nil },
+		fetchHeadSHA:    func(context.Context, string, string) (string, error) { return "deadbeef", nil },
+		fetchRawDiff:    func(context.Context, string, string) string { return "" },
+		viewerDidAuthor: func(context.Context, string, string) (bool, error) { return false, nil },
+	}, rec
+}
+
+func loadFixture(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("load fixture %s: %v", name, err)
+	}
+	return string(b)
+}
+
+func approveReviewJSON() string {
+	return `{"summary":"looks good","event":"APPROVE","comments":[],"unanchored":[]}`
+}
+
+func requestChangesReviewJSON() string {
+	return `{"summary":"nope","event":"REQUEST_CHANGES","comments":[],"unanchored":[]}`
+}
+
+// Tier 1: preflight downgrade — viewerDidAuthor=true + APPROVE → posted as COMMENT.
+func TestPostConsolidatedReview_Preflight_DowngradesApproveWhenViewerAuthored(t *testing.T) {
+	h, rec := newFakeHandler()
+	h.viewerDidAuthor = func(context.Context, string, string) (bool, error) { return true, nil }
+
+	summary, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", "", approveReviewJSON())
+	if err != nil {
+		t.Fatalf("postConsolidatedReview: %v", err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("want exactly one post, got %d", len(rec.calls))
+	}
+	if rec.calls[0].Event != "COMMENT" {
+		t.Errorf("want event COMMENT (preflight downgrade), got %q", rec.calls[0].Event)
+	}
+	if !strings.Contains(summary, "downgraded from APPROVE") {
+		t.Errorf("summary should mention the downgrade: %q", summary)
+	}
+}
+
+// Tier 1: same downgrade for REQUEST_CHANGES — GitHub also blocks this for authors.
+func TestPostConsolidatedReview_Preflight_DowngradesRequestChangesWhenViewerAuthored(t *testing.T) {
+	h, rec := newFakeHandler()
+	h.viewerDidAuthor = func(context.Context, string, string) (bool, error) { return true, nil }
+
+	if _, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", "", requestChangesReviewJSON()); err != nil {
+		t.Fatalf("postConsolidatedReview: %v", err)
+	}
+	if rec.calls[0].Event != "COMMENT" {
+		t.Errorf("REQUEST_CHANGES on self-PR must downgrade to COMMENT, got %q", rec.calls[0].Event)
+	}
+}
+
+// Happy path: not author → post as-is.
+func TestPostConsolidatedReview_Preflight_PreservesApproveWhenNotAuthor(t *testing.T) {
+	h, rec := newFakeHandler() // viewerDidAuthor returns false by default
+
+	if _, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", "", approveReviewJSON()); err != nil {
+		t.Fatalf("postConsolidatedReview: %v", err)
+	}
+	if rec.calls[0].Event != "APPROVE" {
+		t.Errorf("non-author should post APPROVE unchanged, got %q", rec.calls[0].Event)
+	}
+}
+
+// Probe failure must not block the happy path — fall through to post attempt.
+func TestPostConsolidatedReview_Preflight_ProbeFailureFallsThrough(t *testing.T) {
+	h, rec := newFakeHandler()
+	h.viewerDidAuthor = func(context.Context, string, string) (bool, error) {
+		return false, errors.New("installation token: 403 on /user")
+	}
+
+	if _, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", "", approveReviewJSON()); err != nil {
+		t.Fatalf("postConsolidatedReview: %v", err)
+	}
+	if rec.calls[0].Event != "APPROVE" {
+		t.Errorf("probe failure should not downgrade pre-emptively; got %q", rec.calls[0].Event)
+	}
+}
+
+// Tier 2: reactive self-author rejection — first post returns the real 422
+// body, retry downgrades to COMMENT and succeeds.
+func TestPostConsolidatedReview_Reactive_SelfAuthorRejection_RetriesAsComment(t *testing.T) {
+	fixture := loadFixture(t, "gh_422_self_approve.json")
+
+	rec := &recordedReview{}
+	h := &PRConsolidatorHandler{
+		postReview: func(_ context.Context, _, _ string, p reviewPayload) error {
+			rec.calls = append(rec.calls, p)
+			if len(rec.calls) == 1 {
+				return fmt.Errorf("gh api reviews: %s (exit 1)", fixture)
+			}
+			return nil
+		},
+		postComment:     func(context.Context, string, string, string) error { return nil },
+		fetchHeadSHA:    func(context.Context, string, string) (string, error) { return "", nil },
+		fetchRawDiff:    func(context.Context, string, string) string { return "" },
+		viewerDidAuthor: func(context.Context, string, string) (bool, error) { return false, errors.New("probe unavailable") },
+	}
+
+	summary, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", "", approveReviewJSON())
+	if err != nil {
+		t.Fatalf("postConsolidatedReview: %v", err)
+	}
+	if len(rec.calls) != 2 {
+		t.Fatalf("want 2 post attempts (initial + self-author retry), got %d", len(rec.calls))
+	}
+	if rec.calls[0].Event != "APPROVE" {
+		t.Errorf("first attempt should be APPROVE (probe failed open), got %q", rec.calls[0].Event)
+	}
+	if rec.calls[1].Event != "COMMENT" {
+		t.Errorf("retry should downgrade to COMMENT, got %q", rec.calls[1].Event)
+	}
+	if !strings.Contains(summary, "self-author rejection") {
+		t.Errorf("summary should mention the reactive downgrade: %q", summary)
+	}
+}
+
+// Tier 2 for REQUEST_CHANGES — same 422 fixture shape, same retry path.
+func TestPostConsolidatedReview_Reactive_SelfRequestChangesRejection_RetriesAsComment(t *testing.T) {
+	fixture := loadFixture(t, "gh_422_self_request_changes.json")
+
+	rec := &recordedReview{}
+	h := &PRConsolidatorHandler{
+		postReview: func(_ context.Context, _, _ string, p reviewPayload) error {
+			rec.calls = append(rec.calls, p)
+			if len(rec.calls) == 1 {
+				return fmt.Errorf("gh api reviews: %s (exit 1)", fixture)
+			}
+			return nil
+		},
+		postComment:     func(context.Context, string, string, string) error { return nil },
+		fetchHeadSHA:    func(context.Context, string, string) (string, error) { return "", nil },
+		fetchRawDiff:    func(context.Context, string, string) string { return "" },
+		viewerDidAuthor: func(context.Context, string, string) (bool, error) { return false, errors.New("probe unavailable") },
+	}
+
+	if _, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", "", requestChangesReviewJSON()); err != nil {
+		t.Fatalf("postConsolidatedReview: %v", err)
+	}
+	if rec.calls[1].Event != "COMMENT" {
+		t.Errorf("retry must downgrade REQUEST_CHANGES → COMMENT, got %q", rec.calls[1].Event)
+	}
+}
+
+// Tier 3: unrelated 422 (bad anchor) — strip inline comments, keep the event
+// verb, retry. This preserves the pre-existing fallback behaviour.
+func TestPostConsolidatedReview_Reactive_BadAnchor_StripsInlineComments(t *testing.T) {
+	fixture := loadFixture(t, "gh_422_bad_anchor.json")
+
+	rec := &recordedReview{}
+	h := &PRConsolidatorHandler{
+		postReview: func(_ context.Context, _, _ string, p reviewPayload) error {
+			rec.calls = append(rec.calls, p)
+			if len(rec.calls) == 1 {
+				return fmt.Errorf("gh api reviews: %s (exit 1)", fixture)
+			}
+			return nil
+		},
+		postComment:     func(context.Context, string, string, string) error { return nil },
+		fetchHeadSHA:    func(context.Context, string, string) (string, error) { return "", nil },
+		fetchRawDiff:    func(context.Context, string, string) string { return "" },
+		viewerDidAuthor: func(context.Context, string, string) (bool, error) { return false, nil },
+	}
+
+	// Review with one inline comment so the strip-and-retry path actually fires.
+	review := `{"summary":"ok","event":"COMMENT","comments":[{"path":"a.go","line":1,"side":"RIGHT","body":"nit"}],"unanchored":[]}`
+	diff := "--- a/a.go\n+++ b/a.go\n@@ -1,1 +1,1 @@\n line\n"
+
+	summary, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", diff, review)
+	if err != nil {
+		t.Fatalf("postConsolidatedReview: %v", err)
+	}
+	if len(rec.calls) != 2 {
+		t.Fatalf("want 2 post attempts, got %d", len(rec.calls))
+	}
+	if len(rec.calls[0].Comments) == 0 {
+		t.Error("first attempt should include inline comments")
+	}
+	if len(rec.calls[1].Comments) != 0 {
+		t.Errorf("retry should strip inline comments, got %d", len(rec.calls[1].Comments))
+	}
+	if !strings.Contains(summary, "inline comments dropped") {
+		t.Errorf("summary should mention the anchor fallback: %q", summary)
+	}
+}
+
+// Non-422 errors propagate without retry.
+func TestPostConsolidatedReview_Reactive_UnrelatedErrorPropagates(t *testing.T) {
+	rec := &recordedReview{}
+	h := &PRConsolidatorHandler{
+		postReview: func(_ context.Context, _, _ string, p reviewPayload) error {
+			rec.calls = append(rec.calls, p)
+			return errors.New("gh api reviews: 503 Service Unavailable (exit 1)")
+		},
+		postComment:     func(context.Context, string, string, string) error { return nil },
+		fetchHeadSHA:    func(context.Context, string, string) (string, error) { return "", nil },
+		fetchRawDiff:    func(context.Context, string, string) string { return "" },
+		viewerDidAuthor: func(context.Context, string, string) (bool, error) { return false, nil },
+	}
+
+	// No inline comments → tier-3 fallback is also skipped, so the error bubbles.
+	_, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", "", approveReviewJSON())
+	if err == nil {
+		t.Fatal("want error to propagate, got nil")
+	}
+	if !strings.Contains(err.Error(), "503") {
+		t.Errorf("want original error preserved, got %v", err)
+	}
+	if len(rec.calls) != 1 {
+		t.Errorf("no retry for unrelated errors without inline comments; got %d calls", len(rec.calls))
 	}
 }
 

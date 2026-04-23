@@ -29,17 +29,32 @@ type PRConsolidatorHandler struct {
 	builder  *persona.PromptBuilder
 	workDir  string
 	yolo     bool
+
+	// Injectable gh side-effects. Tests override to exercise the 422 fallback
+	// tiers without shelling out. Keep this scoped to the handler — the
+	// broader `internal/handler/pr_*.go` surface still uses inline
+	// exec.CommandContext and should not be partially abstracted.
+	postReview      func(ctx context.Context, fullRepo, prNumber string, payload reviewPayload) error
+	postComment     func(ctx context.Context, fullRepo, prNumber, body string) error
+	fetchHeadSHA    func(ctx context.Context, fullRepo, prNumber string) (string, error)
+	fetchRawDiff    func(ctx context.Context, fullRepo, prNumber string) string
+	viewerDidAuthor func(ctx context.Context, fullRepo, prNumber string) (bool, error)
 }
 
 // NewPRConsolidator creates a PRConsolidatorHandler from the shared Deps.
 func NewPRConsolidator(d Deps) *PRConsolidatorHandler {
 	return &PRConsolidatorHandler{
-		backend:  d.Backend,
-		store:    d.Store,
-		registry: d.Personas,
-		builder:  d.Builder,
-		workDir:  d.WorkDir,
-		yolo:     d.Yolo,
+		backend:         d.Backend,
+		store:           d.Store,
+		registry:        d.Personas,
+		builder:         d.Builder,
+		workDir:         d.WorkDir,
+		yolo:            d.Yolo,
+		postReview:      postPRReview,
+		postComment:     postPRComment,
+		fetchHeadSHA:    fetchPRHeadSHA,
+		fetchRawDiff:    fetchPRRawDiff,
+		viewerDidAuthor: queryViewerDidAuthor,
 	}
 }
 
@@ -68,7 +83,7 @@ func (h *PRConsolidatorHandler) Handle(ctx context.Context, env event.Envelope) 
 
 	// Fetch the authoritative diff directly (not the truncated enrichment
 	// summary) so the AI has the full context and we can validate anchors.
-	diff := fetchPRRawDiff(ctx, fullRepo, prNumber)
+	diff := h.fetchRawDiff(ctx, fullRepo, prNumber)
 
 	aiOutput, err := h.callAI(ctx, env, params, phaseOutputs, workspacePath, diff)
 	if err != nil {
@@ -499,9 +514,20 @@ type reviewCommentInput struct {
 }
 
 // postConsolidatedReview parses the AI JSON, validates inline comments against
-// the diff, and posts a single GitHub pull-request review. Falls back to a
-// plain issue-level comment when the AI output cannot be parsed as JSON — so
-// we are never *worse* than the previous "one big comment" behaviour.
+// the diff, and posts a single GitHub pull-request review. Handles three
+// failure tiers:
+//
+//  1. Preflight: GitHub rejects APPROVE *and* REQUEST_CHANGES when the viewer
+//     authored the PR (verified via GraphQL viewerDidAuthor). Downgrade to
+//     COMMENT before posting to avoid a guaranteed 422.
+//  2. Reactive self-author: if the probe was unavailable (e.g. installation
+//     token without a viewer) and GitHub still returns 422 with a self-author
+//     rejection body, retry once with event: COMMENT.
+//  3. Reactive bad-anchor: 422 on any other cause — most often an inline
+//     comment pointing outside the diff — strip inline comments and retry.
+//
+// When the AI output isn't parseable JSON we fall back to a plain issue-level
+// comment so we're never worse than the previous "one big comment" behaviour.
 // Returns a short human summary describing what was posted.
 func (h *PRConsolidatorHandler) postConsolidatedReview(
 	ctx context.Context,
@@ -509,7 +535,7 @@ func (h *PRConsolidatorHandler) postConsolidatedReview(
 ) (string, error) {
 	review, err := parseConsolidatorJSON(aiOutput)
 	if err != nil {
-		if fbErr := postPRComment(ctx, fullRepo, prNumber, aiOutput); fbErr != nil {
+		if fbErr := h.postComment(ctx, fullRepo, prNumber, aiOutput); fbErr != nil {
 			return "", fmt.Errorf("JSON parse failed (%v) and fallback pr comment failed: %w", err, fbErr)
 		}
 		return fmt.Sprintf("Posted fallback issue comment to %s#%s (AI JSON parse failed: %v)", fullRepo, prNumber, err), nil
@@ -520,8 +546,20 @@ func (h *PRConsolidatorHandler) postConsolidatedReview(
 
 	body := renderReviewBody(review.Summary, unanchored)
 	eventType := normalizeReviewEvent(review.Event)
+	originalEvent := eventType
 
-	headSHA, shaErr := fetchPRHeadSHA(ctx, fullRepo, prNumber)
+	// Tier 1 (preflight): authors can't APPROVE or REQUEST_CHANGES on their
+	// own PR. Probe with GraphQL — single round-trip, server-side identity,
+	// no login-string drift across bot-suffix / SSO / case. Probe failures
+	// (network flake, installation tokens without a viewer) fall through to
+	// the reactive tier below.
+	if eventType != "COMMENT" {
+		if authored, probeErr := h.viewerDidAuthor(ctx, fullRepo, prNumber); probeErr == nil && authored {
+			eventType = "COMMENT"
+		}
+	}
+
+	headSHA, shaErr := h.fetchHeadSHA(ctx, fullRepo, prNumber)
 	if shaErr != nil {
 		// Without a commit_id GitHub defaults to the latest commit, which is
 		// acceptable but less precise. Continue with an empty SHA.
@@ -537,23 +575,60 @@ func (h *PRConsolidatorHandler) postConsolidatedReview(
 		payload.Comments = append(payload.Comments, reviewCommentInput(c))
 	}
 
-	if err := postPRReview(ctx, fullRepo, prNumber, payload); err != nil {
-		// Retry once without inline comments. GitHub rejects the whole review
-		// on any single invalid anchor — falling back to a plain review body
-		// preserves signal even when our diff parsing missed an edge case.
-		fallback := payload
-		fallback.Comments = nil
-		if len(validComments) > 0 {
-			fallback.Body = body + "\n\n> Note: inline comments could not be attached; collapsed into this summary."
+	err = h.postReview(ctx, fullRepo, prNumber, payload)
+	if err == nil {
+		if eventType != originalEvent {
+			return fmt.Sprintf("Posted review to %s#%s as %s (downgraded from %s: viewer authored PR) (%d inline, %d unanchored)",
+				fullRepo, prNumber, eventType, originalEvent, len(payload.Comments), len(unanchored)), nil
 		}
-		if fbErr := postPRReview(ctx, fullRepo, prNumber, fallback); fbErr != nil {
-			return "", fmt.Errorf("post review: %w (fallback also failed: %v)", err, fbErr)
-		}
-		return fmt.Sprintf("Posted review to %s#%s as %s (inline comments dropped after 422)", fullRepo, prNumber, eventType), nil
+		return fmt.Sprintf("Posted review to %s#%s as %s (%d inline, %d unanchored)",
+			fullRepo, prNumber, eventType, len(payload.Comments), len(unanchored)), nil
 	}
 
-	return fmt.Sprintf("Posted review to %s#%s as %s (%d inline, %d unanchored)",
-		fullRepo, prNumber, eventType, len(payload.Comments), len(unanchored)), nil
+	// Tier 2 (reactive): GitHub rejected the review as self-authored despite
+	// the preflight. Happens when the probe failed open or GitHub's identity
+	// resolution differs from GraphQL (e.g. installation tokens). Retry with
+	// COMMENT — authors can always comment on their own PRs.
+	if isSelfAuthorRejection(err) && payload.Event != "COMMENT" {
+		retry := payload
+		retry.Event = "COMMENT"
+		if retryErr := h.postReview(ctx, fullRepo, prNumber, retry); retryErr == nil {
+			return fmt.Sprintf("Posted review to %s#%s as COMMENT (downgraded from %s after self-author rejection) (%d inline, %d unanchored)",
+				fullRepo, prNumber, payload.Event, len(retry.Comments), len(unanchored)), nil
+		} else {
+			err = retryErr
+			payload = retry
+		}
+	}
+
+	// Tier 3 (reactive): assume the 422 is a bad inline anchor GitHub won't
+	// accept. Strip inline comments and fold them into the body so we still
+	// deliver the signal.
+	if len(payload.Comments) > 0 {
+		fallback := payload
+		fallback.Comments = nil
+		fallback.Body = body + "\n\n> Note: inline comments could not be attached; collapsed into this summary."
+		if fbErr := h.postReview(ctx, fullRepo, prNumber, fallback); fbErr != nil {
+			return "", fmt.Errorf("post review: %w (fallback also failed: %v)", err, fbErr)
+		}
+		return fmt.Sprintf("Posted review to %s#%s as %s (inline comments dropped after 422)", fullRepo, prNumber, payload.Event), nil
+	}
+
+	return "", fmt.Errorf("post review: %w", err)
+}
+
+// isSelfAuthorRejection returns true when the error looks like GitHub's
+// "author can't APPROVE / REQUEST_CHANGES on own PR" 422. The exact phrasing
+// ("Can not approve your own pull request") lives in errors[].message and
+// isn't a documented contract, so match loosely on the stable tokens
+// ("approve your own" / "request changes on your own") and case-fold.
+func isSelfAuthorRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "approve your own") ||
+		strings.Contains(msg, "request changes on your own")
 }
 
 // postPRReview POSTs a structured review to the GitHub API via `gh api`.
@@ -616,4 +691,43 @@ func fetchPRRawDiff(ctx context.Context, fullRepo, prNumber string) string {
 		return ""
 	}
 	return string(out)
+}
+
+// queryViewerDidAuthor reports whether the authenticated viewer is the author
+// of the PR. Uses GraphQL's viewerDidAuthor field (server-side identity
+// match, one round-trip) rather than comparing `gh api user` to
+// `gh pr view --json author` — that login-compare breaks on bot suffixes
+// (`foo[bot]` vs `app/foo`), SSO normalisation, and installation tokens
+// (which return 403 on /user). viewerDidAuthor handles all three cleanly:
+// installation tokens resolve with a null viewer and return false, which is
+// the safe fallthrough since bots can approve PRs opened by other bots.
+func queryViewerDidAuthor(ctx context.Context, fullRepo, prNumber string) (bool, error) {
+	owner, repo, ok := strings.Cut(fullRepo, "/")
+	if !ok {
+		return false, fmt.Errorf("invalid repo %q (want owner/name)", fullRepo)
+	}
+	prNum, err := strconv.Atoi(prNumber)
+	if err != nil {
+		return false, fmt.Errorf("invalid pr number %q: %w", prNumber, err)
+	}
+
+	query := `query($owner:String!,$repo:String!,$num:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$num){viewerDidAuthor}}}`
+	cmd := exec.CommandContext(ctx, "gh", "api", "graphql",
+		"-f", "query="+query,
+		"-F", "owner="+owner,
+		"-F", "repo="+repo,
+		"-F", fmt.Sprintf("num=%d", prNum),
+		"--jq", ".data.repository.pullRequest.viewerDidAuthor")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("gh api graphql viewerDidAuthor: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected viewerDidAuthor response: %q", strings.TrimSpace(string(out)))
+	}
 }
