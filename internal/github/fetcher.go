@@ -162,6 +162,16 @@ func (f *FetcherHandler) FetchPRFeedback(ctx context.Context, owner, repo string
 	return pr, formatPRFeedback(pr, reviews, comments, issueComments, diff), nil
 }
 
+// parseOwnerRepo splits "owner/repo" into its components. Empty segments or
+// strings without a single slash are rejected.
+func parseOwnerRepo(repo string) (owner, name string, ok bool) {
+	parts := strings.SplitN(repo, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
 func formatPRFeedback(pr *PullRequest, reviews []Review, comments []ReviewComment, issueComments []IssueComment, diff string) string {
 	var b strings.Builder
 

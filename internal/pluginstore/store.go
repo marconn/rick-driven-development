@@ -47,12 +47,6 @@ func migrate(db *sql.DB) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_tickets_correlation ON processed_tickets(correlation_id);
 		CREATE INDEX IF NOT EXISTS idx_tickets_status ON processed_tickets(status);
-
-		CREATE TABLE IF NOT EXISTS ci_attempts (
-			ticket_id  TEXT PRIMARY KEY,
-			attempts   INTEGER NOT NULL DEFAULT 0,
-			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-		);
 	`)
 	return err
 }
@@ -128,26 +122,3 @@ func (s *Store) GetTicketByCorrelation(correlationID string) (*Ticket, error) {
 	return t, nil
 }
 
-// GetCIAttemptCount returns the number of ci-fix attempts for a ticket.
-func (s *Store) GetCIAttemptCount(ticketID string) int {
-	var count int
-	err := s.db.QueryRow("SELECT COALESCE(attempts, 0) FROM ci_attempts WHERE ticket_id = ?", ticketID).Scan(&count)
-	if err != nil {
-		return 0
-	}
-	return count
-}
-
-// IncrementCIAttempt increments the CI fix attempt counter for a ticket.
-func (s *Store) IncrementCIAttempt(ticketID string) error {
-	_, err := s.db.Exec(`
-		INSERT INTO ci_attempts (ticket_id, attempts) VALUES (?, 1)
-		ON CONFLICT(ticket_id) DO UPDATE SET
-			attempts = attempts + 1,
-			updated_at = datetime('now')
-	`, ticketID)
-	if err != nil {
-		return fmt.Errorf("pluginstore: increment ci attempt: %w", err)
-	}
-	return nil
-}

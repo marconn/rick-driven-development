@@ -200,26 +200,9 @@ func openPluginStore(logger *slog.Logger) *pluginstore.Store {
 }
 
 // startOptionalServices starts background services if their env vars are configured.
-func startOptionalServices(ctx context.Context, bus eventbus.Bus, jiraClient *jira.Client, ghClient *gh.Client, pstore *pluginstore.Store, logger *slog.Logger) {
-	// GitHub reporter: posts PR comments on workflow completion.
-	if ghClient != nil && pstore != nil {
-		reporter := gh.NewReporter(ghClient, pstore, logger)
-
-		// CI poller: polls GitHub Actions after successful workflow completions.
-		if os.Getenv("CI_POLL_ENABLED") == "true" {
-			ciPoller := gh.NewCIPoller(ghClient, bus, pstore, gh.CIPollerConfig{}, logger)
-			reporter.WithCIPoller(ciPoller)
-			logger.Info("ci poller enabled")
-		}
-
-		unsub := reporter.Start(bus)
-		go func() {
-			<-ctx.Done()
-			unsub()
-		}()
-		logger.Info("github reporter started")
-	}
-
+// ghClient is accepted for API compatibility with the serve wiring; it is
+// currently unused here because no GitHub-driven background service is wired.
+func startOptionalServices(ctx context.Context, bus eventbus.Bus, jiraClient *jira.Client, _ *gh.Client, pstore *pluginstore.Store, logger *slog.Logger) {
 	// Jira poller: polls Jira for new tickets and injects workflows.
 	if jql := os.Getenv("JIRA_JQL"); jql != "" && jiraClient != nil && pstore != nil {
 		interval := 60 * time.Second
