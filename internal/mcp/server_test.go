@@ -406,6 +406,91 @@ func TestToolRunWorkflowDerivesRepoFromSource(t *testing.T) {
 	}
 }
 
+// TestToolRunWorkflowDefaultsGithubDevForIssueSource locks in the auto-select
+// rule for GitHub issue references: when source is "gh:owner/repo#N" and no
+// dag is provided (and no pr_number forces a PR flow), rick_run_workflow
+// must default to github-dev. Regression: previously fell through to
+// workspace-dev, which lacks github-context and produced rick/<corr8>
+// branches instead of issue-<N> branches.
+func TestToolRunWorkflowDefaultsGithubDevForIssueSource(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+
+	deps.Engine.RegisterWorkflow(engine.GithubDevWorkflowDef())
+	deps.SelectWorkflow = func(name string) (engine.WorkflowDef, error) {
+		if name == "github-dev" {
+			return engine.GithubDevWorkflowDef(), nil
+		}
+		return engine.WorkflowDef{}, fmt.Errorf("unknown workflow: %s", name)
+	}
+
+	s := NewServer(deps, testLogger())
+
+	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
+		Name:      "rick_run_workflow",
+		Arguments: json.RawMessage(`{"prompt":"Implement issue","source":"gh:hulilabs/huli#641"}`),
+	}))
+
+	resp := parseResponse(t, lines[0])
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("tool returned error: %s", result.Content[0].Text)
+	}
+	var run runWorkflowResult
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &run); err != nil {
+		t.Fatal(err)
+	}
+	if run.DAG != "github-dev" {
+		t.Errorf("expected dag github-dev for gh:* issue source, got %q", run.DAG)
+	}
+}
+
+// TestToolRunWorkflowKeepsWorkspaceDevForPRSource guards the pr_number
+// escape hatch: when the caller passes a PR number (intending a PR flow),
+// we must NOT silently pick github-dev — that handler would reject the PR
+// reference at runtime. The caller is expected to provide an explicit DAG
+// (pr-review / pr-feedback) for PR work; absent that, workspace-dev stays
+// the default so the failure mode is "missing DAG" not "wrong DAG".
+func TestToolRunWorkflowKeepsWorkspaceDevForPRSource(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+
+	s := NewServer(deps, testLogger())
+
+	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
+		Name:      "rick_run_workflow",
+		Arguments: json.RawMessage(`{"prompt":"review pr","source":"gh:hulilabs/huli#820","pr_number":820,"repo":"hulilabs/huli"}`),
+	}))
+
+	resp := parseResponse(t, lines[0])
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+	data, _ := json.Marshal(resp.Result)
+	var result toolsCallResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	// workspace-dev is registered via testDeps; should succeed with default.
+	if result.IsError {
+		t.Fatalf("tool returned error: %s", result.Content[0].Text)
+	}
+	var run runWorkflowResult
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &run); err != nil {
+		t.Fatal(err)
+	}
+	if run.DAG != "workspace-dev" {
+		t.Errorf("expected dag workspace-dev when pr_number is set, got %q", run.DAG)
+	}
+}
+
 func TestToolWorkflowStatus(t *testing.T) {
 	deps, cleanup := testDeps(t)
 	defer cleanup()

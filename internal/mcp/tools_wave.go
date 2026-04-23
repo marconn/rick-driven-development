@@ -98,7 +98,7 @@ func (s *Server) registerWaveTools() {
 					},
 					"dag": map[string]any{
 						"type":        "string",
-						"description": "Workflow DAG to use for each child. Default: 'jira-dev' for Jira sources, 'workspace-dev' for GitHub sources.",
+						"description": "Workflow DAG to use for each child. Default: 'jira-dev' for Jira sources, 'github-dev' for GitHub sources (fetches issue context + branches as issue-<N>).",
 					},
 					"tickets": map[string]any{
 						"type":        "array",
@@ -291,6 +291,20 @@ type resolvedWaveSource struct {
 
 func (r resolvedWaveSource) ghParent() string {
 	return fmt.Sprintf("%s/%s#%d", r.GHOwner, r.GHRepo, r.GHNumber)
+}
+
+// defaultDAGForSource picks the built-in default DAG for a wave source when
+// neither the caller nor the dag_map supplied one. GitHub sources default to
+// github-dev so the workspace branch comes out as "issue-<N>" (via the
+// github-context handler) instead of the generic "rick/<corr>" fallback;
+// Jira sources default to jira-dev for the parallel reason.
+func defaultDAGForSource(src resolvedWaveSource) string {
+	switch src.Kind {
+	case "github", "github_project":
+		return "github-dev"
+	default:
+		return "jira-dev"
+	}
 }
 
 func parseWaveSource(args wavePlanArgs) (resolvedWaveSource, error) {
@@ -1031,13 +1045,16 @@ func buildWaveTickets(assigned map[string]int, nodes map[string]*waveNode, order
 //  2. rick:* label with no mapping → skipped (diagnostics).
 //  3. Otherwise, if the child has an open PR referencing it (Closes/Fixes) →
 //     pr-feedback against that PR.
-//  4. Fall back to dag_map["default"] or "workspace-dev".
+//  4. Fall back to dag_map["default"] or the source-kind default
+//     ("github-dev" for GitHub sources, "workspace-dev" otherwise). Using
+//     github-dev routes the child through the github-context handler so the
+//     workspace branch is named "issue-<N>" instead of "rick/<corr>".
 //
 // The chosen DAG is written back into waveNode.dag so the launcher can pick
 // it up without re-running label logic.
 func (s *Server) assignDAGParams(ctx context.Context, src resolvedWaveSource, nodes map[string]*waveNode, result *wavePlanResult) {
 	dagMap := src.DAGMap
-	defaultDAG := "workspace-dev"
+	defaultDAG := defaultDAGForSource(src)
 	if v, ok := dagMap["default"]; ok && v != "" {
 		defaultDAG = v
 	}
@@ -1554,11 +1571,7 @@ func (s *Server) toolWaveLaunch(ctx context.Context, raw json.RawMessage) (any, 
 		return nil, err
 	}
 	if args.DAG == "" {
-		if src.Kind == "github" {
-			args.DAG = "workspace-dev"
-		} else {
-			args.DAG = "jira-dev"
-		}
+		args.DAG = defaultDAGForSource(src)
 	}
 
 	plan, err := s.computeWavePlanForSource(ctx, src)

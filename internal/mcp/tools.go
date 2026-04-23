@@ -119,7 +119,7 @@ func (s *Server) registerBuiltinTools() { //nolint:funlen // tool registration i
 					},
 					"dag": map[string]any{
 						"type":        "string",
-						"description": "Which workflow DAG to use. Call rick_list_workflows to see all registered workflows (built-in and plugin-provided). Defaults to 'workspace-dev'.",
+						"description": "Which workflow DAG to use. Call rick_list_workflows to see all registered workflows (built-in and plugin-provided). Defaults: 'github-dev' when source is 'gh:owner/repo#N' (issue reference), 'jira-dev' when ticket is provided, 'workspace-dev' otherwise.",
 						"default":     "workspace-dev",
 					},
 					"source": map[string]any{
@@ -532,6 +532,15 @@ func (s *Server) toolRunWorkflow(ctx context.Context, raw json.RawMessage) (any,
 	}
 	if args.DAG == "" {
 		args.DAG = "workspace-dev"
+		// Auto-select github-dev when the caller supplied a gh:owner/repo#N
+		// issue reference but no explicit DAG. github-dev runs github-context,
+		// which enriches the workflow with ticket=issue-<N> so the workspace
+		// handler produces a human-readable branch instead of rick/<corr>.
+		// Skip when pr_number is set — that path targets a PR (pr-review /
+		// pr-feedback), not an issue, and github-context would hard-fail.
+		if args.PRNumber == 0 && strings.HasPrefix(args.Source, "gh:") && strings.Contains(args.Source, "#") {
+			args.DAG = "github-dev"
+		}
 	}
 
 	// Auto-select jira-dev when ticket is provided but the caller used the

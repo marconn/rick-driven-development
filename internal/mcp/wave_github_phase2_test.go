@@ -273,6 +273,56 @@ func TestComputeGithubWavePlan_DAGMapRouting(t *testing.T) {
 	}
 }
 
+// TestComputeGithubWavePlan_DefaultDAGForGithubSource locks in the built-in
+// default for GitHub wave sources: when no dag_map is supplied, every
+// unlabeled child must default to github-dev (not workspace-dev). This is
+// what routes the workflow through github-context so the workspace branch
+// comes out as "issue-<N>" instead of "rick/<corr>".
+func TestComputeGithubWavePlan_DefaultDAGForGithubSource(t *testing.T) {
+	r := newRoutable(t)
+	parent, _ := json.Marshal(map[string]any{"number": 1, "title": "p", "body": "", "state": "open"})
+	r.handleJSON("/repos/o/r/issues/1", string(parent))
+
+	subs := []map[string]any{
+		{"number": 40, "title": "unlabeled", "state": "open", "labels": []map[string]string{}},
+	}
+	subsJSON, _ := json.Marshal(subs)
+	r.handleJSON("/repos/o/r/issues/1/sub_issues", string(subsJSON))
+	r.handleJSON("/repos/o/r/issues/40/timeline", "[]")
+
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	deps.GitHub = r.client()
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	result, err := callTool(t, s, "rick_wave_plan", map[string]any{
+		"source": map[string]any{
+			"type":              "github",
+			"parent":            "o/r#1",
+			"child_discovery":   "sub_issues",
+			"dependency_source": "none",
+		},
+	})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	plan := result.(wavePlanResult)
+
+	var target wavePlanTicket
+	for _, w := range plan.Waves {
+		for _, tk := range w.Tickets {
+			if tk.ID == "o/r#40" {
+				target = tk
+			}
+		}
+	}
+	got, _ := target.DAGParams["dag"].(string)
+	if got != "github-dev" {
+		t.Errorf("default dag for unlabeled GitHub child: got %q, want github-dev", got)
+	}
+}
+
 // --- PR-feedback routing via timeline cross-reference ---
 
 func TestComputeGithubWavePlan_PRFeedbackTimelineRouting(t *testing.T) {
