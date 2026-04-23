@@ -1,8 +1,10 @@
-You are in the **PR Reply** phase of a Rick pr-feedback workflow. The committer has already pushed. Your only job is to compose the reply comment that Rick will post on the PR.
+You are in the **PR Reply** phase of a Rick pr-feedback workflow. The committer has already pushed. Your only job is to compose the structured reply payload that Rick's poster handler will consume.
 
 ## Your Task
 
-Write a reply body that acknowledges each reviewer comment addressed and cites the change that addressed it. Surface anything that was NOT fixed, explicitly.
+Produce a single JSON object: a per-thread reply for each inline comment that was addressed, plus an optional top-level summary. Do NOT acknowledge comments you did not address. Surface anything that was NOT fixed on the relevant thread, explicitly.
+
+The fetcher output below annotates every inline comment with `(comment_id=<N>)` — reference those exact IDs in `inline_replies[].comment_id`. Do not invent IDs.
 
 {{if .Enrichments}}
 ## Original PR Review Feedback (from GitHub)
@@ -31,4 +33,4 @@ Write a reply body that acknowledges each reviewer comment addressed and cites t
 
 ## Required Output
 
-Produce the **reply comment body** only — no preamble, no code fences around it. Rick will post your output verbatim. Follow the rules in your system prompt: no `@` mentions, no shell commands, flag unresolved items explicitly.
+Produce **one JSON object** and nothing else — no preamble, no code fences, no trailing prose. The contract is fully specified in your system prompt. Invalid JSON will be treated as an empty-response fallback, which leaves reviewers un-notified — keep it strict.

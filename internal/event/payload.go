@@ -430,15 +430,22 @@ type EnrichmentItem struct {
 
 // PRCommentPostedPayload records a PR comment Rick posted via its own client.
 // BodyHash lets downstream handlers dedupe without re-fetching the comment list
-// from GitHub. Kind distinguishes reply (immediate, addresses reviewer feedback)
-// from summary (workflow completion overview) so projections and tests can
-// filter by intent. Skipped is true when the poster short-circuited because an
+// from GitHub. Kind distinguishes the posting intent so projections and tests
+// can filter. Skipped is true when the poster short-circuited because an
 // identical body already existed on the PR — observability only, not an error.
+//
+// Kind values:
+//   - "summary":      top-level PR comment summarising the round (optional).
+//   - "inline-reply": reply on an existing inline review-comment thread;
+//                     InReplyToID points at the thread's root comment.
+//   - "reply":        legacy top-level reply comment (pre-inline-reply
+//                     contract). Retained so historical events still parse.
 type PRCommentPostedPayload struct {
-	Repo      string `json:"repo"`                 // "owner/repo"
-	PRNumber  int    `json:"pr_number"`
-	Kind      string `json:"kind"`                 // "reply", "summary"
-	CommentID int    `json:"comment_id,omitempty"` // GitHub comment ID (0 when skipped)
-	BodyHash  string `json:"body_hash"`            // sha256 hex of the posted body
-	Skipped   bool   `json:"skipped,omitempty"`    // true when an identical comment already existed
+	Repo        string `json:"repo"` // "owner/repo"
+	PRNumber    int    `json:"pr_number"`
+	Kind        string `json:"kind"`                     // "summary", "inline-reply", "reply"
+	CommentID   int    `json:"comment_id,omitempty"`     // GitHub comment ID (0 when skipped)
+	InReplyToID int    `json:"in_reply_to_id,omitempty"` // for kind="inline-reply": ID of the thread root
+	BodyHash    string `json:"body_hash"`                // sha256 hex of the posted body
+	Skipped     bool   `json:"skipped,omitempty"`        // true when an identical comment already existed
 }

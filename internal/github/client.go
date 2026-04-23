@@ -61,6 +61,30 @@ func (c *Client) CreatePRComment(ctx context.Context, owner, repo string, prNumb
 	return &comment, nil
 }
 
+// CreatePRReviewCommentReply posts a reply on an existing inline review
+// comment thread — a separate endpoint from CreatePRComment (which posts a
+// top-level PR conversation comment). Used by pr-reply-poster so Rick's
+// acknowledgement of a reviewer note lands on the reviewer's thread instead
+// of stacking up as fresh top-level comments.
+//
+// POST /repos/{owner}/{repo}/pulls/{pr}/comments/{comment_id}/replies
+func (c *Client) CreatePRReviewCommentReply(ctx context.Context, owner, repo string, prNumber, commentID int, body string) (*ReviewComment, error) {
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/comments/%d/replies", owner, repo, prNumber, commentID)
+	payload, err := json.Marshal(map[string]string{"body": body})
+	if err != nil {
+		return nil, fmt.Errorf("github: marshal reply: %w", err)
+	}
+	respBody, err := c.post(ctx, path, payload)
+	if err != nil {
+		return nil, fmt.Errorf("github: create review comment reply on %s/%s#%d comment %d: %w", owner, repo, prNumber, commentID, err)
+	}
+	var reply ReviewComment
+	if err := json.Unmarshal(respBody, &reply); err != nil {
+		return nil, fmt.Errorf("github: unmarshal review comment reply: %w", err)
+	}
+	return &reply, nil
+}
+
 // GetPR retrieves a pull request to check its existence and state.
 func (c *Client) GetPR(ctx context.Context, owner, repo string, prNumber int) (*PullRequest, error) {
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, prNumber)
@@ -152,17 +176,21 @@ type Review struct {
 	HTMLURL string `json:"html_url"`
 }
 
-// ReviewComment is an inline review comment on a PR diff.
+// ReviewComment is an inline review comment on a PR diff. InReplyToID is
+// non-zero when the comment is itself a reply in an existing thread; the
+// pr-reply-poster uses it to dedupe per-thread replies by matching
+// InReplyToID + body hash against the current comment list.
 type ReviewComment struct {
-	ID        int    `json:"id"`
-	User      User   `json:"user"`
-	Body      string `json:"body"`
-	Path      string `json:"path"`
-	Line      int    `json:"line"`
-	Side      string `json:"side"`
-	DiffHunk  string `json:"diff_hunk"`
-	HTMLURL   string `json:"html_url"`
-	CreatedAt string `json:"created_at"`
+	ID          int    `json:"id"`
+	InReplyToID int    `json:"in_reply_to_id,omitempty"`
+	User        User   `json:"user"`
+	Body        string `json:"body"`
+	Path        string `json:"path"`
+	Line        int    `json:"line"`
+	Side        string `json:"side"`
+	DiffHunk    string `json:"diff_hunk"`
+	HTMLURL     string `json:"html_url"`
+	CreatedAt   string `json:"created_at"`
 }
 
 // GetPRReviews fetches all reviews on a PR.

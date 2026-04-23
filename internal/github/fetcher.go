@@ -200,15 +200,27 @@ func formatPRFeedback(pr *PullRequest, reviews []Review, comments []ReviewCommen
 		fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(strings.ReplaceAll(r.Body, "@", ""), "\n", "\n> "))
 	}
 
-	// Inline diff comments.
+	// Inline diff comments. Each comment's numeric ID is emitted in the
+	// header so the pr-replier persona can reference it when producing
+	// per-thread replies (structured JSON consumed by pr-reply-poster).
+	// Replies-to-existing-threads (InReplyToID != 0) are skipped — they
+	// are Rick's own previous responses or unrelated back-and-forth, not
+	// new actionable feedback.
 	if len(comments) > 0 {
-		b.WriteString("### Inline Comments\n\n")
+		hasHeader := false
 		for _, c := range comments {
+			if c.InReplyToID != 0 {
+				continue
+			}
+			if !hasHeader {
+				b.WriteString("### Inline Comments\n\n")
+				hasHeader = true
+			}
 			loc := c.Path
 			if c.Line > 0 {
 				loc = fmt.Sprintf("%s:%d", c.Path, c.Line)
 			}
-			fmt.Fprintf(&b, "**%s** on `%s`:\n", c.User.Login, loc)
+			fmt.Fprintf(&b, "**%s** on `%s` (comment_id=%d):\n", c.User.Login, loc, c.ID)
 			if c.DiffHunk != "" {
 				b.WriteString("```diff\n")
 				b.WriteString(c.DiffHunk)
