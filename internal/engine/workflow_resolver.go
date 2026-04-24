@@ -314,6 +314,21 @@ func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPerso
 	var retriggerTarget string
 	for _, e := range events {
 		switch e.Type {
+		case event.PersonaFailed:
+			// Under WorkflowDef.PartialReviewOnFailure, a required-persona
+			// failure is absorbed as a skip: the join gate must treat it as
+			// a satisfied predecessor so the downstream consolidator fires
+			// and can report the skipped reviewer. Without this, pr-consolidator
+			// would block forever waiting on a dep that will never emit
+			// PersonaCompleted.
+			if wfDef == nil || !wfDef.PartialReviewOnFailure {
+				continue
+			}
+			var pf event.PersonaFailedPayload
+			if err := json.Unmarshal(e.Payload, &pf); err == nil && pf.Persona != "" {
+				latestByPersona[pf.Persona] = string(e.ID)
+			}
+
 		case event.PersonaCompleted:
 			var pc event.PersonaCompletedPayload
 			if err := json.Unmarshal(e.Payload, &pc); err == nil {

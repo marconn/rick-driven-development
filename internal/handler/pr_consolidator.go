@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -97,7 +98,7 @@ func (h *PRConsolidatorHandler) Handle(ctx context.Context, env event.Envelope) 
 		return nil, fmt.Errorf("pr-consolidator: load correlation chain: %w", err)
 	}
 
-	params, phaseOutputs, workspacePath, workspaceBase, diffTruncated := extractConsolidatorInputs(events)
+	params, phaseOutputs, workspacePath, workspaceBase, diffTruncated, skippedReviewers := extractConsolidatorInputs(events)
 
 	fullRepo, prNumber, err := parsePRSource(params.Source)
 	if err != nil {
@@ -119,6 +120,15 @@ func (h *PRConsolidatorHandler) Handle(ctx context.Context, env event.Envelope) 
 	// explicit caveat so humans know the review is incomplete.
 	if diffTruncated {
 		aiOutput = downgradeApproveOnTruncatedDiff(aiOutput)
+	}
+
+	// Reviewers absorbed as skips under WorkflowDef.PartialReviewOnFailure
+	// also invalidate a unanimous APPROVE — those dimensions were not
+	// evaluated. Report which ones, downgrade to COMMENT if APPROVE, and
+	// prepend a caveat listing the skipped reviewers so humans can decide
+	// whether to retry them or merge with partial coverage.
+	if len(skippedReviewers) > 0 {
+		aiOutput = downgradeApproveOnSkippedReviewers(aiOutput, skippedReviewers)
 	}
 
 	summary, postErr := h.postConsolidatedReview(ctx, fullRepo, prNumber, diff, aiOutput)
@@ -151,11 +161,16 @@ func (h *PRConsolidatorHandler) Handle(ctx context.Context, env event.Envelope) 
 //     diff enrichment with kind="pr-diff-truncated". Signals that every
 //     reviewer operated on a partial diff; a unanimous pass must not be
 //     promoted to APPROVE.
-func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequestedPayload, map[string]string, string, string, bool) {
+//   - skippedPersonas — required category reviewers that failed under
+//     WorkflowDef.PartialReviewOnFailure (claude crash, gemini YOLO stall,
+//     context-cancelled). Consolidator reports these in the review body
+//     and downgrades APPROVE → COMMENT when the list is non-empty.
+func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequestedPayload, map[string]string, string, string, bool, []string) {
 	var params event.WorkflowRequestedPayload
 	handlerOutputs := make(map[string]string)
 	var workspacePath, workspaceBase string
 	var diffTruncated bool
+	skippedSet := make(map[string]bool)
 
 	for _, e := range events {
 		switch e.Type {
@@ -184,10 +199,77 @@ func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequested
 				}
 				handlerOutputs[key] = unmarshalOutput(p.Output, p.Structured)
 			}
+
+		case event.PersonaFailed:
+			// Only category-review personas count here — pr-workspace /
+			// pr-jira-context failures would have failed the workflow
+			// (they're not part of the partial-OK set since losing
+			// them means no diff at all).
+			var p event.PersonaFailedPayload
+			if err := json.Unmarshal(e.Payload, &p); err == nil && strings.HasPrefix(p.Persona, "pr-") {
+				switch p.Persona {
+				case "pr-workspace", "pr-jira-context", "pr-consolidator", "pr-cleanup":
+					// non-reviewer — skip
+				default:
+					skippedSet[p.Persona] = true
+				}
+			}
 		}
 	}
 
-	return params, handlerOutputs, workspacePath, workspaceBase, diffTruncated
+	// Deterministic order for stable test output + readable PR body.
+	skipped := make([]string, 0, len(skippedSet))
+	for name := range skippedSet {
+		skipped = append(skipped, name)
+	}
+	sort.Strings(skipped)
+
+	return params, handlerOutputs, workspacePath, workspaceBase, diffTruncated, skipped
+}
+
+// downgradeApproveOnSkippedReviewers does the same shape as the truncated-diff
+// downgrade but for the partial-review case: one or more required category
+// reviewers were absorbed as skips (WorkflowDef.PartialReviewOnFailure).
+// An APPROVE that didn't hear from those dimensions is not a confident
+// approval — we flip it to COMMENT and prepend a caveat listing which
+// reviewers were skipped so the human knows what to re-run or examine.
+//
+// Non-APPROVE events are left untouched (REQUEST_CHANGES stays as-is;
+// COMMENT already communicates uncertainty). Non-JSON input passes
+// through unchanged, matching the truncation variant's fallback.
+func downgradeApproveOnSkippedReviewers(aiOutput string, skipped []string) string {
+	if len(skipped) == 0 {
+		return aiOutput
+	}
+	var payload struct {
+		Summary    string            `json:"summary"`
+		Event      string            `json:"event"`
+		Comments   []json.RawMessage `json:"comments"`
+		Unanchored []string          `json:"unanchored"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(aiOutput)), &payload); err != nil {
+		return aiOutput
+	}
+	// Build caveat regardless of prior event — operators need to see
+	// which dimensions are missing even on a REQUEST_CHANGES result.
+	caveat := fmt.Sprintf(
+		"> ⚠️ **Partial review.** %d reviewer(s) could not produce a verdict and were skipped: %s. Those dimensions were NOT evaluated. Retry via `rick_retry_workflow` if they are load-bearing for this PR.\n\n",
+		len(skipped), strings.Join(skipped, ", "))
+	payload.Summary = caveat + payload.Summary
+	if payload.Event == "APPROVE" {
+		payload.Event = "COMMENT"
+	}
+	if payload.Comments == nil {
+		payload.Comments = []json.RawMessage{}
+	}
+	if payload.Unanchored == nil {
+		payload.Unanchored = []string{}
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return aiOutput
+	}
+	return string(out)
 }
 
 // downgradeApproveOnTruncatedDiff mutates the consolidator's AI-produced

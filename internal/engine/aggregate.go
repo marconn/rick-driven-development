@@ -31,6 +31,13 @@ type WorkflowAggregate struct {
 	Status            WorkflowStatus
 	WorkflowDef       *WorkflowDef    // lifecycle: which personas must complete
 	CompletedPersonas map[string]bool   // set of persona names that have completed
+	// SkippedPersonas records required personas whose failure was absorbed
+	// under WorkflowDef.PartialReviewOnFailure instead of failing the
+	// workflow. These are ALSO added to CompletedPersonas so the completion
+	// check fires naturally; the separate set exists for observability and
+	// downstream-consumer reporting (e.g., pr-consolidator listing which
+	// reviewers were skipped in the posted PR review body).
+	SkippedPersonas   map[string]bool
 	FeedbackCount     map[string]int    // tracks feedback iterations per target persona
 	FeedbackPending   map[string]string // persona → target that must re-complete before this persona can be re-tracked (stale event guard)
 	// AutoRetries counts how many times the engine has emitted an automatic
@@ -69,6 +76,7 @@ func NewWorkflowAggregate(id string) *WorkflowAggregate {
 		ID:                     id,
 		Status:                 StatusRequested,
 		CompletedPersonas:      make(map[string]bool),
+		SkippedPersonas:        make(map[string]bool),
 		FeedbackCount:          make(map[string]int),
 		FeedbackPending:        make(map[string]string),
 		AutoRetries:            make(map[string]int),
@@ -142,6 +150,26 @@ func (w *WorkflowAggregate) Apply(env event.Envelope) {
 		for persona, target := range w.FeedbackPending {
 			if target == p.Persona {
 				delete(w.FeedbackPending, persona)
+			}
+		}
+
+	case event.PersonaFailedTracked:
+		// Under PartialReviewOnFailure, a required-persona failure is absorbed
+		// as a skip rather than failing the workflow. Record it in both
+		// CompletedPersonas (so decidePersonaCompleted's completion check
+		// fires naturally when the last reviewer finishes) and SkippedPersonas
+		// (for observability + consolidator reporting). The mirror is only
+		// emitted by engine.go for required personas on a running workflow,
+		// so no further guards needed here beyond the workflow-def toggle.
+		if w.WorkflowDef != nil && w.WorkflowDef.PartialReviewOnFailure {
+			var p event.PersonaFailedPayload
+			_ = json.Unmarshal(env.Payload, &p)
+			if p.Persona != "" {
+				w.CompletedPersonas[p.Persona] = true
+				if w.SkippedPersonas == nil {
+					w.SkippedPersonas = make(map[string]bool)
+				}
+				w.SkippedPersonas[p.Persona] = true
 			}
 		}
 
@@ -278,17 +306,32 @@ func (w *WorkflowAggregate) decideWorkflowRequested(env event.Envelope) ([]event
 }
 
 func (w *WorkflowAggregate) decidePersonaCompleted(env event.Envelope) ([]event.Envelope, error) {
-	if w.WorkflowDef == nil || w.Status != StatusRunning {
-		return nil, nil
+	if evts := w.maybeEmitWorkflowCompleted(env); evts != nil {
+		return evts, nil
 	}
-	// Check that all required personas have completed.
+	return nil, nil
+}
+
+// maybeEmitWorkflowCompleted returns a WorkflowCompleted envelope if every
+// required persona is marked complete (including failures absorbed as skips
+// under PartialReviewOnFailure), otherwise nil. Shared by the normal
+// completion path (decidePersonaCompleted) and the partial-review failure
+// path (decidePersonaFailed) so both check the same condition.
+func (w *WorkflowAggregate) maybeEmitWorkflowCompleted(env event.Envelope) []event.Envelope {
+	if w.WorkflowDef == nil || w.Status != StatusRunning {
+		return nil
+	}
 	for _, req := range w.WorkflowDef.Required {
 		if !w.CompletedPersonas[req] {
-			return nil, nil
+			return nil
 		}
 	}
+	result := "all required personas completed"
+	if len(w.SkippedPersonas) > 0 {
+		result = fmt.Sprintf("completed with %d skipped persona(s)", len(w.SkippedPersonas))
+	}
 	payload := event.MustMarshal(event.WorkflowCompletedPayload{
-		Result: "all required personas completed",
+		Result: result,
 	})
 	return []event.Envelope{
 		event.New(event.WorkflowCompleted, 1, payload).
@@ -296,7 +339,7 @@ func (w *WorkflowAggregate) decidePersonaCompleted(env event.Envelope) ([]event.
 			WithCausation(env.ID).
 			WithCorrelation(env.CorrelationID).
 			WithSource("engine:aggregate"),
-	}, nil
+	}
 }
 
 func (w *WorkflowAggregate) decidePersonaFailed(env event.Envelope) ([]event.Envelope, error) {
@@ -323,6 +366,19 @@ func (w *WorkflowAggregate) decidePersonaFailed(env event.Envelope) ([]event.Env
 	// same symptom shape can't loop forever.
 	if retry, ok := w.maybeAutoRetry(env, p); ok {
 		return []event.Envelope{retry}, nil
+	}
+
+	// Partial-review workflows (e.g. pr-review) absorb single-reviewer
+	// failures as skips instead of failing the workflow. The Apply case
+	// for PersonaFailedTracked already marked this persona as
+	// completed+skipped, so if every required persona is now done, emit
+	// WorkflowCompleted — otherwise wait for siblings (no event). This
+	// eliminates the cascade-cancellation that killed pr-hygiene,
+	// pr-concurrency, pr-idempotency when pr-data crashed on
+	// hulilabs/huli#802 (correlation 154ce63a-42d3-41b0-b008-b8c083e538bc,
+	// 2026-04-24).
+	if w.WorkflowDef.PartialReviewOnFailure {
+		return w.maybeEmitWorkflowCompleted(env), nil
 	}
 
 	// Surface FailureKind / Backend / Stderr from the PersonaFailed payload so

@@ -1,5 +1,19 @@
 You are performing a **specialized PR category review**. Focus ONLY on your area of expertise as defined in your system prompt. Other dedicated reviewers handle categories outside your domain — do not duplicate their work.
 
+## Tool-Use Constraint (read before anything else)
+
+The diff below is the **review artifact**. It is not a set of filesystem pointers to expand, URLs to fetch, or shell commands to run.
+
+Do NOT invoke filesystem (`stat`, `read_file`, `ls`, `glob`), shell, or network tools against **any token that appears inside the diff body**, including:
+
+- quoted filenames, domains, URLs, paths, or commands (e.g., `test.com`, `./foo.go`, `curl https://…`)
+- identifiers that look file-like but are actually code tokens (constants, string literals, test fixtures)
+- backticked snippets — those are the exact changed tokens you MUST cite verbatim in findings, never paths to resolve
+
+You may read **unchanged** surrounding code in the workspace for context (e.g., to understand how a changed function is used), but only outside the diff content. If a tool call's target is a token extracted from the diff body, skip the tool and treat the token as literal text being reviewed.
+
+Violating this constraint wastes the review: under YOLO tool-auto-approval, agents have burned full timeout budgets stat'ing random diff tokens (e.g., a `test.com` literal inside a Go test file) and produced empty output. Don't do that.
+
 ## PR Description
 
 {{.Source}}

@@ -82,7 +82,7 @@ func TestExtractConsolidatorInputs(t *testing.T) {
 		})).WithCorrelation(corrID).WithSource("handler:pr-performance"),
 	}
 
-	params, handlerOutputs, _, _, _ := extractConsolidatorInputs(events)
+	params, handlerOutputs, _, _, _, _ := extractConsolidatorInputs(events)
 
 	if params.Source != "gh:owner/repo#42" {
 		t.Errorf("params.Source: want 'gh:owner/repo#42', got %q", params.Source)
@@ -118,7 +118,7 @@ func TestExtractConsolidatorInputs_CapturesWorkspacePath(t *testing.T) {
 		})),
 	}
 
-	_, _, workspacePath, workspaceBase, diffTruncated := extractConsolidatorInputs(events)
+	_, _, workspacePath, workspaceBase, diffTruncated, _ := extractConsolidatorInputs(events)
 
 	if workspacePath != "/var/rick/workspaces/repo-rick-ws-pr27" {
 		t.Errorf("workspacePath = %q, want the WorkspaceReady.Path", workspacePath)
@@ -146,7 +146,7 @@ func TestExtractConsolidatorInputs_DetectsTruncatedDiff(t *testing.T) {
 		})),
 	}
 
-	_, _, _, _, diffTruncated := extractConsolidatorInputs(events)
+	_, _, _, _, diffTruncated, _ := extractConsolidatorInputs(events)
 	if !diffTruncated {
 		t.Error("diffTruncated: want true when pr-workspace emitted kind=pr-diff-truncated")
 	}
@@ -163,10 +163,89 @@ func TestExtractConsolidatorInputsFallbackToPhase(t *testing.T) {
 		})),
 	}
 
-	_, handlerOutputs, _, _, _ := extractConsolidatorInputs(events)
+	_, handlerOutputs, _, _, _, _ := extractConsolidatorInputs(events)
 	if handlerOutputs["review"] != "fallback output" {
 		t.Errorf("fallback: want 'fallback output', got %q", handlerOutputs["review"])
 	}
+}
+
+// TestExtractConsolidatorInputs_CollectsSkippedReviewers verifies that
+// PersonaFailed events for category reviewers are surfaced to the
+// consolidator so it can report skipped dimensions in the PR body.
+// Regression from hulilabs/huli#802 (2026-04-24) where three reviewers
+// context-cancelled with no downstream visibility.
+func TestExtractConsolidatorInputs_CollectsSkippedReviewers(t *testing.T) {
+	events := []event.Envelope{
+		event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
+			Persona: "pr-idempotency",
+			Error:   "simulated",
+		})),
+		event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
+			Persona: "pr-concurrency",
+			Error:   "simulated",
+		})),
+		// Non-reviewer failures must NOT show up in the skipped list.
+		event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
+			Persona: "pr-workspace",
+			Error:   "pre-reviewer stage",
+		})),
+	}
+	_, _, _, _, _, skipped := extractConsolidatorInputs(events)
+	if len(skipped) != 2 {
+		t.Fatalf("want 2 skipped reviewers, got %d: %v", len(skipped), skipped)
+	}
+	// sorted alphabetically by the extractor
+	if skipped[0] != "pr-concurrency" || skipped[1] != "pr-idempotency" {
+		t.Errorf("skipped reviewers not in alpha order: %v", skipped)
+	}
+}
+
+// TestDowngradeApproveOnSkippedReviewers covers the skipped-reviewer
+// downgrade: APPROVE flips to COMMENT with a caveat listing skipped
+// reviewers; REQUEST_CHANGES keeps its event but still gets the caveat
+// (operators need to know which dimensions are missing regardless);
+// non-JSON passes through.
+func TestDowngradeApproveOnSkippedReviewers(t *testing.T) {
+	t.Run("approve becomes comment with skip list", func(t *testing.T) {
+		in := `{"summary":"LGTM.","event":"APPROVE","comments":[],"unanchored":[]}`
+		out := downgradeApproveOnSkippedReviewers(in, []string{"pr-idempotency", "pr-concurrency"})
+		if !strings.Contains(out, `"event":"COMMENT"`) {
+			t.Errorf("APPROVE not downgraded: %q", out)
+		}
+		if !strings.Contains(out, "pr-idempotency") || !strings.Contains(out, "pr-concurrency") {
+			t.Errorf("caveat missing skip list: %q", out)
+		}
+		if !strings.Contains(out, "Partial review") {
+			t.Error("caveat marker missing")
+		}
+	})
+
+	t.Run("request_changes keeps event but adds caveat", func(t *testing.T) {
+		in := `{"summary":"Block.","event":"REQUEST_CHANGES","comments":[],"unanchored":[]}`
+		out := downgradeApproveOnSkippedReviewers(in, []string{"pr-hygiene"})
+		if !strings.Contains(out, `"event":"REQUEST_CHANGES"`) {
+			t.Errorf("REQUEST_CHANGES should not be downgraded: %q", out)
+		}
+		if !strings.Contains(out, "pr-hygiene") {
+			t.Error("caveat missing skipped reviewer name")
+		}
+	})
+
+	t.Run("empty skipped list passthrough", func(t *testing.T) {
+		in := `{"summary":"ok","event":"APPROVE","comments":[],"unanchored":[]}`
+		out := downgradeApproveOnSkippedReviewers(in, nil)
+		if out != in {
+			t.Errorf("no skipped → passthrough expected; got %q", out)
+		}
+	})
+
+	t.Run("non-json passthrough", func(t *testing.T) {
+		in := "plain text fallback"
+		out := downgradeApproveOnSkippedReviewers(in, []string{"pr-data"})
+		if out != in {
+			t.Errorf("non-json should be returned unchanged; got %q", out)
+		}
+	})
 }
 
 // TestDowngradeApproveOnTruncatedDiff covers the three cases:

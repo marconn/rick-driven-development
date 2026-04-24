@@ -20,6 +20,16 @@ type WorkflowDef struct {
 	// AdjustChainDepth formula so existing workflows behave identically.
 	// Set an explicit value to tighten the guard for short workflows.
 	MaxChainDepth int
+	// PartialReviewOnFailure changes the semantic of a required-persona
+	// failure: instead of emitting WorkflowFailed and cascading context
+	// cancellation to siblings, the engine marks the persona as skipped,
+	// records it for observability, and lets the workflow proceed. A
+	// downstream consolidator (pr-consolidator) can then report which
+	// reviewers were skipped and downgrade the review outcome. Intended
+	// for parallel-fan-out review workflows where losing one narrow
+	// reviewer does not invalidate the rest — not for feedback-loop
+	// workflows where a single handler failure is load-bearing.
+	PartialReviewOnFailure bool
 }
 
 // EffectiveMaxChainDepth returns the chain-depth limit for this workflow.
@@ -167,6 +177,14 @@ func PRReviewWorkflowDef() WorkflowDef {
 		Required:      required,
 		Graph:         graph,
 		MaxIterations: 1,
+		// One narrow reviewer's failure (CLI crash, stall, YOLO tool-loop)
+		// shouldn't throw away the other eleven. Absorb the failure as a
+		// skip, let the rest finish, and let pr-consolidator report what
+		// was skipped. See the hulilabs/huli#802 incident (correlation
+		// 154ce63a-42d3-41b0-b008-b8c083e538bc, 2026-04-24) where pr-data's
+		// claude-exit-1 cancelled three mid-flight gemini siblings via
+		// workflow.failed cascade.
+		PartialReviewOnFailure: true,
 	}
 }
 

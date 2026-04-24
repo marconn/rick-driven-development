@@ -2777,3 +2777,93 @@ func TestPerWorkflowChainDepth_FallbackForUnknownCorrelation(t *testing.T) {
 		t.Fatal("unknown correlation should fall back to default=5, admitting depth 4")
 	}
 }
+
+// TestPRCategoryJoin_PartialReviewAbsorbsFailure exercises the option-2 fix
+// for the hulilabs/huli#802 cascade incident (correlation
+// 154ce63a-42d3-41b0-b008-b8c083e538bc, 2026-04-24). Under
+// WorkflowDef.PartialReviewOnFailure, when a required category reviewer
+// emits PersonaFailed, the join gate must treat it as a satisfied
+// predecessor so pr-consolidator still fires on the remaining N-1
+// completions. Without this, the consolidator would wedge forever
+// waiting on a dep that will never emit PersonaCompleted.
+func TestPRCategoryJoin_PartialReviewAbsorbsFailure(t *testing.T) {
+	runner, store, bus, reg := newTestPersonaRunner(t)
+
+	def := PRReviewWorkflowDef()
+	if !def.PartialReviewOnFailure {
+		t.Fatal("precondition: PRReviewWorkflowDef must have PartialReviewOnFailure=true for this fix")
+	}
+	runner.RegisterWorkflow(def)
+
+	consolidatorFired := make(chan struct{}, 1)
+	consolidator := &stubHandler{
+		name: "pr-consolidator",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			consolidatorFired <- struct{}{}
+			return nil, nil
+		},
+	}
+	if err := reg.Register(consolidator); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx := context.Background()
+	corrID := "corr-pr-review-partial"
+
+	wsEvt := event.New(event.WorkflowStartedFor("pr-review"), 1, event.MustMarshal(event.WorkflowStartedPayload{
+		WorkflowID: "pr-review",
+	})).WithCorrelation(corrID).WithAggregate(corrID, 1)
+	if err := store.Append(ctx, corrID, 0, []event.Envelope{wsEvt}); err != nil {
+		t.Fatalf("append ws: %v", err)
+	}
+
+	runner.Start(ctx, reg)
+	if err := bus.Publish(ctx, wsEvt); err != nil {
+		t.Fatalf("publish ws: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	reviewers := prCategoryReviewers
+	// Fail pr-data (mirrors the real incident); complete the rest.
+	const failed = "pr-data"
+	for _, reviewer := range reviewers {
+		agg := corrID + ":persona:" + reviewer
+		var evts []event.Envelope
+		if reviewer == failed {
+			pf := event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
+				Persona:     reviewer,
+				Error:       "simulated crash",
+				FailureKind: event.FailureKindBackendError,
+				Backend:     "claude",
+			})).WithAggregate(agg, 1).WithCorrelation(corrID)
+			evts = append(evts, pf)
+			if err := store.Append(ctx, agg, 0, evts); err != nil {
+				t.Fatalf("append failed persona %s: %v", reviewer, err)
+			}
+			if err := bus.Publish(ctx, pf); err != nil {
+				t.Fatalf("publish failed persona %s: %v", reviewer, err)
+			}
+			continue
+		}
+		pc := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+			Persona: reviewer, ChainDepth: 2,
+		})).WithAggregate(agg, 1).WithCorrelation(corrID)
+		evts = append(evts, pc)
+		if err := store.Append(ctx, agg, 0, evts); err != nil {
+			t.Fatalf("append completed persona %s: %v", reviewer, err)
+		}
+		if err := bus.Publish(ctx, pc); err != nil {
+			t.Fatalf("publish completed persona %s: %v", reviewer, err)
+		}
+	}
+
+	select {
+	case <-consolidatorFired:
+		// Expected: join gate treated pr-data's failure as a satisfied
+		// predecessor because PartialReviewOnFailure is set; the other
+		// N-1 real completions complete the join.
+	case <-time.After(2 * time.Second):
+		t.Errorf("pr-consolidator did NOT fire when one reviewer failed under PartialReviewOnFailure — join gate is not counting PersonaFailed")
+	}
+}
