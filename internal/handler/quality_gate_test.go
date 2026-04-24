@@ -1154,3 +1154,144 @@ func TestQualityGate_MixedDiffRunsFullGate(t *testing.T) {
 		t.Errorf("mixed diff must not take docs-only fast-pass, got summary %q", vp.Summary)
 	}
 }
+
+// TestMergeOutputAndStderr covers the helper that stitches stack's "output"
+// and "stderr" JSON fields into a single verdict body. The 2026-04-22 /
+// 2026-04-24 bug was precisely the empty-empty case masquerading as "no
+// output captured" — we now get a non-empty body as long as either stream
+// carried signal.
+func TestMergeOutputAndStderr(t *testing.T) {
+	tests := []struct {
+		name, stdout, stderr, want string
+	}{
+		{"both empty", "", "", ""},
+		{"only stdout", "actual failure", "", "actual failure"},
+		{
+			"only stderr",
+			"",
+			"Warning: Docker not ready",
+			"[stack diagnostics / stderr]\nWarning: Docker not ready",
+		},
+		{
+			"both present",
+			"inner stdout",
+			"vm diag",
+			"inner stdout\n\n[stack diagnostics / stderr]\nvm diag",
+		},
+		{"whitespace-only stdout treated as empty", "   \n  ", "diag", "[stack diagnostics / stderr]\ndiag"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeOutputAndStderr(tt.stdout, tt.stderr)
+			if got != tt.want {
+				t.Errorf("mergeOutputAndStderr(%q,%q)\n  got:  %q\n  want: %q", tt.stdout, tt.stderr, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSaveDebugOutput_SkipsEmpty guards the regression from 2026-04-24 where
+// an empty log file was written and its path advertised in the verdict, so
+// operators chased a zero-byte artifact.
+func TestSaveDebugOutput_SkipsEmpty(t *testing.T) {
+	debugDir := t.TempDir()
+	h := &QualityGateHandler{
+		debugDir: debugDir,
+		logger:   slog.Default(),
+	}
+
+	if path := h.saveDebugOutput("corr-xxx", "test", ""); path != "" {
+		t.Errorf("saveDebugOutput must return empty for blank input, got %q", path)
+	}
+	if path := h.saveDebugOutput("corr-xxx", "test", "   \n\t "); path != "" {
+		t.Errorf("saveDebugOutput must return empty for whitespace-only input, got %q", path)
+	}
+
+	entries, err := os.ReadDir(debugDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("debug dir must stay empty on blank input, got %d entries", len(entries))
+	}
+
+	// Sanity: non-empty input still writes.
+	if path := h.saveDebugOutput("corr-xxx", "test", "real error"); path == "" {
+		t.Error("saveDebugOutput must write for non-empty input")
+	}
+}
+
+// TestQualityGate_StackStderrFieldReachesVerdict simulates stack emitting the
+// new "stderr" field in its JSON envelope with an empty "output" — the exact
+// shape we will see when multipass kills the VM mid-run or the inner shell
+// fails before writing anything. The verdict body must carry the diagnostic
+// text from the stderr field instead of collapsing to "[no output captured]".
+func TestQualityGate_StackStderrFieldReachesVerdict(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake stack emits a run envelope with output="" and stderr populated.
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+cat <<'EOF'
+{"action":"create","status":"success"}
+{"action":"run","exit_code":1,"output":"","stderr":"[WARNING] Docker may not be fully ready\n[STEP] Localize code failed","status":"success"}
+{"action":"destroy","status":"success"}
+EOF
+exit 1
+`)
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-stderr"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-stderr"),
+	}
+
+	debugDir := filepath.Join(t.TempDir(), "debug")
+	h := &QualityGateHandler{
+		store:    store,
+		name:     "quality-gate",
+		stackBin: fakeStack,
+		timeout:  300,
+		debugDir: debugDir,
+		logger:   slog.Default(),
+	}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-stderr")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertVerdictOutcome(t, got[0], event.VerdictFail)
+
+	var vp event.VerdictPayload
+	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
+		t.Fatal(err)
+	}
+	if len(vp.Issues) == 0 {
+		t.Fatal("expected issues")
+	}
+	desc := vp.Issues[0].Description
+	if !strings.Contains(desc, "Docker may not be fully ready") {
+		t.Errorf("verdict must contain stack stderr diagnostic, got: %s", desc)
+	}
+	if strings.Contains(desc, "[no output captured") {
+		t.Errorf("verdict must not fall through to empty-capture branch when stderr is populated, got: %s", desc)
+	}
+
+	// Debug file must be non-empty and referenced in the verdict.
+	entries, err := os.ReadDir(debugDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("debug file should be written when stderr has content")
+	}
+	for _, e := range entries {
+		info, _ := e.Info()
+		if info.Size() == 0 {
+			t.Errorf("debug file %s is 0 bytes — the bug we just fixed", e.Name())
+		}
+	}
+}

@@ -171,9 +171,10 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 			// debug artifact was env-gated, which meant the operator inspecting
 			// a `./run.sh test failed:\n` empty-body verdict had no trail back
 			// to the real stderr. The default dir is cheap — a few KB per run.
-			debugRef := h.saveDebugOutput(env.CorrelationID, check.name, result.Output)
+			fullOutput := mergeOutputAndStderr(result.Output, result.Stderr)
+			debugRef := h.saveDebugOutput(env.CorrelationID, check.name, fullOutput)
 
-			desc := buildFailureDescription(check.name, result.Output, debugRef)
+			desc := buildFailureDescription(check.name, fullOutput, debugRef)
 			issues = append(issues, event.Issue{
 				Severity:    "major",
 				Category:    "correctness",
@@ -385,6 +386,7 @@ type stackRunResult struct {
 	Action   string `json:"action"`    // "run"
 	ExitCode int    `json:"exit_code"` // inner command exit code (success envelope only)
 	Output   string `json:"output"`    // captured stdout from the command
+	Stderr   string `json:"stderr"`    // captured stderr + stack diagnostic lines (stack ≥ contract v2)
 	Kept     bool   `json:"kept"`      // whether temp stack was kept on failure
 	Stack    string `json:"stack"`     // temp stack name
 	Code     string `json:"code"`      // error code (error envelope only)
@@ -439,12 +441,36 @@ func (h *QualityGateHandler) runCheck(ctx context.Context, wsPath string, check 
 		result.Code = "parse_error"
 	}
 
+	// Fold rick's own captured subprocess stderr into result.Stderr. Stack
+	// prints nothing to stderr in JSON mode, but this defends against future
+	// leakage and against non-JSON fatal panics from stack itself. Belt +
+	// suspenders: the 2026-04-22 and 2026-04-24 empty-body verdicts came from
+	// exactly this hole — every layer captured the diagnostic text and every
+	// layer dropped it before the verdict was built.
+	if s := strings.TrimSpace(stderr.String()); s != "" {
+		if result.Stderr != "" {
+			result.Stderr = result.Stderr + "\n" + s
+		} else {
+			result.Stderr = s
+		}
+	}
+
 	if runErr != nil {
+		// Guarantee the caller always sees *something* diagnostic. If the JSON
+		// envelope's output was empty but stderr has content, promote stderr
+		// into output so buildFailureDescription's truncation and debug-save
+		// paths carry actual signal.
+		if strings.TrimSpace(result.Output) == "" && strings.TrimSpace(result.Stderr) != "" {
+			result.Output = result.Stderr
+		}
 		return result, runErr
 	}
 
 	// stack run succeeded at infrastructure level — check inner command exit code.
 	if result.ExitCode != 0 {
+		if strings.TrimSpace(result.Output) == "" && strings.TrimSpace(result.Stderr) != "" {
+			result.Output = result.Stderr
+		}
 		return result, fmt.Errorf("command exited with code %d", result.ExitCode)
 	}
 
@@ -541,6 +567,28 @@ func (h *QualityGateHandler) resolveWorkspacePath(ctx context.Context, correlati
 	return ws.Path, err
 }
 
+// mergeOutputAndStderr combines the inner-command stdout (from stack's
+// "output" JSON field) with the captured stderr/diagnostic stream (from
+// stack's "stderr" field plus rick's own subprocess stderr, populated by
+// runCheck). When both are non-empty they are joined with a labeled header;
+// when only one is non-empty it is returned as-is. Empty result means the
+// whole pipeline was silent — caller should surface the exit-code-only
+// degenerate message.
+func mergeOutputAndStderr(stdout, stderr string) string {
+	stdoutTrim := strings.TrimSpace(stdout)
+	stderrTrim := strings.TrimSpace(stderr)
+	switch {
+	case stdoutTrim == "" && stderrTrim == "":
+		return ""
+	case stdoutTrim == "":
+		return "[stack diagnostics / stderr]\n" + stderr
+	case stderrTrim == "":
+		return stdout
+	default:
+		return stdout + "\n\n[stack diagnostics / stderr]\n" + stderr
+	}
+}
+
 // ansiRe matches ANSI escape sequences and backspace-overwrite pairs (spinner chars).
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]|.\x08`)
 
@@ -593,9 +641,15 @@ func filterDockerNoise(s string) string {
 }
 
 // saveDebugOutput persists the full untruncated output to a file for operator
-// inspection. Returns the file path or empty string if debug is disabled.
+// inspection. Returns the file path or empty string if debug is disabled, or
+// if the output is empty — writing a 0-byte file and then pointing the verdict
+// at it is the antipattern that bit us on 2026-04-24 (operator chased a path
+// that led to nothing).
 func (h *QualityGateHandler) saveDebugOutput(correlationID, check, output string) string {
 	if h.debugDir == "" {
+		return ""
+	}
+	if strings.TrimSpace(output) == "" {
 		return ""
 	}
 	if err := os.MkdirAll(h.debugDir, 0o755); err != nil {
