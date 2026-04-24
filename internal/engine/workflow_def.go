@@ -135,17 +135,17 @@ func WorkspaceDevWorkflowDef() WorkflowDef {
 	}
 }
 
-// prCategoryReviewers lists the 11 dedicated single-concern reviewers
+// prCategoryReviewers lists the dedicated single-concern reviewers
 // for the pr-review workflow. Order matches the consolidator output.
 var prCategoryReviewers = []string{
 	"pr-security", "pr-concurrency", "pr-error-handling",
 	"pr-observability", "pr-api-contract", "pr-idempotency",
 	"pr-testing", "pr-integration", "pr-performance",
-	"pr-data", "pr-hygiene",
+	"pr-data", "pr-hygiene", "pr-vendor-resilience",
 }
 
 // PRReviewWorkflowDef returns the pr-review workflow definition.
-// Flow: pr-workspace → pr-jira-context → 11 category reviewers (parallel)
+// Flow: pr-workspace → pr-jira-context → N category reviewers (parallel)
 // → pr-consolidator (posts consolidated GitHub comment) → pr-cleanup.
 func PRReviewWorkflowDef() WorkflowDef {
 	required := []string{"pr-workspace", "pr-jira-context"}

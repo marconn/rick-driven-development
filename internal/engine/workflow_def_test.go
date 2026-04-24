@@ -122,7 +122,7 @@ func TestEffectiveMaxChainDepth(t *testing.T) {
 			want:          1,
 		},
 		{
-			name:     "pr-review has 15 required: 15+5=20",
+			name:     "pr-review: len(Required)+5",
 			required: PRReviewWorkflowDef().Required,
 			want:     len(PRReviewWorkflowDef().Required) + 5,
 		},
@@ -140,5 +140,45 @@ func TestEffectiveMaxChainDepth(t *testing.T) {
 				t.Errorf("EffectiveMaxChainDepth() = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestPRReviewWorkflowIncludesVendorResilience locks in the wiring for the
+// pr-vendor-resilience category reviewer: it must appear in Required, in the
+// Graph keyed on pr-jira-context, and be a predecessor of pr-consolidator.
+// Without these three, the handler would silently never fire, or the join
+// gate would wait on a dep that is not in the graph.
+func TestPRReviewWorkflowIncludesVendorResilience(t *testing.T) {
+	def := PRReviewWorkflowDef()
+
+	requiredHas := false
+	for _, r := range def.Required {
+		if r == "pr-vendor-resilience" {
+			requiredHas = true
+			break
+		}
+	}
+	if !requiredHas {
+		t.Fatal("PRReviewWorkflowDef.Required must contain 'pr-vendor-resilience'")
+	}
+
+	deps, ok := def.Graph["pr-vendor-resilience"]
+	if !ok {
+		t.Fatal("PRReviewWorkflowDef.Graph must have an entry for 'pr-vendor-resilience'")
+	}
+	if len(deps) != 1 || deps[0] != "pr-jira-context" {
+		t.Errorf("pr-vendor-resilience deps: want [pr-jira-context], got %v", deps)
+	}
+
+	consolidatorDeps := def.Graph["pr-consolidator"]
+	found := false
+	for _, d := range consolidatorDeps {
+		if d == "pr-vendor-resilience" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("pr-consolidator deps must include 'pr-vendor-resilience'; got %v", consolidatorDeps)
 	}
 }

@@ -27,17 +27,18 @@ const (
 	PRConsolidator   = "pr-consolidator"
 
 	// PR category review personas — dedicated single-concern reviewers for pr-review workflow.
-	PRSecurity      = "pr-security"
-	PRConcurrency   = "pr-concurrency"
-	PRErrorHandling = "pr-error-handling"
-	PRObservability = "pr-observability"
-	PRAPIContract   = "pr-api-contract"
-	PRIdempotency   = "pr-idempotency"
-	PRTesting       = "pr-testing"
-	PRIntegration   = "pr-integration"
-	PRPerformance   = "pr-performance"
-	PRData          = "pr-data"
-	PRHygiene       = "pr-hygiene"
+	PRSecurity         = "pr-security"
+	PRConcurrency      = "pr-concurrency"
+	PRErrorHandling    = "pr-error-handling"
+	PRObservability    = "pr-observability"
+	PRAPIContract      = "pr-api-contract"
+	PRIdempotency      = "pr-idempotency"
+	PRTesting          = "pr-testing"
+	PRIntegration      = "pr-integration"
+	PRPerformance      = "pr-performance"
+	PRData             = "pr-data"
+	PRHygiene          = "pr-hygiene"
+	PRVendorResilience = "pr-vendor-resilience"
 
 	// PR reply composer — text-only persona whose output Rick posts on its
 	// behalf. Runs with Yolo=false (no tool access) to eliminate the
@@ -47,12 +48,12 @@ const (
 
 // PhasePersona maps a workflow phase name to its default persona.
 var PhasePersona = map[string]string{
-	"research":  Researcher,
-	"architect": Architect,
-	"develop":   Developer,
-	"review":    Reviewer,
-	"qa":        QA,
-	"commit":    Committer,
+	"research":         Researcher,
+	"architect":        Architect,
+	"develop":          Developer,
+	"review":           Reviewer,
+	"qa":               QA,
+	"commit":           Committer,
 	"workspace":        Workspace,
 	"feedback-analyze": FeedbackAnalyzer,
 	"feedback-verify":  Reviewer,
@@ -106,6 +107,7 @@ func DefaultRegistry() *Registry {
 		{Name: PRPerformance, Description: "Performance Reviewer"},
 		{Name: PRData, Description: "Data Integrity Reviewer"},
 		{Name: PRHygiene, Description: "Code Hygiene Reviewer"},
+		{Name: PRVendorResilience, Description: "Vendor Resilience Reviewer"},
 		{Name: PRReplier, Description: "PR Reply Composer"},
 	} {
 		_ = r.Register(&p)

@@ -17,8 +17,9 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/persona"
 )
 
-// PRConsolidatorHandler collects outputs from the 11 dedicated category
-// reviewers, calls AI to produce a structured review payload, and posts it to
+// PRConsolidatorHandler collects outputs from the dedicated category
+// reviewers (see prCategoryReviewerLabels below for the authoritative list),
+// calls AI to produce a structured review payload, and posts it to
 // the PR as a single GitHub *pull request review* — with each actionable
 // finding attached as an inline comment anchored to the diff. This is the only
 // handler in the flow with an external side-effect (posting the review).
@@ -43,7 +44,7 @@ type PRConsolidatorHandler struct {
 }
 
 // ConsolidatorModel is the Claude model this handler pins to. The consolidator
-// does pure synthesis — dedupe findings from 11 reviewer outputs, validate
+// does pure synthesis — dedupe findings from the category reviewers, validate
 // inline anchors against the diff — and does not need a frontier-class model.
 // Haiku is ~5× cheaper and faster; pin here (not via RICK_MODEL) so it stays
 // decoupled from the developer/reviewer defaults.
@@ -223,6 +224,7 @@ var prCategoryReviewerLabels = []struct {
 	{"pr-performance", "Performance Review"},
 	{"pr-data", "Data Integrity Review"},
 	{"pr-hygiene", "Code Hygiene Review"},
+	{"pr-vendor-resilience", "Vendor Resilience Review"},
 }
 
 // buildConsolidationPrompt assembles the user prompt for the consolidator AI call.

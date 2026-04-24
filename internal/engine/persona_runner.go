@@ -20,11 +20,12 @@ import (
 const (
 	defaultDrainTimeout = 30 * time.Second
 	defaultMaxChain     = 5
-	// defaultMaxActive caps concurrent handler execution. Sized above the
-	// widest fan-out in a single workflow (pr-review dispatches 11 parallel
-	// reviewers) so a single workflow can never fully saturate the pool on
-	// its own. Beyond the cap, dispatches block at the semaphore rather than
-	// being dropped.
+	// defaultMaxActive caps concurrent handler execution. Sized well above
+	// the widest fan-out in a single workflow (pr-review's parallel
+	// category-reviewer dispatch) so a single workflow can never fully
+	// saturate the pool on its own. Beyond the cap, dispatches block at the
+	// semaphore rather than being dropped. Revisit this if the reviewer list
+	// ever grows past ~24.
 	defaultMaxActive = 32
 	defaultDedup     = 10000
 )
@@ -120,8 +121,8 @@ type PersonaRunner struct {
 	// cap is reached, drain goroutines block rather than dropping events —
 	// preserving per-(handler, correlation) queue ordering. Unlike the old
 	// semaphore, the fairDispatcher allocates slots proportionally across active
-	// correlations so one loud workflow (e.g., pr-review with 11 parallel
-	// reviewers) cannot starve another workflow's critical-path handlers.
+	// correlations so one loud workflow (e.g., pr-review with its parallel
+	// category-reviewer fan-out) cannot starve another workflow's critical-path handlers.
 	fair *fairDispatcher
 	seen *idempotencyCache
 
@@ -636,7 +637,7 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 			}
 			if !satisfied {
 				// join_unsatisfied is expected on parallel fan-out (pr-review's
-				// 11-way consolidator sees up to 10 of these per dispatch before
+				// N-way consolidator sees up to N-1 of these per dispatch before
 				// the final join completes). Debug-level keeps log noise down;
 				// the DispatchDropped event persists for post-hoc queries.
 				r.logger.Debug("persona runner: dispatch dropped",
@@ -1339,7 +1340,7 @@ func (r *PersonaRunner) persistAndPublishResultOnly(handlerName string, env even
 // drops per workflow via SQL without replaying the correlation chain or
 // grepping log output. Writing to a separate aggregate avoids version
 // contention on the main workflow aggregate — critical for pr-review's
-// 11-way parallel fan-out (10 join-gate dedup drops per consolidator).
+// N-way parallel fan-out (N-1 join-gate dedup drops per consolidator).
 //
 // Never published on the bus: no handler subscribes to DispatchDropped
 // (registered in internalEvents). Best-effort — errors are swallowed since

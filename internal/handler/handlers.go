@@ -231,6 +231,10 @@ func RegisterAll(reg *Registry, d Deps) error {
 			AIConfig:    reviewAiCfg("pr-hygiene", "pr-category-review", persona.PRHygiene),
 			TargetPhase: "develop",
 		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:    reviewAiCfg("pr-vendor-resilience", "pr-category-review", persona.PRVendorResilience),
+			TargetPhase: "develop",
+		}),
 
 		// Jira context handler (jira-dev workflow).
 		NewJiraContext(d),
