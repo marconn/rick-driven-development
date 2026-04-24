@@ -14,6 +14,8 @@ System prompts (one per persona, no template variables — pure identity text):
 - `committer.md` — Release Engineer: safe git/push/PR execution
 - `feedback-analyzer.md` — PR Feedback Triage Analyst: categorizes review comments into actionable buckets
 - `pr-consolidator.md` — PR Review Consolidator: merges category-review output into one PR comment
+- `pr-<category>.md` (12 files: `pr-security`, `pr-concurrency`, `pr-error-handling`, `pr-observability`, `pr-api-contract`, `pr-idempotency`, `pr-testing`, `pr-integration`, `pr-performance`, `pr-data`, `pr-hygiene`, `pr-vendor-resilience`) — narrow single-concern PR reviewers with explicit `## Your Domain (ONLY these)` scope and cross-persona boundary rules. `pr-vendor-resilience` is polyglot (Go / JS-TS / PHP / network vendors) and self-scopes from the diff.
+- `pr-replier.md` — text-only composer for PR-feedback reply posts (runs with Yolo=false)
 - `qa-analyzer.md` — QA scenario generator: turns ticket + diff into manual QA scenarios in Spanish
 
 ## Template variables

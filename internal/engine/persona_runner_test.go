@@ -1653,12 +1653,13 @@ func TestDAGRelevance_CacheMissBlocksGraphHandler(t *testing.T) {
 // Regression tests for production workflow failures (2026-03-24)
 // ---------------------------------------------------------------------------
 
-// TestElevenWayJoinWithFailVerdict_PRReview tests the pr-review 11-way join gate.
+// TestPRCategoryJoinWithFailVerdict_PRReview tests the pr-review N-way join gate,
+// where N is the length of prCategoryReviewers (authoritative source).
 // Verifies that:
-// 1. pr-consolidator does NOT fire when only 10 of 11 reviewers complete
-// 2. pr-consolidator DOES fire when all 11 complete
+// 1. pr-consolidator does NOT fire when only N-1 reviewers complete
+// 2. pr-consolidator DOES fire when all N complete
 // 3. A fail verdict from one reviewer does not block the join (no RetriggeredBy)
-func TestElevenWayJoinWithFailVerdict_PRReview(t *testing.T) {
+func TestPRCategoryJoinWithFailVerdict_PRReview(t *testing.T) {
 	runner, store, bus, reg := newTestPersonaRunner(t)
 
 	def := PRReviewWorkflowDef()
@@ -1678,7 +1679,7 @@ func TestElevenWayJoinWithFailVerdict_PRReview(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	corrID := "corr-pr-review-11way"
+	corrID := "corr-pr-review-nway"
 
 	// Seed workflow.started
 	wsEvt := event.New(event.WorkflowStartedFor("pr-review"), 1, event.MustMarshal(event.WorkflowStartedPayload{
@@ -1695,8 +1696,8 @@ func TestElevenWayJoinWithFailVerdict_PRReview(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	// Complete the first 10 reviewers. The last one (pr-hygiene) is held back
-	// to verify partial completion doesn't trigger the consolidator.
+	// Complete all but the last reviewer (held back) to verify partial
+	// completion doesn't trigger the consolidator.
 	reviewers := prCategoryReviewers
 	for i, reviewer := range reviewers[:len(reviewers)-1] {
 		agg := corrID + ":persona:" + reviewer
@@ -1727,15 +1728,15 @@ func TestElevenWayJoinWithFailVerdict_PRReview(t *testing.T) {
 		}
 	}
 
-	// Wait briefly — consolidator must NOT have fired yet (only 10 of 11 done).
+	// Wait briefly — consolidator must NOT have fired yet (N-1 of N done).
 	select {
 	case <-consolidatorFired:
-		t.Fatal("pr-consolidator fired with only 10 of 11 reviewers complete — join gate is broken")
+		t.Fatalf("pr-consolidator fired with only %d of %d reviewers complete — join gate is broken", len(reviewers)-1, len(reviewers))
 	case <-time.After(300 * time.Millisecond):
-		// Expected: still waiting for the 11th reviewer.
+		// Expected: still waiting for the final reviewer.
 	}
 
-	// Complete the last reviewer (pr-hygiene).
+	// Complete the last reviewer.
 	lastReviewer := reviewers[len(reviewers)-1]
 	lastAgg := corrID + ":persona:" + lastReviewer
 	lastPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -1748,12 +1749,12 @@ func TestElevenWayJoinWithFailVerdict_PRReview(t *testing.T) {
 		t.Fatalf("publish %s: %v", lastReviewer, err)
 	}
 
-	// Now consolidator MUST fire — all 11 predecessors complete.
+	// Now consolidator MUST fire — all predecessors complete.
 	select {
 	case <-consolidatorFired:
-		// Expected: 11-way join satisfied despite pr-security's fail verdict.
+		// Expected: N-way join satisfied despite pr-security's fail verdict.
 	case <-time.After(2 * time.Second):
-		t.Error("pr-consolidator must fire when all 11 category reviewers complete (11-way join)")
+		t.Errorf("pr-consolidator must fire when all %d category reviewers complete (N-way join)", len(reviewers))
 	}
 }
 

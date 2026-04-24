@@ -46,7 +46,7 @@ Handlers implementing `Hinter` get two-phase dispatch: `Hint()` returns `HintEmi
 |---|---|---|
 | `workspace-dev` | workspace → context-snapshot → developer → (reviewer ∥ qa) → quality-gate → committer | local dev |
 | `jira-dev` | jira-context → workspace → context-snapshot → researcher → architect → developer → (reviewer ∥ qa) → quality-gate → committer | `dag=jira-dev, ticket=PROJ-123` |
-| `pr-review` | pr-workspace → pr-jira-context → (architect ∥ reviewer ∥ qa) → pr-consolidator → pr-cleanup | `dag=pr-review, source=gh:owner/repo#N` |
+| `pr-review` | pr-workspace → pr-jira-context → (12 pr-category reviewers ∥) → pr-consolidator → pr-cleanup | `dag=pr-review, source=gh:owner/repo#N` |
 | `pr-feedback` | reads pending PR review comments, dispatches fixes via developer, posts reply | post-review |
 | `ci-fix` | reacts to CI failures on a PR branch | CI webhook |
 | `plan-btu` | confluence-reader → codebase-researcher → plan-architect → ⏸hint → estimator → ⏸hint → confluence-writer | `rick_plan_btu` |
@@ -56,6 +56,10 @@ Handlers implementing `Hinter` get two-phase dispatch: `Hint()` returns `HintEmi
 | `develop-only` | developer only | testing |
 
 Parallel phases marked with `∥`. `⏸hint` = `HintEmitted` pause for operator review. `RICK_DISABLE_QUALITY_GATE=1` strips quality-gate from all DAGs (committer depends directly on reviewer+qa).
+
+The `pr-review` category reviewers are: `pr-security`, `pr-concurrency`, `pr-error-handling`, `pr-observability`, `pr-api-contract`, `pr-idempotency`, `pr-testing`, `pr-integration`, `pr-performance`, `pr-data`, `pr-hygiene`, `pr-vendor-resilience`. Each has a narrow `## Your Domain (ONLY these)` scope in `internal/persona/prompts/pr-*.md` plus explicit boundary rules against the others. `pr-vendor-resilience` is polyglot (Go / JS-TS / PHP / network vendors) and self-scopes from the diff.
+
+Outside `pr-review`, `reviewer` and `qa` run in parallel after `developer`. Boundary: `reviewer` owns code-as-written (correctness, concurrency, data integrity, observability, API stability); `qa` owns ship-readiness (test coverage + quality, flakiness, rollback, release-readiness). See `internal/persona/prompts/reviewer.md` and `qa.md` for the scope split enforced in-prompt.
 
 External systems can register custom workflow definitions at runtime via gRPC (`RegisterWorkflowRequest`) — see `internal/grpchandler/CLAUDE.md`.
 
