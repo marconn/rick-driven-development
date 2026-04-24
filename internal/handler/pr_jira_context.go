@@ -13,9 +13,6 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/jira"
 )
 
-// prDiffMaxBytes caps the PR diff injected into the prompt to prevent overflow.
-const prDiffMaxBytes = 512 * 1024
-
 // jiraTicketPattern matches PROJECT-\d+ style Jira keys anywhere in a string.
 var jiraTicketPattern = regexp.MustCompile(`[A-Z][A-Z0-9_]+-\d+`)
 
@@ -70,17 +67,7 @@ func (h *PRJiraContextHandler) Handle(ctx context.Context, env event.Envelope) (
 	enrichEvt := event.New(event.ContextEnrichment, 1, event.MustMarshal(enrichment)).
 		WithSource("handler:pr-jira-context")
 
-	results := []event.Envelope{enrichEvt}
-
-	// Fetch the PR diff and file list to scope downstream reviewers to actual changes.
-	diffEnrichment := h.buildDiffEnrichment(ctx, fullRepo, prNumber)
-	if diffEnrichment.Summary != "" {
-		diffEvt := event.New(event.ContextEnrichment, 1, event.MustMarshal(diffEnrichment)).
-			WithSource("handler:pr-jira-context")
-		results = append(results, diffEvt)
-	}
-
-	return results, nil
+	return []event.Envelope{enrichEvt}, nil
 }
 
 // loadWorkflowRequested reads WorkflowRequested from the correlation chain.
@@ -178,77 +165,6 @@ func (h *PRJiraContextHandler) buildEnrichment(ctx context.Context, ticketKey st
 		Kind:    "jira-ticket",
 		Summary: summary,
 	}, nil
-}
-
-// buildDiffEnrichment fetches the PR diff and file list, returning a
-// ContextEnrichmentPayload that scopes downstream reviewers to actual changes.
-func (h *PRJiraContextHandler) buildDiffEnrichment(ctx context.Context, fullRepo, prNumber string) event.ContextEnrichmentPayload {
-	diff := fetchPRDiff(ctx, fullRepo, prNumber)
-	files := fetchPRFileList(ctx, fullRepo, prNumber)
-
-	if diff == "" && len(files) == 0 {
-		return event.ContextEnrichmentPayload{}
-	}
-
-	var b strings.Builder
-	b.WriteString("## PR Changed Files\n\n")
-	for _, f := range files {
-		fmt.Fprintf(&b, "- `%s`\n", f)
-	}
-
-	if diff != "" {
-		b.WriteString("\n## PR Diff\n\n```diff\n")
-		b.WriteString(diff)
-		b.WriteString("\n```\n")
-	}
-
-	return event.ContextEnrichmentPayload{
-		Source:  "pr-jira-context",
-		Kind:    "pr-diff",
-		Summary: b.String(),
-	}
-}
-
-// fetchPRDiff gets the PR diff via `gh pr diff`, truncated to prDiffMaxBytes.
-func fetchPRDiff(ctx context.Context, fullRepo, prNumber string) string {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "diff", prNumber,
-		"--repo", fullRepo)
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-
-	diff := string(out)
-	if len(diff) > prDiffMaxBytes {
-		diff = diff[:prDiffMaxBytes] + "\n... (truncated)"
-	}
-	return diff
-}
-
-// fetchPRFileList gets the list of changed files from the PR.
-func fetchPRFileList(ctx context.Context, fullRepo, prNumber string) []string {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "view", prNumber,
-		"--repo", fullRepo,
-		"--json", "files")
-	out, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-
-	var result struct {
-		Files []struct {
-			Path string `json:"path"`
-		} `json:"files"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
-		return nil
-	}
-
-	files := make([]string, 0, len(result.Files))
-	for _, f := range result.Files {
-		files = append(files, f.Path)
-	}
-	return files
 }
 
 // buildJiraEnrichmentSummary renders the Jira issue data into a human-readable

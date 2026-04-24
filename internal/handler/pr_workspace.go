@@ -81,7 +81,21 @@ func (h *PRWorkspaceHandler) Handle(ctx context.Context, env event.Envelope) ([]
 		Isolated: result.Isolated,
 	})).WithSource("handler:pr-workspace")
 
-	return []event.Envelope{readyEvt}, nil
+	out := []event.Envelope{readyEvt}
+
+	// Emit the PR diff enrichment directly from the workspace clone. This used
+	// to live in pr-jira-context via `gh pr diff`, which returns HTTP 406 on
+	// PRs with >300 files — silently producing an empty diff and a false
+	// unanimous APPROVE. The git path has no size cap; truncation (and the
+	// consolidator's COMMENT downgrade) only kicks in for prompt-budget
+	// reasons, not vendor ones.
+	if diffEnrichment := buildWorkspaceDiffEnrichment(ctx, result.Path, result.Base); diffEnrichment.Summary != "" {
+		diffEvt := event.New(event.ContextEnrichment, 1, event.MustMarshal(diffEnrichment)).
+			WithSource("handler:pr-workspace")
+		out = append(out, diffEvt)
+	}
+
+	return out, nil
 }
 
 // loadWorkflowRequested reads WorkflowRequested from the correlation chain.

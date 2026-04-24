@@ -36,10 +36,15 @@ type PRConsolidatorHandler struct {
 	// tiers without shelling out. Keep this scoped to the handler — the
 	// broader `internal/handler/pr_*.go` surface still uses inline
 	// exec.CommandContext and should not be partially abstracted.
+	//
+	// fetchRawDiff takes the workspace path + base branch first so the default
+	// impl can read the authoritative diff from the local clone (no vendor
+	// size cap). It falls back to `gh pr diff` only when the workspace is
+	// unreachable.
 	postReview      func(ctx context.Context, fullRepo, prNumber string, payload reviewPayload) error
 	postComment     func(ctx context.Context, fullRepo, prNumber, body string) error
 	fetchHeadSHA    func(ctx context.Context, fullRepo, prNumber string) (string, error)
-	fetchRawDiff    func(ctx context.Context, fullRepo, prNumber string) string
+	fetchRawDiff    func(ctx context.Context, workspacePath, base, fullRepo, prNumber string) string
 	viewerDidAuthor func(ctx context.Context, fullRepo, prNumber string) (bool, error)
 }
 
@@ -92,20 +97,28 @@ func (h *PRConsolidatorHandler) Handle(ctx context.Context, env event.Envelope) 
 		return nil, fmt.Errorf("pr-consolidator: load correlation chain: %w", err)
 	}
 
-	params, phaseOutputs, workspacePath := extractConsolidatorInputs(events)
+	params, phaseOutputs, workspacePath, workspaceBase, diffTruncated := extractConsolidatorInputs(events)
 
 	fullRepo, prNumber, err := parsePRSource(params.Source)
 	if err != nil {
 		return nil, fmt.Errorf("pr-consolidator: parse source %q: %w", params.Source, err)
 	}
 
-	// Fetch the authoritative diff directly (not the truncated enrichment
-	// summary) so the AI has the full context and we can validate anchors.
-	diff := h.fetchRawDiff(ctx, fullRepo, prNumber)
+	// Authoritative diff from the workspace clone. The default impl falls
+	// back to `gh pr diff` only if the clone is unavailable.
+	diff := h.fetchRawDiff(ctx, workspacePath, workspaceBase, fullRepo, prNumber)
 
 	aiOutput, err := h.callAI(ctx, env, params, phaseOutputs, workspacePath, diff)
 	if err != nil {
 		return nil, fmt.Errorf("pr-consolidator: AI call: %w", err)
+	}
+
+	// If the reviewer-facing diff was truncated (giant PR), every reviewer
+	// only saw the first ~512KB of hunks. A unanimous APPROVE on a partial
+	// diff is not a confident approval — downgrade to COMMENT with an
+	// explicit caveat so humans know the review is incomplete.
+	if diffTruncated {
+		aiOutput = downgradeApproveOnTruncatedDiff(aiOutput)
 	}
 
 	summary, postErr := h.postConsolidatedReview(ctx, fullRepo, prNumber, diff, aiOutput)
@@ -122,17 +135,27 @@ func (h *PRConsolidatorHandler) Handle(ctx context.Context, env event.Envelope) 
 	return []event.Envelope{enrichEvt}, nil
 }
 
-// extractConsolidatorInputs scans the correlation chain and returns the
-// WorkflowRequestedPayload, a map of handler name → AI output text, and the
-// workspace path provisioned by pr-workspace. Keyed by handler name (from
-// event Source "handler:<name>") so that multiple handlers sharing the same
-// phase template don't collide. The workspace path is required so the backend
-// runs inside a git repo — codex refuses with "not inside a trusted directory"
-// otherwise.
-func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequestedPayload, map[string]string, string) {
+// extractConsolidatorInputs scans the correlation chain and returns
+// everything the consolidator needs:
+//   - params         — the original WorkflowRequestedPayload
+//   - handlerOutputs — map of handler name → AI output text. Keyed by
+//     handler name (from event Source "handler:<name>") so multiple
+//     handlers sharing the same phase template don't collide.
+//   - workspacePath  — the clone provisioned by pr-workspace. Required so
+//     the backend runs inside a git repo (codex refuses "not inside a
+//     trusted directory" otherwise) and so the raw-diff fetcher can read
+//     from git locally.
+//   - workspaceBase  — base branch name, needed to derive `origin/<base>`
+//     for `git diff` when fetching the authoritative diff.
+//   - diffTruncated  — true when pr-workspace emitted the reviewer-facing
+//     diff enrichment with kind="pr-diff-truncated". Signals that every
+//     reviewer operated on a partial diff; a unanimous pass must not be
+//     promoted to APPROVE.
+func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequestedPayload, map[string]string, string, string, bool) {
 	var params event.WorkflowRequestedPayload
 	handlerOutputs := make(map[string]string)
-	var workspacePath string
+	var workspacePath, workspaceBase string
+	var diffTruncated bool
 
 	for _, e := range events {
 		switch e.Type {
@@ -143,6 +166,13 @@ func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequested
 			var p event.WorkspaceReadyPayload
 			if err := json.Unmarshal(e.Payload, &p); err == nil && p.Path != "" {
 				workspacePath = p.Path
+				workspaceBase = p.Base
+			}
+
+		case event.ContextEnrichment:
+			var p event.ContextEnrichmentPayload
+			if err := json.Unmarshal(e.Payload, &p); err == nil && p.Kind == "pr-diff-truncated" {
+				diffTruncated = true
 			}
 
 		case event.AIResponseReceived:
@@ -157,7 +187,44 @@ func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequested
 		}
 	}
 
-	return params, handlerOutputs, workspacePath
+	return params, handlerOutputs, workspacePath, workspaceBase, diffTruncated
+}
+
+// downgradeApproveOnTruncatedDiff mutates the consolidator's AI-produced
+// JSON so that an APPROVE event becomes a COMMENT with an explicit caveat
+// prepended to the summary. Other events (COMMENT, REQUEST_CHANGES) and
+// already-present caveats are left untouched. Falls back to the input
+// unchanged if the output is not parseable JSON — the downstream post path
+// already handles non-JSON output with a text fallback.
+func downgradeApproveOnTruncatedDiff(aiOutput string) string {
+	var payload struct {
+		Summary    string            `json:"summary"`
+		Event      string            `json:"event"`
+		Comments   []json.RawMessage `json:"comments"`
+		Unanchored []string          `json:"unanchored"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(aiOutput)), &payload); err != nil {
+		return aiOutput
+	}
+	if payload.Event != "APPROVE" {
+		return aiOutput
+	}
+	payload.Event = "COMMENT"
+	caveat := "> ⚠️ **Partial review.** The PR diff exceeded the reviewer context budget (>512 KB). Each category reviewer saw only the first ~512 KB of hunks; findings outside that window will not appear here. Treat this as a sanity check, not an approval. Manual review recommended for completeness.\n\n"
+	payload.Summary = caveat + payload.Summary
+	// json.Marshal on nil slices emits `null`; keep the consolidator's
+	// zero-finding convention of empty arrays for downstream consumers.
+	if payload.Comments == nil {
+		payload.Comments = []json.RawMessage{}
+	}
+	if payload.Unanchored == nil {
+		payload.Unanchored = []string{}
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return aiOutput
+	}
+	return string(out)
 }
 
 // callAI builds the consolidation prompt and invokes the AI backend.
@@ -716,9 +783,17 @@ func fetchPRHeadSHA(ctx context.Context, fullRepo, prNumber string) (string, err
 	return strings.TrimSpace(r.HeadRefOid), nil
 }
 
-// fetchPRRawDiff returns the full (untruncated) unified diff for the PR, used
-// both to feed the AI and to validate inline comment anchors.
-func fetchPRRawDiff(ctx context.Context, fullRepo, prNumber string) string {
+// fetchPRRawDiff returns the full (untruncated) unified diff for the PR,
+// used both to feed the AI and to validate inline comment anchors. Prefers
+// the workspace clone over `gh pr diff` because the GitHub REST endpoint
+// returns HTTP 406 for PRs with >300 files — which silently produced an
+// empty diff and a unanimous-pass false APPROVE on hulilabs/huli#802
+// (2026-04-24). Falls back to the REST call only when the workspace is
+// unreachable or the base branch is unknown.
+func fetchPRRawDiff(ctx context.Context, workspacePath, base, fullRepo, prNumber string) string {
+	if diff := fetchWorkspaceRawDiff(ctx, workspacePath, base); diff != "" {
+		return diff
+	}
 	cmd := exec.CommandContext(ctx, "gh", "pr", "diff", prNumber,
 		"--repo", fullRepo)
 	out, err := cmd.Output()

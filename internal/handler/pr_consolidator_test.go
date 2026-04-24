@@ -82,7 +82,7 @@ func TestExtractConsolidatorInputs(t *testing.T) {
 		})).WithCorrelation(corrID).WithSource("handler:pr-performance"),
 	}
 
-	params, handlerOutputs, _ := extractConsolidatorInputs(events)
+	params, handlerOutputs, _, _, _ := extractConsolidatorInputs(events)
 
 	if params.Source != "gh:owner/repo#42" {
 		t.Errorf("params.Source: want 'gh:owner/repo#42', got %q", params.Source)
@@ -118,10 +118,37 @@ func TestExtractConsolidatorInputs_CapturesWorkspacePath(t *testing.T) {
 		})),
 	}
 
-	_, _, workspacePath := extractConsolidatorInputs(events)
+	_, _, workspacePath, workspaceBase, diffTruncated := extractConsolidatorInputs(events)
 
 	if workspacePath != "/var/rick/workspaces/repo-rick-ws-pr27" {
 		t.Errorf("workspacePath = %q, want the WorkspaceReady.Path", workspacePath)
+	}
+	if workspaceBase != "main" {
+		t.Errorf("workspaceBase = %q, want 'main'", workspaceBase)
+	}
+	if diffTruncated {
+		t.Error("diffTruncated: want false when no pr-diff-truncated enrichment is present")
+	}
+}
+
+// TestExtractConsolidatorInputs_DetectsTruncatedDiff locks in the guard that
+// fires when pr-workspace emits kind=pr-diff-truncated (PR diff exceeds the
+// reviewer prompt budget). Every downstream reviewer only sees the first
+// ~512 KB of hunks; an all-pass result on that partial view must not be
+// promoted to APPROVE. Regression: hulilabs/huli#802 (2026-04-24) had 358
+// files, gh pr diff returned HTTP 406, every reviewer passed on an empty
+// diff, and the consolidator posted a false APPROVE.
+func TestExtractConsolidatorInputs_DetectsTruncatedDiff(t *testing.T) {
+	events := []event.Envelope{
+		event.New(event.ContextEnrichment, 1, event.MustMarshal(event.ContextEnrichmentPayload{
+			Source: "pr-workspace",
+			Kind:   "pr-diff-truncated",
+		})),
+	}
+
+	_, _, _, _, diffTruncated := extractConsolidatorInputs(events)
+	if !diffTruncated {
+		t.Error("diffTruncated: want true when pr-workspace emitted kind=pr-diff-truncated")
 	}
 }
 
@@ -136,10 +163,51 @@ func TestExtractConsolidatorInputsFallbackToPhase(t *testing.T) {
 		})),
 	}
 
-	_, handlerOutputs, _ := extractConsolidatorInputs(events)
+	_, handlerOutputs, _, _, _ := extractConsolidatorInputs(events)
 	if handlerOutputs["review"] != "fallback output" {
 		t.Errorf("fallback: want 'fallback output', got %q", handlerOutputs["review"])
 	}
+}
+
+// TestDowngradeApproveOnTruncatedDiff covers the three cases:
+//   (1) APPROVE → COMMENT with caveat prepended
+//   (2) COMMENT / REQUEST_CHANGES left untouched (already not an approval)
+//   (3) non-JSON output returned unchanged (fallback path for malformed AI)
+func TestDowngradeApproveOnTruncatedDiff(t *testing.T) {
+	t.Run("approve becomes comment with caveat", func(t *testing.T) {
+		in := `{"summary":"Looks fine.","event":"APPROVE","comments":[],"unanchored":[]}`
+		out := downgradeApproveOnTruncatedDiff(in)
+		if !strings.Contains(out, `"event":"COMMENT"`) {
+			t.Errorf("event was not downgraded to COMMENT: %q", out)
+		}
+		if !strings.Contains(out, "Partial review") {
+			t.Error("caveat marker missing from summary")
+		}
+	})
+
+	t.Run("comment left untouched", func(t *testing.T) {
+		in := `{"summary":"One finding.","event":"COMMENT","comments":[],"unanchored":["x"]}`
+		out := downgradeApproveOnTruncatedDiff(in)
+		if out != in {
+			t.Errorf("COMMENT event should be left untouched; got %q", out)
+		}
+	})
+
+	t.Run("request_changes left untouched", func(t *testing.T) {
+		in := `{"summary":"Blockers.","event":"REQUEST_CHANGES","comments":[],"unanchored":[]}`
+		out := downgradeApproveOnTruncatedDiff(in)
+		if out != in {
+			t.Errorf("REQUEST_CHANGES should be left untouched; got %q", out)
+		}
+	})
+
+	t.Run("non-json passthrough", func(t *testing.T) {
+		in := "not json, plain text"
+		out := downgradeApproveOnTruncatedDiff(in)
+		if out != in {
+			t.Errorf("non-json should be returned unchanged; got %q", out)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +526,7 @@ func newFakeHandler() (*PRConsolidatorHandler, *recordedReview) {
 		},
 		postComment:     func(context.Context, string, string, string) error { return nil },
 		fetchHeadSHA:    func(context.Context, string, string) (string, error) { return "deadbeef", nil },
-		fetchRawDiff:    func(context.Context, string, string) string { return "" },
+		fetchRawDiff:    func(context.Context, string, string, string, string) string { return "" },
 		viewerDidAuthor: func(context.Context, string, string) (bool, error) { return false, nil },
 	}, rec
 }
@@ -556,7 +624,7 @@ func TestPostConsolidatedReview_Reactive_SelfAuthorRejection_RetriesAsComment(t 
 		},
 		postComment:     func(context.Context, string, string, string) error { return nil },
 		fetchHeadSHA:    func(context.Context, string, string) (string, error) { return "", nil },
-		fetchRawDiff:    func(context.Context, string, string) string { return "" },
+		fetchRawDiff:    func(context.Context, string, string, string, string) string { return "" },
 		viewerDidAuthor: func(context.Context, string, string) (bool, error) { return false, errors.New("probe unavailable") },
 	}
 
@@ -593,7 +661,7 @@ func TestPostConsolidatedReview_Reactive_SelfRequestChangesRejection_RetriesAsCo
 		},
 		postComment:     func(context.Context, string, string, string) error { return nil },
 		fetchHeadSHA:    func(context.Context, string, string) (string, error) { return "", nil },
-		fetchRawDiff:    func(context.Context, string, string) string { return "" },
+		fetchRawDiff:    func(context.Context, string, string, string, string) string { return "" },
 		viewerDidAuthor: func(context.Context, string, string) (bool, error) { return false, errors.New("probe unavailable") },
 	}
 
@@ -621,7 +689,7 @@ func TestPostConsolidatedReview_Reactive_BadAnchor_StripsInlineComments(t *testi
 		},
 		postComment:     func(context.Context, string, string, string) error { return nil },
 		fetchHeadSHA:    func(context.Context, string, string) (string, error) { return "", nil },
-		fetchRawDiff:    func(context.Context, string, string) string { return "" },
+		fetchRawDiff:    func(context.Context, string, string, string, string) string { return "" },
 		viewerDidAuthor: func(context.Context, string, string) (bool, error) { return false, nil },
 	}
 
@@ -709,7 +777,7 @@ func TestPostConsolidatedReview_Reactive_UnrelatedErrorPropagates(t *testing.T) 
 		},
 		postComment:     func(context.Context, string, string, string) error { return nil },
 		fetchHeadSHA:    func(context.Context, string, string) (string, error) { return "", nil },
-		fetchRawDiff:    func(context.Context, string, string) string { return "" },
+		fetchRawDiff:    func(context.Context, string, string, string, string) string { return "" },
 		viewerDidAuthor: func(context.Context, string, string) (bool, error) { return false, nil },
 	}
 
