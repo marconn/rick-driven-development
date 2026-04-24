@@ -102,3 +102,55 @@ type simpleWrap struct {
 
 func (s *simpleWrap) Error() string { return s.msg + ": " + s.inner.Error() }
 func (s *simpleWrap) Unwrap() error { return s.inner }
+
+// TestCaptureErrorTail_PrefersStderr covers the primary path: when the
+// subprocess wrote to stderr, that's the authoritative signal regardless
+// of what sits on stdout.
+func TestCaptureErrorTail_PrefersStderr(t *testing.T) {
+	got := captureErrorTail("real stderr message", "stdout noise")
+	if got != "real stderr message" {
+		t.Errorf("want 'real stderr message', got %q", got)
+	}
+	if strings.HasPrefix(got, stdoutFallbackPrefix) {
+		t.Errorf("stderr path must not be prefixed with stdout-fallback marker; got %q", got)
+	}
+}
+
+// TestCaptureErrorTail_FallsBackToStdout covers the claude-on-failure
+// path: stderr is empty, so the last-resort diagnostic is the stdout
+// tail. The fallback prefix signals to downstream consumers that this
+// is not authoritative stderr.
+func TestCaptureErrorTail_FallsBackToStdout(t *testing.T) {
+	got := captureErrorTail("", "{\"type\":\"result\",\"subtype\":\"error_max_turns\"}")
+	if !strings.HasPrefix(got, stdoutFallbackPrefix) {
+		t.Errorf("stdout fallback must be prefix-marked; got %q", got)
+	}
+	if !strings.Contains(got, "error_max_turns") {
+		t.Errorf("stdout tail missing expected content; got %q", got)
+	}
+}
+
+// TestCaptureErrorTail_BothEmptyReturnsEmpty preserves the silent-stall
+// signal: when a subprocess is SIGKILL'd by the idle watchdog before
+// producing any output, both streams are empty. An empty return lets
+// the upstream classifier surface FailureKindIdleTimeout without a
+// bogus diagnostic.
+func TestCaptureErrorTail_BothEmptyReturnsEmpty(t *testing.T) {
+	if got := captureErrorTail("", ""); got != "" {
+		t.Errorf("both empty should yield empty; got %q", got)
+	}
+}
+
+// TestCaptureErrorTail_TrimsStdoutToMaxStderrCapture guards against
+// oversized fallback payloads eating into the SQLite row budget for
+// PersonaFailed events. The prefix is added AFTER tailing, so the
+// total size is prefix + MaxStderrCapture — a bounded overhead.
+func TestCaptureErrorTail_TrimsStdoutToMaxStderrCapture(t *testing.T) {
+	big := strings.Repeat("x", MaxStderrCapture*3)
+	got := captureErrorTail("", big)
+	// The body (after the prefix) must be capped at MaxStderrCapture.
+	body := strings.TrimPrefix(got, stdoutFallbackPrefix)
+	if len(body) != MaxStderrCapture {
+		t.Errorf("body length = %d, want %d", len(body), MaxStderrCapture)
+	}
+}

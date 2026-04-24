@@ -60,6 +60,36 @@ const maxArgSize = 128 << 10
 // still giving operators enough context to diagnose a crash.
 const MaxStderrCapture = 4 << 10
 
+// stdoutFallbackPrefix marks a BackendError.Stderr value that was populated
+// from a subprocess's stdout tail rather than its stderr stream. Claude CLI
+// is the primary case: on non-zero exit it emits the error payload as a
+// JSON event on stdout and leaves stderr empty, which historically
+// produced a bare "exit status 1" with no operator-visible cause
+// (hulilabs/huli#802 pr-data failure, 2026-04-24). Downstream consumers
+// (aggregate, projection, UI) should treat anything with this prefix as
+// "last-resort diagnostic tail", not as "authoritative stderr".
+const stdoutFallbackPrefix = "[no stderr; stdout tail]\n"
+
+// captureErrorTail returns a best-effort diagnostic tail for a failed
+// subprocess. Preference order:
+//  1. trailing stderr bytes (up to MaxStderrCapture) — the authoritative
+//     signal for most CLIs (gemini, codex),
+//  2. trailing stdout bytes (claude emits errors to stdout JSON under
+//     `--output-format stream-json`; stderr is usually empty),
+//  3. empty string when both are empty (idle-timeout silent-stall case).
+//
+// Exported intentionally so driver implementations share one failure-tail
+// policy and the stdout-fallback marker stays in sync.
+func captureErrorTail(stderr, stdout string) string {
+	if tail := tailBytes(stderr, MaxStderrCapture); tail != "" {
+		return tail
+	}
+	if tail := tailBytes(stdout, MaxStderrCapture); tail != "" {
+		return stdoutFallbackPrefix + tail
+	}
+	return ""
+}
+
 // BackendError wraps a driver failure with separately-accessible subprocess
 // stderr and a stable classifiable Inner error. Drivers return this on any
 // Run failure so upstream code (handlers, PersonaRunner) can:

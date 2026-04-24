@@ -159,7 +159,7 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 
 	if err := cmd.Run(); err != nil {
 		_ = sw.Close()
-		stderr := tailBytes(stderrBuf.String(), MaxStderrCapture)
+		stderr := captureErrorTail(stderrBuf.String(), captured.String())
 		elapsed := time.Since(start)
 		if errors.Is(context.Cause(watchCtx), ErrIdleTimeout) {
 			return nil, &BackendError{
