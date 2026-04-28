@@ -570,10 +570,16 @@ func (s prDiffGroundingScope) groundIssue(issue event.Issue) (event.Issue, bool,
 // changed but whose backtick token DOES appear somewhere in the changed
 // lines for that file. Returns the issue with Line cleared (forcing the
 // consolidator to emit it as an unanchored body bullet, never an inline
-// comment at a hallucinated location). Strict: requires at least one
-// non-trivial token from groundingTokens(); requires every token to
-// appear in the file's changed lines blob. File-allowlist guard already
-// passed before this is called — this method only relaxes the line guard.
+// comment at a hallucinated location).
+//
+// Semantics: requires at least one identifier-shaped token from
+// groundingTokens(); accepts the issue if ANY such identifier token
+// appears in the file's changed-line blob (not ALL tokens — the LLM
+// commonly mixes one real code reference with several illustrative
+// example values in backticks). Non-identifier tokens (e.g.
+// "LOG_LEVEL=infio", "info", "debug") are skipped. File-allowlist
+// guard already passed before this is called — this method only relaxes
+// the line guard.
 func (s prDiffGroundingScope) rescueByFileScope(issue event.Issue) (event.Issue, bool) {
 	file := s.resolveFile(issue.File)
 	if file == "" {
@@ -593,25 +599,58 @@ func (s prDiffGroundingScope) rescueByFileScope(issue event.Issue) (event.Issue,
 		fileText.WriteByte('\n')
 	}
 	blob := fileText.String()
+	// At least one anchor-quality identifier token must appear somewhere in
+	// the file's changed lines. "Anchor-quality" means:
+	//   1. The token matches identifierLikeTokenRe (identifier shape), AND
+	//   2. It is at least 8 characters long.
+	//
+	// The length gate filters out short, common prose words wrapped in
+	// backticks for emphasis ("info", "debug", "mise" — all ≤ 5 chars)
+	// that are too ambiguous to safely use as diff-blob substring anchors.
+	// Real code references like "slog.LevelInfo" (14), "REDUCE_SUM" (10),
+	// "CreateObservabilityResources" (30), "io.Copy(&buf, r)" (16) all
+	// comfortably exceed the threshold.
+	//
+	// We require ANY match, not ALL: the LLM frequently mixes one real
+	// code reference with several illustrative example values inside
+	// backticks. The Line=0 fallback contract makes the looser check safe
+	// (no inline comment lands at a hallucinated line).
+	const minAnchorTokenLen = 8
+	hasIdentifierToken := false
 	for _, tok := range tokens {
-		if !strings.Contains(blob, tok) {
-			return event.Issue{}, false
+		if !identifierLikeTokenRe.MatchString(tok) {
+			continue
+		}
+		if len(tok) < minAnchorTokenLen {
+			continue
+		}
+		hasIdentifierToken = true
+		if strings.Contains(blob, tok) {
+			issue.File = file
+			issue.Line = 0
+			// Strip backtick-wrapped file:line citation tokens from the
+			// description so the compact output doesn't carry the hallucinated
+			// line number. The pattern matches any `file.ext:N` span that
+			// groundingTokens would have skipped.
+			issue.Description = codeSpanRefRe.ReplaceAllStringFunc(issue.Description, func(span string) string {
+				inner := strings.TrimSpace(span[1 : len(span)-1]) // strip outer backticks
+				if fileLineTokenRe.MatchString(inner) {
+					return ""
+				}
+				return span
+			})
+			issue.Description = strings.TrimSpace(issue.Description)
+			return issue, true
 		}
 	}
-	issue.File = file
-	issue.Line = 0
-	// Strip backtick-wrapped file:line citation tokens from the description so
-	// the compact output doesn't carry the hallucinated line number. The pattern
-	// matches any `file.ext:N` span that groundingTokens would have skipped.
-	issue.Description = codeSpanRefRe.ReplaceAllStringFunc(issue.Description, func(span string) string {
-		inner := strings.TrimSpace(span[1 : len(span)-1]) // strip outer backticks
-		if fileLineTokenRe.MatchString(inner) {
-			return ""
-		}
-		return span
-	})
-	issue.Description = strings.TrimSpace(issue.Description)
-	return issue, true
+	if !hasIdentifierToken {
+		// No identifier-shaped token at all — can't safely rescue. The
+		// finding may be valid prose, but we have no anchor that would let
+		// the consolidator validate it.
+		return event.Issue{}, false
+	}
+	// All identifier tokens were present but none matched the diff blob.
+	return event.Issue{}, false
 }
 
 func (s prDiffGroundingScope) resolveFile(ref string) string {
@@ -673,6 +712,14 @@ func (s prDiffGroundingScope) matchesChangedLine(file string, line int, descript
 // (e.g. "monitoring_observability.go:81") — these are location citations, not
 // code identifiers, and must not be used as blob-search tokens.
 var fileLineTokenRe = regexp.MustCompile(`^[^/]+\.\w+:\d+$`)
+
+// identifierLikeTokenRe matches tokens that look like Go/JS/Python
+// identifiers (with optional dotted package qualifiers and optional
+// parenthesized arg lists), e.g. "slog.LevelInfo", "io.Copy(&buf, r)",
+// "viper.BindEnv". Used by the rescue path to distinguish real code
+// references from prose-only values like "infio" or "info" wrapped in
+// backticks for emphasis.
+var identifierLikeTokenRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\([^)]*\))?$`)
 
 func groundingTokens(description string) []string {
 	matches := codeSpanRefRe.FindAllStringSubmatch(description, -1)

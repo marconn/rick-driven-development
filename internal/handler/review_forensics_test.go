@@ -611,6 +611,87 @@ func TestGroundIssueFileScopeRescue(t *testing.T) {
 			wantFile:   "dashboards.go",
 			wantReason: event.GroundingDropUnspecified, // empty reason = normal anchor
 		},
+		// PR #846 regression: identifier-shaped token (slog.LevelInfo) appears in diff,
+		// mixed with non-identifier example values (LOG_LEVEL=infio, info, debug).
+		// Rescue must accept on the identifier match, ignoring the prose values.
+		{
+			name: "rescue_with_mixed_identifier_and_example_values",
+			diff: "diff --git a/logger.go b/logger.go\n" +
+				"--- a/logger.go\n" +
+				"+++ b/logger.go\n" +
+				"@@ -50,3 +50,3 @@ func init() {\n" +
+				"+\tlevel := slog.LevelInfo\n" +
+				"+\tslog.SetLogLoggerLevel(level)\n" +
+				"+\tlog.Println(\"logger initialized\")\n",
+			issue: event.Issue{
+				File: "logger.go",
+				Line: 68, // hallucinated — real token is at line 50
+				// Description mixes one real identifier with two prose example values.
+				Description: "Log level is hardcoded to `slog.LevelInfo`; use env var `LOG_LEVEL=infio` or values `info` and `debug`",
+			},
+			wantOK:     true,
+			wantLine:   0, // cleared by rescue — slog.LevelInfo matched
+			wantFile:   "logger.go",
+			wantReason: event.GroundingRescuedFileScope,
+		},
+		// PR #846 regression: only non-identifier tokens in description — no rescue.
+		{
+			name: "rescue_with_only_example_values_no_identifiers_rejects",
+			diff: "diff --git a/logger.go b/logger.go\n" +
+				"--- a/logger.go\n" +
+				"+++ b/logger.go\n" +
+				"@@ -50,3 +50,3 @@ func init() {\n" +
+				"+\tlevel := slog.LevelInfo\n" +
+				"+\tslog.SetLogLoggerLevel(level)\n" +
+				"+\tlog.Println(\"logger initialized\")\n",
+			issue: event.Issue{
+				File: "logger.go",
+				Line: 68,
+				// Only non-identifier-shaped tokens: "=" and bare words.
+				Description: "Log level env var `LOG_LEVEL=infio` or literal `info` is not supported",
+			},
+			wantOK:     false,
+			wantReason: event.GroundingDropLineNotInChanged,
+		},
+		// Identifier-shaped token present but does not appear anywhere in the diff blob.
+		{
+			name: "rescue_with_only_unmatched_identifier_rejects",
+			diff: "diff --git a/logger.go b/logger.go\n" +
+				"--- a/logger.go\n" +
+				"+++ b/logger.go\n" +
+				"@@ -50,3 +50,3 @@ func init() {\n" +
+				"+\tunrelated.Func()\n" +
+				"+\tunrelated.Other()\n" +
+				"+\tlog.Println(\"done\")\n",
+			issue: event.Issue{
+				File: "logger.go",
+				Line: 68,
+				// slog.LevelInfo is identifier-shaped but absent from this diff.
+				Description: "Log level `slog.LevelInfo` should be configurable",
+			},
+			wantOK:     false,
+			wantReason: event.GroundingDropLineNotInChanged,
+		},
+		// Call-expression form of identifierLikeTokenRe: io.Copy(&buf, r).
+		{
+			name: "rescue_with_call_expression_token_succeeds",
+			diff: "diff --git a/logger_test.go b/logger_test.go\n" +
+				"--- a/logger_test.go\n" +
+				"+++ b/logger_test.go\n" +
+				"@@ -42,3 +42,3 @@ func TestLogger(t *testing.T) {\n" +
+				"+\t_, err = io.Copy(&buf, r)\n" +
+				"+\tif err != nil { t.Fatal(err) }\n" +
+				"+\tt.Log(buf.String())\n",
+			issue: event.Issue{
+				File: "logger_test.go",
+				Line: 99, // hallucinated — real call is at line 42
+				Description: "Error from `io.Copy(&buf, r)` is not checked in test helper",
+			},
+			wantOK:     true,
+			wantLine:   0, // cleared by rescue
+			wantFile:   "logger_test.go",
+			wantReason: event.GroundingRescuedFileScope,
+		},
 	}
 
 	for _, tc := range cases {
