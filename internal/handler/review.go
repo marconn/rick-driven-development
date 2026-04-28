@@ -545,17 +545,20 @@ func (s prDiffGroundingScope) groundIssue(issue event.Issue) (event.Issue, bool,
 		return event.Issue{}, false, event.GroundingDropLineNotInChanged
 	}
 	if !s.matchesChangedLine(file, issue.Line, issue.Description) {
-		// Distinguish "line not changed at all" from "line is changed but the
-		// codespan token in the description doesn't appear nearby". The former
-		// indicates the LLM cited a stale line; the latter that the citation
-		// is loose. Both useful signal.
-		if _, lineChanged := s.changedLines[file][issue.Line]; lineChanged {
-			// file:line both in scope, only the token failed → no rescue
-			return event.Issue{}, false, event.GroundingDropTokenNotNearLine
-		}
-		// file in scope, line not changed → try file-scope rescue
+		// Try file-scope rescue on both sub-cases: token_not_near_line (the
+		// cited line IS changed but the token isn't within ±1) and
+		// line_not_in_changed (the cited line isn't changed at all). In both
+		// cases the token is verifiably in the diff — rescue clears Line=0 so
+		// the consolidator emits an unanchored bullet, never an inline comment
+		// at a wrong location. Drop-reason classification only applies when
+		// rescue fails, preserving the existing forensic taxonomy unchanged.
 		if rescued, ok := s.rescueByFileScope(issue); ok {
 			return rescued, true, event.GroundingRescuedFileScope
+		}
+		// Distinguish "line is changed but token didn't appear nearby" from
+		// "line not changed at all" — both useful forensic signal.
+		if _, lineChanged := s.changedLines[file][issue.Line]; lineChanged {
+			return event.Issue{}, false, event.GroundingDropTokenNotNearLine
 		}
 		return event.Issue{}, false, event.GroundingDropLineNotInChanged
 	}

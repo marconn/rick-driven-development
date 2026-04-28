@@ -561,6 +561,56 @@ func TestGroundIssueFileScopeRescue(t *testing.T) {
 			wantOK:     false,
 			wantReason: event.GroundingDropLineNotInChanged,
 		},
+		// PR #845 dominant failure mode: token_not_near_line. The LLM cites a real
+		// changed line (100) with a real token (REDUCE_SUM) that exists in the diff
+		// but not within ±1 of line 100. The rescue path should accept it (Line=0).
+		{
+			name: "rescue_via_token_anywhere_token_not_near_line",
+			// Multi-hunk diff: lines 100-102 are changed (unrelated content),
+			// lines 642-644 are changed and contain REDUCE_SUM.
+			diff: "diff --git a/dashboards.go b/dashboards.go\n" +
+				"--- a/dashboards.go\n" +
+				"+++ b/dashboards.go\n" +
+				"@@ -100,3 +100,3 @@ func setup() {\n" +
+				"+\tunrelatedFuncA()\n" +
+				"+\tunrelatedFuncB()\n" +
+				"+\tunrelatedFuncC()\n" +
+				"@@ -642,3 +642,3 @@ func metrics() {\n" +
+				"+\tswitch agg {\n" +
+				"+\tcase REDUCE_SUM:\n" +
+				"+\t\treturn sumAll(vals)\n",
+			issue: event.Issue{
+				File: "dashboards.go",
+				// Line 100 IS in changedLines but REDUCE_SUM is not within ±1 of it.
+				Line:        100,
+				Description: "Aggregation type `REDUCE_SUM` is not validated before use",
+			},
+			wantOK:     true,
+			wantLine:   0, // cleared by rescue — must not inline-comment at line 100
+			wantFile:   "dashboards.go",
+			wantReason: event.GroundingRescuedFileScope,
+		},
+		// Happy-path guard: issue cites exactly the line that contains REDUCE_SUM.
+		// The rescue extension must not interfere — issue anchors normally (Line preserved).
+		{
+			name: "token_at_cited_line_no_rescue_path_taken",
+			diff: "diff --git a/dashboards.go b/dashboards.go\n" +
+				"--- a/dashboards.go\n" +
+				"+++ b/dashboards.go\n" +
+				"@@ -642,3 +642,3 @@ func metrics() {\n" +
+				"+\tswitch agg {\n" +
+				"+\tcase REDUCE_SUM:\n" +
+				"+\t\treturn sumAll(vals)\n",
+			issue: event.Issue{
+				File:        "dashboards.go",
+				Line:        643, // exact line containing REDUCE_SUM
+				Description: "Aggregation type `REDUCE_SUM` is not validated before use",
+			},
+			wantOK:     true,
+			wantLine:   643, // anchored normally — line must NOT be cleared
+			wantFile:   "dashboards.go",
+			wantReason: event.GroundingDropUnspecified, // empty reason = normal anchor
+		},
 	}
 
 	for _, tc := range cases {
