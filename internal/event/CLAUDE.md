@@ -26,6 +26,7 @@ Defines the canonical immutable `Envelope`, all event `Type` constants, and the 
 - **Workspace**: `WorkspaceReady`
 - **Budget**: `TokenBudgetExceeded`
 - **Sentinel**: `UnhandledEventDetected`
+- **Diagnostics / forensics** (storage-only, never published on the bus, no handler subscribers): `DispatchDropped`, `VerdictGroundingSummary`
 - **Child workflow**: `ChildWorkflowCompleted`
 
 ## Key payload structs
@@ -37,6 +38,9 @@ Defines the canonical immutable `Envelope`, all event `Type` constants, and the 
 - `HintEmittedPayload` — `Persona`, `Confidence` (0–1), `Plan`, `Blockers[]`, `TokenEstimate`, `TriggerID` for replay
 - `OperatorGuidancePayload` — `Content`, `Target` persona, `AutoResume`
 - `ContextCodebasePayload` / `ContextGitPayload` / `ContextSchemaPayload` / `ContextEnrichmentPayload` — ground-truth snapshots and before-hook enrichment
+- `AIResponsePayload` — `Output` is canonical (post-grounding for `pr-category-review`). `OutputRaw` is forensics-only: the original LLM bytes captured before grounding rewrote `Output`. Future consumers MUST treat `OutputRaw` as optional.
+- `VerdictPayload.Source` — `VerdictSource` enum (`explicit_pass` / `explicit_fail` / `default_optimistic` / `downgraded_no_grounded`) classifying the parser path that produced the verdict. Empty zero value preserves back-compat. Forensics-only — engine ignores it.
+- `VerdictGroundingSummaryPayload` — emitted once per `pr-category-review` invocation by `ReviewHandler`. Records `OriginalCount` (issues parsed from raw LLM output), `GroundedCount` (issues that survived the diff-anchoring filter), `DropReasons` (`map[GroundingDropReason]int` over the three-value taxonomy: `file_not_in_scope`, `line_not_in_changed`, `token_not_near_line`), and the original/final `VerdictOutcome` so operators can spot demotions. Stored on the standard correlation aggregate alongside the matching `VerdictRendered`.
 
 ## Conventions
 - Payloads marshalled with `MustMarshal(v)` — panics on bad input, only use for trusted in-process structs

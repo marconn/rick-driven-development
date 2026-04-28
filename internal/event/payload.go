@@ -141,7 +141,37 @@ type VerdictPayload struct {
 	Issues      []Issue        `json:"issues,omitempty"`
 	Summary     string         `json:"summary"`
 	Advisory    bool           `json:"advisory,omitempty"`
+	// Source classifies HOW this verdict was produced (parser path), so
+	// operators can distinguish a real PASS from a defaulted PASS or a PASS
+	// demoted from FAIL. Forensics-only — engine ignores it. Empty zero value
+	// preserves back-compat for events written before this field existed.
+	Source VerdictSource `json:"verdict_source,omitempty"`
 }
+
+// VerdictSource records which parser path produced a VerdictPayload. Used to
+// distinguish a legitimate PASS from a defaulted PASS (no VERDICT: line) or a
+// PASS that was demoted from FAIL because every issue failed grounding.
+// Operators query verdict_source to triage suspicious-fast PASS workflows.
+type VerdictSource string
+
+const (
+	// VerdictSourceUnspecified is the zero value — events written before this
+	// field existed deserialize to this value.
+	VerdictSourceUnspecified VerdictSource = ""
+	// VerdictSourceExplicitPass means a "VERDICT: PASS" line was found in the
+	// LLM output.
+	VerdictSourceExplicitPass VerdictSource = "explicit_pass"
+	// VerdictSourceExplicitFail means a "VERDICT: FAIL" line was found.
+	VerdictSourceExplicitFail VerdictSource = "explicit_fail"
+	// VerdictSourceDefaultOptimistic means no "VERDICT:" line was found and
+	// ParseVerdict defaulted to PASS optimistically. The single most actionable
+	// signal — surfaces silent malformed-output passes.
+	VerdictSourceDefaultOptimistic VerdictSource = "default_optimistic"
+	// VerdictSourceDowngradedNoGrounded means the LLM returned an explicit
+	// FAIL with N issues, but every issue was filtered out by the
+	// pr-category-review grounding check, so the verdict was demoted to PASS.
+	VerdictSourceDowngradedNoGrounded VerdictSource = "downgraded_no_grounded"
+)
 
 // FeedbackGeneratedPayload is emitted when feedback is prepared for a retry.
 type FeedbackGeneratedPayload struct {
@@ -181,13 +211,21 @@ type AIRequestStartedPayload struct {
 }
 
 // AIResponsePayload is emitted when an AI backend returns.
+//
+// Output is the canonical text every consumer (consolidator, projections,
+// MCP tools, agent UI) reads. For pr-category-review handlers it is the
+// post-grounding-rewrite text — possibly the canned "No grounded issues
+// found…" string. OutputRaw is forensics-only: the original LLM bytes
+// captured before rewrite, only populated when grounding mutated the output.
+// Future consumers MUST treat OutputRaw as optional.
 type AIResponsePayload struct {
 	Phase      string          `json:"phase"`
 	Backend    string          `json:"backend"`
 	TokensUsed int             `json:"tokens_used,omitempty"`
 	DurationMS int64           `json:"duration_ms"`
 	Structured bool            `json:"structured"`              // was structured output extracted?
-	Output     json.RawMessage `json:"output,omitempty"`        // raw LLM response for replay
+	Output     json.RawMessage `json:"output,omitempty"`        // canonical text (post-grounding for pr-category-review)
+	OutputRaw  json.RawMessage `json:"output_raw,omitempty"`    // forensics: original LLM text when Output was rewritten
 	OutputRef  string          `json:"output_ref,omitempty"`    // blob storage ref for large outputs
 }
 
@@ -353,6 +391,51 @@ type DispatchDroppedPayload struct {
 	MissingPredecessors []string `json:"missing_predecessors,omitempty"`
 	Fingerprint         string   `json:"fingerprint,omitempty"`
 	Detail              string   `json:"detail,omitempty"`
+}
+
+// GroundingDropReason classifies why a pr-category-review issue was rejected
+// by the diff-grounding filter (handler/review.go:groundIssue). Aggregated in
+// VerdictGroundingSummaryPayload.DropReasons so operators can see whether
+// reviewers are systematically producing findings the filter rejects.
+type GroundingDropReason string
+
+const (
+	// GroundingDropUnspecified is the zero value — used when a drop reason
+	// cannot be classified or for back-compat with older events.
+	GroundingDropUnspecified GroundingDropReason = ""
+	// GroundingDropFileNotInScope means the issue cited a file not in the
+	// PR's changed-files set (after basename resolution).
+	GroundingDropFileNotInScope GroundingDropReason = "file_not_in_scope"
+	// GroundingDropLineNotInChanged means the cited file was in scope but the
+	// cited line was not among the lines added in the PR diff.
+	GroundingDropLineNotInChanged GroundingDropReason = "line_not_in_changed"
+	// GroundingDropTokenNotNearLine means the cited file:line was a changed
+	// line, but the backticked code-token in the issue description did not
+	// appear in the ±1-line window of changed text.
+	GroundingDropTokenNotNearLine GroundingDropReason = "token_not_near_line"
+)
+
+// VerdictGroundingSummaryPayload is emitted once per pr-category-review
+// invocation (unconditionally, even when the LLM returned PASS with no
+// issues). Records how many issues the LLM produced, how many survived the
+// diff-grounding filter, and the drop-reason breakdown for the rest.
+//
+// Operators query this to detect reviewers whose findings are systematically
+// being dropped — a sign that either the LLM is hallucinating ungrounded
+// claims OR the grounding filter is too strict for legitimate findings.
+// The empty-summary case (OriginalCount=0, GroundedCount=0) is itself useful
+// signal because its absence would indicate a code-path bug.
+//
+// Stored on the standard correlation aggregate so it lands alongside the
+// VerdictRendered event for the same reviewer. Never published on the bus —
+// observability only, no handler subscribers.
+type VerdictGroundingSummaryPayload struct {
+	Reviewer        string                      `json:"reviewer"`         // handler name, e.g. "pr-data"
+	OriginalCount   int                         `json:"original_count"`   // issues parsed from raw LLM output
+	GroundedCount   int                         `json:"grounded_count"`   // issues that survived the filter
+	DropReasons     map[GroundingDropReason]int `json:"drop_reasons,omitempty"`
+	OriginalOutcome VerdictOutcome              `json:"original_outcome"` // pre-grounding verdict
+	FinalOutcome    VerdictOutcome              `json:"final_outcome"`    // post-grounding verdict (after FAIL→PASS demotion if any)
 }
 
 // --- Child workflow payloads ---

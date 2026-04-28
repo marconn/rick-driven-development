@@ -39,6 +39,7 @@ var internalEvents = map[event.Type]bool{
 	event.HintRejected:          true,
 	event.UnhandledEventDetected: true,
 	event.DispatchDropped:        true,
+	event.VerdictGroundingSummary: true,
 	// Context snapshots are produced, not consumed by handlers.
 	event.ContextCodebase:   true,
 	event.ContextSchema:     true,

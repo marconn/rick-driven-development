@@ -39,6 +39,24 @@ Defines the `Handler` plugin interface and the concrete handler implementations 
 - `pr_cleanup.go` — best-effort removal of the isolated workspace dir after consolidation.
 - (`architect`, `reviewer`, `qa` themselves are the same `AIHandler`/`ReviewHandler` instances reused via DAG scoping.)
 
+#### pr-review forensics signals (`review.go`)
+
+`ReviewHandler` for `pr-category-review` handlers preserves three forensic signals on every invocation. These are write-only — the engine and consolidator ignore them. They exist for operator post-mortem.
+
+- **`AIResponsePayload.OutputRaw`** (optional `json.RawMessage`) — the original LLM response captured **before** `groundPRCategoryReview` rewrites the canonical `Output` to the canned `"No grounded issues found in the changed lines for this review category."` string. Populated only when grounding actually mutated the output. Consumers MUST continue reading `Output`; `OutputRaw` is for SQL forensics (`json_extract(payload, '$.output_raw')`) and a future MCP tool.
+- **`VerdictPayload.Source`** (`event.VerdictSource`) — classifies which parser path produced the verdict so operators can distinguish a real PASS from a defaulted PASS or a PASS demoted from FAIL by the grounding filter.
+- **`VerdictGroundingSummary` event** (`internal/event` package) — emitted exactly once per `pr-category-review` invocation, recording how many issues the LLM produced, how many survived grounding, and the `GroundingDropReason` taxonomy for the rest. Empty-summary cases are intentional: the *absence* of a summary event would itself be a code-path bug.
+
+##### Operator response table
+
+| `verdict_source` value | What it means | Recommended operator action |
+|---|---|---|
+| `explicit_pass` | LLM emitted `VERDICT: PASS`. | Trust the verdict. |
+| `explicit_fail` | LLM emitted `VERDICT: FAIL` and at least one issue survived grounding. | Read the inline findings; the consolidator already escalated. |
+| `default_optimistic` | LLM emitted no `VERDICT:` line at all; `ParseVerdict` defaulted to PASS. | **Re-run that reviewer.** The LLM produced unparseable output — the verdict carries zero signal. Inspect `OutputRaw` to see what was actually returned. |
+| `downgraded_no_grounded` | LLM emitted `VERDICT: FAIL` with N findings; all N were rejected by the diff-grounding filter. | Inspect `OutputRaw` to see the original findings, then check the matching `verdict.grounding.summary` for the `drop_reasons` breakdown. If `file_not_in_scope` dominates the LLM hallucinated; if `token_not_near_line` dominates the LLM cited valid lines but loose tokens — adjust the persona prompt or relax grounding. |
+| `""` (unspecified) | Pre-PR event written before the field existed. | Ignore — back-compat zero value. |
+
 ### plan-btu / plan-jira / task-creator
 These handlers do **not** live in this package — they're defined in `internal/planning` (BTU flow: reader, researcher, architect, estimator, writer) and `internal/jiraplanner` (Jira flow: page-reader, project-manager, task-creator, standalone task-creator). `RegisterAll` constructs and registers them alongside the local handlers so they share one registry.
 

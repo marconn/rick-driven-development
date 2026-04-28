@@ -106,6 +106,14 @@ const (
 	// workflow write path. Never published on the bus — diagnostic only.
 	DispatchDropped Type = "dispatch.dropped"
 
+	// VerdictGroundingSummary records how a pr-category-review handler's LLM
+	// findings fared against the diff-grounding filter — how many were parsed,
+	// how many survived, and why each rejection happened. Emitted once per
+	// pr-category-review invocation by ReviewHandler. Stored alongside the
+	// matching VerdictRendered event on the correlation aggregate. Never
+	// published on the bus — forensics only, no handler subscribers.
+	VerdictGroundingSummary Type = "verdict.grounding.summary"
+
 	// Context snapshots (ground truth from codebase)
 	ContextCodebase    Type = "context.codebase"
 	ContextSchema      Type = "context.schema"

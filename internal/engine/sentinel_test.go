@@ -106,6 +106,8 @@ func TestSentinel_IgnoresInternalEvents(t *testing.T) {
 		event.OperatorGuidance,
 		event.ContextEnrichment,
 		event.ChildWorkflowCompleted,
+		event.DispatchDropped,
+		event.VerdictGroundingSummary,
 	} {
 		evt := event.New(et, 1, []byte(`{}`)).WithCorrelation("wf-1").WithSource("test")
 		_ = bus.Publish(ctx, evt)

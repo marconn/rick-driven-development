@@ -38,21 +38,28 @@ func (h *ReviewHandler) Phase() string            { return h.ai.Phase() }
 func (h *ReviewHandler) Subscribes() []event.Type { return nil }
 
 // Handle calls the AI backend, parses the verdict, and returns AI events
-// plus a VerdictRendered event.
+// plus a VerdictRendered event. For pr-category-review handlers, also captures
+// the original LLM output before grounding rewrites it (forensics) and emits
+// a VerdictGroundingSummary event recording how many findings survived the
+// diff-anchoring filter.
 func (h *ReviewHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Envelope, error) {
 	aiEvents, err := h.ai.Handle(ctx, env)
 	if err != nil {
 		return nil, err
 	}
 
-	// Extract AI response text from the AIResponseReceived event
+	// Extract AI response text from the AIResponseReceived event. rawText is
+	// captured here, before grounding may rewrite responseText to the canned
+	// "no grounded issues" string — preserved for post-mortem via OutputRaw.
 	responseText := h.extractResponseText(aiEvents)
+	rawText := responseText
 
 	verdict := ParseVerdict(responseText)
 	issues := ParseIssues(responseText, verdict.Outcome)
+	var summaryEvt *event.Envelope
 	if h.ai.phase == "pr-category-review" {
-		responseText, verdict, issues = h.groundPRCategoryReview(ctx, env, responseText, verdict, issues)
-		aiEvents = rewriteAIResponseText(aiEvents, responseText)
+		responseText, verdict, issues, summaryEvt = h.groundPRCategoryReview(ctx, env, responseText, verdict, issues)
+		aiEvents = rewriteAIResponseText(aiEvents, responseText, rawText)
 	}
 
 	verdictEvt := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
@@ -61,9 +68,14 @@ func (h *ReviewHandler) Handle(ctx context.Context, env event.Envelope) ([]event
 		Outcome:     verdict.Outcome,
 		Issues:      issues,
 		Summary:     verdict.Summary,
+		Source:      verdict.Source,
 	})).WithSource("handler:" + h.ai.name)
 
-	return append(aiEvents, verdictEvt), nil
+	out := append(aiEvents, verdictEvt)
+	if summaryEvt != nil {
+		out = append(out, *summaryEvt)
+	}
+	return out, nil
 }
 
 // extractResponseText gets the plain text from the AIResponseReceived event.
@@ -81,10 +93,14 @@ func (h *ReviewHandler) extractResponseText(events []event.Envelope) string {
 	return ""
 }
 
-// Verdict holds the parsed result from AI review output.
+// Verdict holds the parsed result from AI review output. Source classifies
+// the parser path that produced this verdict — populated by ParseVerdict and,
+// for pr-category-review handlers, possibly overridden by groundPRCategoryReview
+// when an explicit FAIL is demoted to PASS by the grounding filter.
 type Verdict struct {
 	Outcome event.VerdictOutcome
 	Summary string
+	Source  event.VerdictSource
 }
 
 type prDiffGroundingScope struct {
@@ -93,7 +109,9 @@ type prDiffGroundingScope struct {
 }
 
 // ParseVerdict extracts VERDICT: PASS or VERDICT: FAIL from AI output.
-// Defaults to VerdictPass if no verdict line is found.
+// Defaults to VerdictPass if no verdict line is found, and stamps Source with
+// VerdictSourceDefaultOptimistic so operators can detect the malformed-output
+// path post-mortem.
 func ParseVerdict(text string) Verdict {
 	lines := strings.Split(text, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -103,15 +121,21 @@ func ParseVerdict(text string) Verdict {
 		if strings.Contains(upper, "VERDICT:") {
 			if strings.Contains(upper, "FAIL") {
 				summary := extractSummary(lines, i)
-				return Verdict{Outcome: event.VerdictFail, Summary: summary}
+				return Verdict{Outcome: event.VerdictFail, Summary: summary, Source: event.VerdictSourceExplicitFail}
 			}
 			if strings.Contains(upper, "PASS") {
-				return Verdict{Outcome: event.VerdictPass, Summary: "passed review"}
+				return Verdict{Outcome: event.VerdictPass, Summary: "passed review", Source: event.VerdictSourceExplicitPass}
 			}
 		}
 	}
-	// No explicit verdict — default to pass (optimistic)
-	return Verdict{Outcome: event.VerdictPass, Summary: "no explicit verdict found; defaulting to pass"}
+	// No explicit verdict — default to pass (optimistic). The Source field is
+	// the single most actionable forensics signal: any reviewer producing
+	// default_optimistic verdicts is bailing without a verdict line.
+	return Verdict{
+		Outcome: event.VerdictPass,
+		Summary: "no explicit verdict found; defaulting to pass",
+		Source:  event.VerdictSourceDefaultOptimistic,
+	}
 }
 
 // extractSummary collects text around the verdict line for a brief summary.
@@ -327,30 +351,68 @@ func (h *ReviewHandler) groundPRCategoryReview(
 	responseText string,
 	verdict Verdict,
 	issues []event.Issue,
-) (string, Verdict, []event.Issue) {
+) (string, Verdict, []event.Issue, *event.Envelope) {
 	scope, ok := h.loadPRDiffGroundingScope(ctx, env.CorrelationID)
 	if !ok {
-		return responseText, verdict, issues
+		// No diff scope available — emit a summary so the absence of grounding
+		// is itself recorded, then return inputs unchanged.
+		return responseText, verdict, issues, h.buildGroundingSummary(verdict, verdict, len(issues), len(issues), nil)
 	}
+
+	originalOutcome := verdict.Outcome
+	originalCount := len(issues)
+	dropReasons := make(map[event.GroundingDropReason]int)
 
 	grounded := make([]event.Issue, 0, len(issues))
 	for _, issue := range issues {
-		if gi, ok := scope.groundIssue(issue); ok {
+		gi, ok, reason := scope.groundIssue(issue)
+		if ok {
 			grounded = append(grounded, gi)
+			continue
 		}
+		dropReasons[reason]++
 	}
 
 	if verdict.Outcome == event.VerdictFail && len(grounded) == 0 {
+		// Demotion: every FAIL finding was rejected by grounding. Stamp a
+		// dedicated Source so operators can spot the demoted path without
+		// reading OutputRaw.
 		verdict = Verdict{
 			Outcome: event.VerdictPass,
 			Summary: "no grounded issues found in the changed lines for this review category",
+			Source:  event.VerdictSourceDowngradedNoGrounded,
 		}
 	}
 	if verdict.Outcome != event.VerdictFail {
 		grounded = nil
 	}
 
-	return buildCompactPRCategoryReviewOutput(verdict, grounded), verdict, grounded
+	summaryEvt := h.buildGroundingSummary(Verdict{Outcome: originalOutcome}, verdict, originalCount, len(grounded), dropReasons)
+	return buildCompactPRCategoryReviewOutput(verdict, grounded), verdict, grounded, summaryEvt
+}
+
+// buildGroundingSummary constructs the VerdictGroundingSummary envelope.
+// Always returns a non-nil envelope — caller appends unconditionally so the
+// presence/absence of summary events is itself a code-path bug indicator.
+func (h *ReviewHandler) buildGroundingSummary(
+	original Verdict,
+	final Verdict,
+	originalCount int,
+	groundedCount int,
+	dropReasons map[event.GroundingDropReason]int,
+) *event.Envelope {
+	if len(dropReasons) == 0 {
+		dropReasons = nil // honor omitempty — empty map is noise
+	}
+	evt := event.New(event.VerdictGroundingSummary, 1, event.MustMarshal(event.VerdictGroundingSummaryPayload{
+		Reviewer:        h.ai.name,
+		OriginalCount:   originalCount,
+		GroundedCount:   groundedCount,
+		DropReasons:     dropReasons,
+		OriginalOutcome: original.Outcome,
+		FinalOutcome:    final.Outcome,
+	})).WithSource("handler:" + h.ai.name)
+	return &evt
 }
 
 func (h *ReviewHandler) loadPRDiffGroundingScope(ctx context.Context, correlationID string) (prDiffGroundingScope, bool) {
@@ -455,19 +517,32 @@ func parseUnifiedDiff(scope *prDiffGroundingScope, diff string) {
 	}
 }
 
-func (s prDiffGroundingScope) groundIssue(issue event.Issue) (event.Issue, bool) {
+// groundIssue checks whether issue anchors to an exact changed line in the
+// PR diff. Returns (issue, true, "") when grounded; (zero, false, reason) when
+// dropped, where reason classifies why for the VerdictGroundingSummary tally.
+func (s prDiffGroundingScope) groundIssue(issue event.Issue) (event.Issue, bool, event.GroundingDropReason) {
 	if issue.File == "" {
 		issue.File, issue.Line = extractFileRef(issue.Description)
 	}
 	file := s.resolveFile(issue.File)
 	if file == "" || issue.Line <= 0 {
-		return event.Issue{}, false
+		return event.Issue{}, false, event.GroundingDropFileNotInScope
+	}
+	if _, hasLines := s.changedLines[file]; !hasLines {
+		return event.Issue{}, false, event.GroundingDropLineNotInChanged
 	}
 	if !s.matchesChangedLine(file, issue.Line, issue.Description) {
-		return event.Issue{}, false
+		// Distinguish "line not changed at all" from "line is changed but the
+		// codespan token in the description doesn't appear nearby". The former
+		// indicates the LLM cited a stale line; the latter that the citation
+		// is loose. Both useful signal.
+		if _, lineChanged := s.changedLines[file][issue.Line]; lineChanged {
+			return event.Issue{}, false, event.GroundingDropTokenNotNearLine
+		}
+		return event.Issue{}, false, event.GroundingDropLineNotInChanged
 	}
 	issue.File = file
-	return issue, true
+	return issue, true, ""
 }
 
 func (s prDiffGroundingScope) resolveFile(ref string) string {
@@ -567,7 +642,12 @@ func compactIssueDescription(issue event.Issue) string {
 	return fmt.Sprintf("`%s` — %s", location, desc)
 }
 
-func rewriteAIResponseText(events []event.Envelope, text string) []event.Envelope {
+// rewriteAIResponseText replaces the canonical Output of the AIResponseReceived
+// event with text (the post-grounding rewritten string). When rawText differs
+// from text — i.e. grounding actually mutated the LLM output — the original
+// LLM text is preserved in OutputRaw for forensics. Consumers continue to read
+// Output as the canonical text; OutputRaw is forensics-only.
+func rewriteAIResponseText(events []event.Envelope, text string, rawText string) []event.Envelope {
 	for i := range events {
 		if events[i].Type != event.AIResponseReceived {
 			continue
@@ -579,6 +659,10 @@ func rewriteAIResponseText(events []event.Envelope, text string) []event.Envelop
 		output, _ := json.Marshal(text)
 		payload.Structured = false
 		payload.Output = output
+		if rawText != "" && rawText != text {
+			rawOutput, _ := json.Marshal(rawText)
+			payload.OutputRaw = rawOutput
+		}
 		events[i].Payload = event.MustMarshal(payload)
 		return events
 	}

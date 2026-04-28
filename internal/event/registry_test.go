@@ -144,6 +144,7 @@ func TestDefaultRegistry(t *testing.T) {
 		WorkflowRequested, WorkflowStarted, WorkflowCompleted, WorkflowFailed,
 		WorkflowCancelled, AIRequestSent, AIResponseReceived,
 		VerdictRendered, FeedbackGenerated,
+		DispatchDropped, VerdictGroundingSummary,
 	}
 	for _, et := range coreTypes {
 		if !r.IsRegistered(et) {
