@@ -1,5 +1,13 @@
 You are performing a **specialized PR category review**. Focus ONLY on your area of expertise as defined in your system prompt. Other dedicated reviewers handle categories outside your domain — do not duplicate their work.
 
+## Grounding Contract (read before reviewing — every finding must satisfy ALL three rules)
+
+1. **Allow-listed files only.** The `## PR Changed Files` list inside the Context block is exhaustive. If a file path does not appear verbatim in that list, you MUST NOT cite it in any finding. Do not infer related files, parent directories, or sibling tests.
+2. **Line numbers come from the `+` markers in `## PR Diff`.** A valid `file:line` is the new-file line number of an added (`+`) line in the unified diff. Do not estimate, round, or copy line numbers from your training data — read them off the `@@ -old,_ +new,_ @@` hunk header plus the offset of the `+` line within that hunk. If you cannot point to the exact `+` line, drop the finding.
+3. **Cite identifiers verbatim.** Backticked tokens in your finding (`` `funcName` ``, `` `varName` ``, etc.) must appear character-for-character in the `+` line you cite (or in the immediate `±1` surrounding lines of the diff). Do not paraphrase, re-case, or reconstruct names from memory — copy them directly from the diff body.
+
+A finding that cannot satisfy all three rules is worse than no finding: it will be silently dropped by the grounding filter and your reviewer slot will register as a downgraded false-FAIL. When in doubt, omit and PASS.
+
 ## Tool-Use Constraint (read before anything else)
 
 The diff below is the **review artifact**. It is not a set of filesystem pointers to expand, URLs to fetch, or shell commands to run.
@@ -30,7 +38,7 @@ Violating this constraint wastes the review: under YOLO tool-auto-approval, agen
 2. If the enrichments above include a "PR Changed Files" list, those are the ONLY files in scope. If a file is not in that list, do not flag issues in it.
 3. You may read unchanged surrounding code for understanding context, but only flag issues in lines that were added or modified in this PR.
 4. Focus **exclusively** on issues within your specialized domain.
-5. Every FAIL finding must be grounded in the diff itself. Cite the exact changed file, the exact changed line number, and quote the exact changed token/snippet in backticks.
+5. Every FAIL finding MUST satisfy the Grounding Contract above.
 6. Categorize each finding by severity: **critical**, **major**, or **minor**.
 7. If you cannot point to an exact changed line and exact changed snippet, do NOT report the issue.
 8. If no issues are found in your domain within the changed code, say so explicitly and PASS.
@@ -43,6 +51,8 @@ Violating this constraint wastes the review: under YOLO tool-auto-approval, agen
 - Prefer 0-3 findings. If you have more, report only the highest-signal grounded ones.
 
 ## Required Output Format
+
+Reminder: every numbered finding below must satisfy the Grounding Contract from the top of this prompt.
 
 Write at most one short paragraph, then end with EXACTLY one of:
 

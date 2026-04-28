@@ -413,6 +413,12 @@ const (
 	// line, but the backticked code-token in the issue description did not
 	// appear in the ±1-line window of changed text.
 	GroundingDropTokenNotNearLine GroundingDropReason = "token_not_near_line"
+	// GroundingRescuedFileScope means the cited line was NOT in the changed
+	// set, but the backtick token from the description appears somewhere in
+	// the file's changed lines. The issue survives with Line=0 so the
+	// consolidator demotes it to an unanchored body bullet rather than
+	// emitting an inline comment at a hallucinated line.
+	GroundingRescuedFileScope GroundingDropReason = "rescued_file_scope"
 )
 
 // VerdictGroundingSummaryPayload is emitted once per pr-category-review
@@ -434,6 +440,7 @@ type VerdictGroundingSummaryPayload struct {
 	OriginalCount   int                         `json:"original_count"`   // issues parsed from raw LLM output
 	GroundedCount   int                         `json:"grounded_count"`   // issues that survived the filter
 	DropReasons     map[GroundingDropReason]int `json:"drop_reasons,omitempty"`
+	RescuedCount    int                         `json:"rescued_count,omitempty"`
 	OriginalOutcome VerdictOutcome              `json:"original_outcome"` // pre-grounding verdict
 	FinalOutcome    VerdictOutcome              `json:"final_outcome"`    // post-grounding verdict (after FAIL→PASS demotion if any)
 }

@@ -141,6 +141,19 @@ func RegisterAll(reg *Registry, d Deps) error {
 		cfg := aiCfg(name, phase, personaName)
 		cfg.Backend = reviewBackend
 		cfg.BackendTimeout = reviewTimeout
+		// VERDICT-bearing review phases produce prose, not JSON. Without
+		// PlainText=true, ExtractJSON greedily captures the first JSON
+		// literal the LLM cites (e.g. a dashboard filter snippet) and
+		// discards the rest of the output — including the VERDICT line —
+		// causing ParseVerdict to default to VerdictSourceDefaultOptimistic
+		// and silently drop the real review findings.
+		// "feedback-analyze" and "consolidator" are intentionally excluded:
+		// feedback-analyzer uses structured JSON for issue extraction, and
+		// pr-consolidator emits structured inline-comments JSON.
+		switch phase {
+		case "pr-category-review", "review", "qa":
+			cfg.PlainText = true
+		}
 		return cfg
 	}
 

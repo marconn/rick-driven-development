@@ -356,18 +356,23 @@ func (h *ReviewHandler) groundPRCategoryReview(
 	if !ok {
 		// No diff scope available — emit a summary so the absence of grounding
 		// is itself recorded, then return inputs unchanged.
-		return responseText, verdict, issues, h.buildGroundingSummary(verdict, verdict, len(issues), len(issues), nil)
+		return responseText, verdict, issues, h.buildGroundingSummary(verdict, verdict, len(issues), len(issues), 0, nil)
 	}
 
 	originalOutcome := verdict.Outcome
 	originalCount := len(issues)
 	dropReasons := make(map[event.GroundingDropReason]int)
 
+	rescued := 0
 	grounded := make([]event.Issue, 0, len(issues))
 	for _, issue := range issues {
 		gi, ok, reason := scope.groundIssue(issue)
 		if ok {
 			grounded = append(grounded, gi)
+			if reason == event.GroundingRescuedFileScope {
+				rescued++
+				dropReasons[reason]++
+			}
 			continue
 		}
 		dropReasons[reason]++
@@ -387,18 +392,21 @@ func (h *ReviewHandler) groundPRCategoryReview(
 		grounded = nil
 	}
 
-	summaryEvt := h.buildGroundingSummary(Verdict{Outcome: originalOutcome}, verdict, originalCount, len(grounded), dropReasons)
+	summaryEvt := h.buildGroundingSummary(Verdict{Outcome: originalOutcome}, verdict, originalCount, len(grounded), rescued, dropReasons)
 	return buildCompactPRCategoryReviewOutput(verdict, grounded), verdict, grounded, summaryEvt
 }
 
 // buildGroundingSummary constructs the VerdictGroundingSummary envelope.
 // Always returns a non-nil envelope — caller appends unconditionally so the
 // presence/absence of summary events is itself a code-path bug indicator.
+// rescued is the count of issues accepted via the file-scope rescue path
+// (GroundingRescuedFileScope); included in RescuedCount for operator visibility.
 func (h *ReviewHandler) buildGroundingSummary(
 	original Verdict,
 	final Verdict,
 	originalCount int,
 	groundedCount int,
+	rescued int,
 	dropReasons map[event.GroundingDropReason]int,
 ) *event.Envelope {
 	if len(dropReasons) == 0 {
@@ -408,6 +416,7 @@ func (h *ReviewHandler) buildGroundingSummary(
 		Reviewer:        h.ai.name,
 		OriginalCount:   originalCount,
 		GroundedCount:   groundedCount,
+		RescuedCount:    rescued,
 		DropReasons:     dropReasons,
 		OriginalOutcome: original.Outcome,
 		FinalOutcome:    final.Outcome,
@@ -520,6 +529,10 @@ func parseUnifiedDiff(scope *prDiffGroundingScope, diff string) {
 // groundIssue checks whether issue anchors to an exact changed line in the
 // PR diff. Returns (issue, true, "") when grounded; (zero, false, reason) when
 // dropped, where reason classifies why for the VerdictGroundingSummary tally.
+// When the cited line is not changed but the token appears elsewhere in the
+// file's changed lines, the issue is rescued: returned with Line=0 and reason
+// GroundingRescuedFileScope so the consolidator emits it as an unanchored body
+// bullet rather than an inline comment at a hallucinated line.
 func (s prDiffGroundingScope) groundIssue(issue event.Issue) (event.Issue, bool, event.GroundingDropReason) {
 	if issue.File == "" {
 		issue.File, issue.Line = extractFileRef(issue.Description)
@@ -537,12 +550,65 @@ func (s prDiffGroundingScope) groundIssue(issue event.Issue) (event.Issue, bool,
 		// indicates the LLM cited a stale line; the latter that the citation
 		// is loose. Both useful signal.
 		if _, lineChanged := s.changedLines[file][issue.Line]; lineChanged {
+			// file:line both in scope, only the token failed → no rescue
 			return event.Issue{}, false, event.GroundingDropTokenNotNearLine
+		}
+		// file in scope, line not changed → try file-scope rescue
+		if rescued, ok := s.rescueByFileScope(issue); ok {
+			return rescued, true, event.GroundingRescuedFileScope
 		}
 		return event.Issue{}, false, event.GroundingDropLineNotInChanged
 	}
 	issue.File = file
 	return issue, true, ""
+}
+
+// rescueByFileScope tries to recover an issue whose cited line wasn't
+// changed but whose backtick token DOES appear somewhere in the changed
+// lines for that file. Returns the issue with Line cleared (forcing the
+// consolidator to emit it as an unanchored body bullet, never an inline
+// comment at a hallucinated location). Strict: requires at least one
+// non-trivial token from groundingTokens(); requires every token to
+// appear in the file's changed lines blob. File-allowlist guard already
+// passed before this is called — this method only relaxes the line guard.
+func (s prDiffGroundingScope) rescueByFileScope(issue event.Issue) (event.Issue, bool) {
+	file := s.resolveFile(issue.File)
+	if file == "" {
+		return event.Issue{}, false
+	}
+	lines, ok := s.changedLines[file]
+	if !ok || len(lines) == 0 {
+		return event.Issue{}, false
+	}
+	tokens := groundingTokens(issue.Description)
+	if len(tokens) == 0 {
+		return event.Issue{}, false
+	}
+	var fileText strings.Builder
+	for _, text := range lines {
+		fileText.WriteString(text)
+		fileText.WriteByte('\n')
+	}
+	blob := fileText.String()
+	for _, tok := range tokens {
+		if !strings.Contains(blob, tok) {
+			return event.Issue{}, false
+		}
+	}
+	issue.File = file
+	issue.Line = 0
+	// Strip backtick-wrapped file:line citation tokens from the description so
+	// the compact output doesn't carry the hallucinated line number. The pattern
+	// matches any `file.ext:N` span that groundingTokens would have skipped.
+	issue.Description = codeSpanRefRe.ReplaceAllStringFunc(issue.Description, func(span string) string {
+		inner := strings.TrimSpace(span[1 : len(span)-1]) // strip outer backticks
+		if fileLineTokenRe.MatchString(inner) {
+			return ""
+		}
+		return span
+	})
+	issue.Description = strings.TrimSpace(issue.Description)
+	return issue, true
 }
 
 func (s prDiffGroundingScope) resolveFile(ref string) string {
@@ -600,12 +666,22 @@ func (s prDiffGroundingScope) matchesChangedLine(file string, line int, descript
 	return true
 }
 
+// fileLineTokenRe matches tokens that are themselves file:line references
+// (e.g. "monitoring_observability.go:81") — these are location citations, not
+// code identifiers, and must not be used as blob-search tokens.
+var fileLineTokenRe = regexp.MustCompile(`^[^/]+\.\w+:\d+$`)
+
 func groundingTokens(description string) []string {
 	matches := codeSpanRefRe.FindAllStringSubmatch(description, -1)
 	tokens := make([]string, 0, len(matches))
 	for _, match := range matches {
 		token := strings.TrimSpace(match[1])
 		if token == "" || token == "Makefile" || strings.Contains(token, "/") {
+			continue
+		}
+		// Skip file:line citation tokens — they are location references, not
+		// code identifiers that would appear verbatim in the changed-line text.
+		if fileLineTokenRe.MatchString(token) {
 			continue
 		}
 		tokens = append(tokens, token)

@@ -1317,6 +1317,126 @@ func TestAIRequestStartedEmittedEvenOnBackendError(t *testing.T) {
 	}
 }
 
+// TestPlainTextPreservesVerdictLineWhenJSONFragmentPresent is the regression
+// guard for the PR #845 bug: pr-observability and pr-vendor-resilience cited
+// a JSON snippet inline (e.g. ["metric.label.target"]), ExtractJSON captured
+// only that fragment and discarded the VERDICT line, causing ParseVerdict to
+// default to VerdictSourceDefaultOptimistic.  With PlainText=true the full
+// prose — including VERDICT: FAIL — must survive unmodified.
+func TestPlainTextPreservesVerdictLineWhenJSONFragmentPresent(t *testing.T) {
+	const rawLLMOutput = `["metric.label.target"]
+
+The dashboard filter only checks one label and misses target groups beyond what's listed.
+
+VERDICT: FAIL
+1. ` + "`major`" + ` ` + "`dashboards.go:42`" + ` ` + "`target_label`" + ` — Filter is too narrow.`
+
+	store := newMockStore()
+	corrID := "corr-plaintext-verdict"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "review PR",
+		})).WithCorrelation(corrID),
+	}
+
+	mb := &mockBackend{
+		name:     "gemini",
+		response: &backend.Response{Output: rawLLMOutput, Duration: time.Second},
+	}
+
+	// PlainText=true path: full output must be preserved.
+	h := NewAIHandler(AIHandlerConfig{
+		Name:      "pr-observability",
+		Phase:     "pr-category-review",
+		Persona:   persona.PRObservability,
+		Backend:   mb,
+		Store:     store,
+		PlainText: true,
+		Personas:  persona.DefaultRegistry(),
+		Builder:   persona.NewPromptBuilder(),
+	})
+
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "pr-workspace",
+	})).WithCorrelation(corrID)
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	// Locate AIResponseReceived — it's the last event returned.
+	var respPayload event.AIResponsePayload
+	found := false
+	for _, e := range results {
+		if e.Type == event.AIResponseReceived {
+			if err := json.Unmarshal(e.Payload, &respPayload); err != nil {
+				t.Fatalf("unmarshal AIResponsePayload: %v", err)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("AIResponseReceived not found in results: %v", typesOf(results))
+	}
+
+	// Structured must be false — PlainText never sets the structured flag.
+	if respPayload.Structured {
+		t.Error("PlainText=true must produce Structured=false")
+	}
+
+	// The decoded output must be the verbatim LLM text, not just the JSON fragment.
+	var decoded string
+	if err := json.Unmarshal(respPayload.Output, &decoded); err != nil {
+		t.Fatalf("output must be a JSON string, got %s: %v", respPayload.Output, err)
+	}
+	if decoded != rawLLMOutput {
+		t.Errorf("PlainText=true: output mismatch\ngot:  %q\nwant: %q", decoded, rawLLMOutput)
+	}
+	if !strings.Contains(decoded, "VERDICT: FAIL") {
+		t.Error("PlainText=true: VERDICT line must survive — ExtractJSON must not have run")
+	}
+
+	// Prove the bug: PlainText=false (default) truncates the output to the JSON
+	// fragment, discarding the VERDICT line.
+	hDefault := NewAIHandler(AIHandlerConfig{
+		Name:      "pr-observability",
+		Phase:     "pr-category-review",
+		Persona:   persona.PRObservability,
+		Backend:   mb,
+		Store:     store,
+		PlainText: false, // default — triggers ExtractJSON
+		Personas:  persona.DefaultRegistry(),
+		Builder:   persona.NewPromptBuilder(),
+	})
+
+	resultsDefault, err := hDefault.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle (default): %v", err)
+	}
+
+	var defaultPayload event.AIResponsePayload
+	for _, e := range resultsDefault {
+		if e.Type == event.AIResponseReceived {
+			if err := json.Unmarshal(e.Payload, &defaultPayload); err != nil {
+				t.Fatalf("unmarshal default AIResponsePayload: %v", err)
+			}
+		}
+	}
+
+	// With PlainText=false, ExtractJSON grabs the first JSON literal and the
+	// VERDICT line is lost.  The decoded output must NOT contain "VERDICT: FAIL".
+	defaultDecoded := unmarshalOutput(defaultPayload.Output, defaultPayload.Structured)
+	if strings.Contains(defaultDecoded, "VERDICT: FAIL") {
+		t.Logf("NOTE: ExtractJSON behaviour may have changed — the bug may already be fixed upstream")
+	} else {
+		// Confirm the truncation: only the JSON fragment survives.
+		if !strings.Contains(defaultDecoded, `"metric.label.target"`) {
+			t.Errorf("PlainText=false: expected JSON fragment in output, got %q", defaultDecoded)
+		}
+	}
+}
+
 func TestAIHandlerOmitsRequestEventWhenBusWired(t *testing.T) {
 	// Counterpart to the legacy [reqEvt, respEvt] test: with Bus wired,
 	// Handle returns ONLY AIResponseReceived because the request event

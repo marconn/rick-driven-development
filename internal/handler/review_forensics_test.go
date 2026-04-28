@@ -453,3 +453,255 @@ func typesOf(events []event.Envelope) []event.Type {
 	}
 	return out
 }
+
+// buildTestScope is a helper that constructs a prDiffGroundingScope directly
+// from a unified diff string, bypassing the store lookup path.
+func buildTestScope(diff string) prDiffGroundingScope {
+	scope := prDiffGroundingScope{
+		changedFiles: make(map[string]struct{}),
+		changedLines: make(map[string]map[int]string),
+	}
+	parseUnifiedDiff(&scope, diff)
+	return scope
+}
+
+// TestGroundIssueFileScopeRescue exercises the five regression cases for the
+// file-scope rescue path added to groundIssue.
+func TestGroundIssueFileScopeRescue(t *testing.T) {
+	// Shared diff fragments used across cases.
+
+	// monitoring_observability.go: function starts at line 148 in the changed set.
+	monDiff := "diff --git a/monitoring_observability.go b/monitoring_observability.go\n" +
+		"--- a/monitoring_observability.go\n" +
+		"+++ b/monitoring_observability.go\n" +
+		"@@ -148,3 +148,3 @@ func init() {\n" +
+		"+func CreateObservabilityResources(ctx context.Context) error {\n" +
+		"+\treturn nil\n" +
+		"+}\n"
+
+	// Makefile: only line 10 changed, containing the token "tgt".
+	makeDiff := "diff --git a/Makefile b/Makefile\n" +
+		"--- a/Makefile\n" +
+		"+++ b/Makefile\n" +
+		"@@ -10,1 +10,1 @@ build:\n" +
+		"+tgt: deps\n"
+
+	// Makefile with unrelated content on line 10 (no "tokenNeverInDiff").
+	makeUnrelatedDiff := "diff --git a/Makefile b/Makefile\n" +
+		"--- a/Makefile\n" +
+		"+++ b/Makefile\n" +
+		"@@ -10,1 +10,1 @@ build:\n" +
+		"+unrelated: stuff\n"
+
+	cases := []struct {
+		name       string
+		diff       string
+		issue      event.Issue
+		wantOK     bool
+		wantLine   int
+		wantFile   string
+		wantReason event.GroundingDropReason
+	}{
+		{
+			name: "rescue_via_token_anywhere",
+			diff: monDiff,
+			issue: event.Issue{
+				File:        "monitoring_observability.go",
+				Line:        81, // hallucinated — function is actually at 148
+				Description: "Missing error handling in `CreateObservabilityResources`",
+			},
+			wantOK:     true,
+			wantLine:   0, // cleared by rescue
+			wantFile:   "monitoring_observability.go",
+			wantReason: event.GroundingRescuedFileScope,
+		},
+		{
+			name: "hallucinated_file_no_rescue",
+			diff: makeDiff,
+			issue: event.Issue{
+				File:        "nonexistent.go",
+				Line:        1,
+				Description: "Something about `Foo`",
+			},
+			wantOK:     false,
+			wantReason: event.GroundingDropFileNotInScope,
+		},
+		{
+			name: "token_present_at_cited_line_no_rescue_needed",
+			diff: makeDiff,
+			issue: event.Issue{
+				File:        "Makefile",
+				Line:        10,
+				Description: "Dependency target `tgt` is missing phony declaration",
+			},
+			wantOK:     true,
+			wantLine:   10, // anchored normally — line not cleared
+			wantFile:   "Makefile",
+			wantReason: event.GroundingDropUnspecified, // empty reason = normal anchor
+		},
+		{
+			name: "token_absent_anywhere_no_rescue",
+			diff: makeUnrelatedDiff,
+			issue: event.Issue{
+				File:        "Makefile",
+				Line:        999,
+				Description: "Problem with `tokenNeverInDiff`",
+			},
+			wantOK:     false,
+			wantReason: event.GroundingDropLineNotInChanged,
+		},
+		{
+			name: "no_token_no_rescue",
+			diff: makeUnrelatedDiff,
+			issue: event.Issue{
+				File:        "Makefile",
+				Line:        999,
+				Description: "This description has no backtick tokens at all, just prose",
+			},
+			wantOK:     false,
+			wantReason: event.GroundingDropLineNotInChanged,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := buildTestScope(tc.diff)
+			gotIssue, gotOK, gotReason := scope.groundIssue(tc.issue)
+
+			if gotOK != tc.wantOK {
+				t.Errorf("ok: got %v want %v", gotOK, tc.wantOK)
+			}
+			if gotReason != tc.wantReason {
+				t.Errorf("reason: got %q want %q", gotReason, tc.wantReason)
+			}
+			if gotOK {
+				if gotIssue.Line != tc.wantLine {
+					t.Errorf("issue.Line: got %d want %d", gotIssue.Line, tc.wantLine)
+				}
+				if gotIssue.File != tc.wantFile {
+					t.Errorf("issue.File: got %q want %q", gotIssue.File, tc.wantFile)
+				}
+			}
+		})
+	}
+}
+
+// TestGroundPRCategoryReviewRescueCountsAndOutput asserts end-to-end that the
+// rescue path is counted correctly in VerdictGroundingSummaryPayload.RescuedCount
+// and that the compact output for a rescued issue does NOT contain the hallucinated
+// line number.
+func TestGroundPRCategoryReviewRescueCountsAndOutput(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-rescue-counts"
+
+	// Diff: monitoring_observability.go has CreateObservabilityResources at line 148;
+	//       Makefile has "tgt" at line 10 (for the anchored finding).
+	diffSummary := "## PR Changed Files\n\n" +
+		"- `monitoring_observability.go`\n" +
+		"- `Makefile`\n\n" +
+		"## PR Diff\n\n```diff\n" +
+		"diff --git a/monitoring_observability.go b/monitoring_observability.go\n" +
+		"--- a/monitoring_observability.go\n" +
+		"+++ b/monitoring_observability.go\n" +
+		"@@ -148,3 +148,3 @@ func init() {\n" +
+		"+func CreateObservabilityResources(ctx context.Context) error {\n" +
+		"+\treturn nil\n" +
+		"+}\n" +
+		"diff --git a/Makefile b/Makefile\n" +
+		"--- a/Makefile\n" +
+		"+++ b/Makefile\n" +
+		"@@ -10,1 +10,1 @@ build:\n" +
+		"+tgt: deps\n" +
+		"```\n"
+
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "review PR",
+		})).WithCorrelation(corrID),
+		event.New(event.ContextEnrichment, 1, event.MustMarshal(event.ContextEnrichmentPayload{
+			Source:  "pr-workspace",
+			Kind:    "pr-diff",
+			Summary: diffSummary,
+		})).WithCorrelation(corrID),
+	}
+
+	mb := &mockBackend{
+		name: "claude",
+		response: &backend.Response{
+			// Two findings:
+			//   1. Rescued: token present at line 148, cited at hallucinated line 81.
+			//   2. Anchored: token "tgt" at line 10, cited at line 10.
+			Output: "VERDICT: FAIL\n\n" +
+				"1. **major**: `monitoring_observability.go:81` — `CreateObservabilityResources` missing error propagation\n" +
+				"2. **minor**: `Makefile` line 10 target `tgt` is not declared .PHONY",
+			Duration: time.Second,
+		},
+	}
+
+	h := NewReviewHandler(ReviewHandlerConfig{
+		AIConfig: AIHandlerConfig{
+			Name:     "pr-testing",
+			Phase:    "pr-category-review",
+			Persona:  persona.PRTesting,
+			Backend:  mb,
+			Store:    store,
+			Personas: persona.DefaultRegistry(),
+			Builder:  persona.NewPromptBuilder(),
+		},
+		TargetPhase: "develop",
+	})
+
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "pr-workspace",
+	})).WithCorrelation(corrID)
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	// Locate the grounding summary.
+	var summaryPayload event.VerdictGroundingSummaryPayload
+	foundSummary := false
+	for _, e := range results {
+		if e.Type != event.VerdictGroundingSummary {
+			continue
+		}
+		if err := json.Unmarshal(e.Payload, &summaryPayload); err != nil {
+			t.Fatalf("unmarshal summary: %v", err)
+		}
+		foundSummary = true
+	}
+	if !foundSummary {
+		t.Fatalf("VerdictGroundingSummary not emitted; got types: %v", typesOf(results))
+	}
+
+	if summaryPayload.OriginalCount != 2 {
+		t.Errorf("OriginalCount: got %d want 2", summaryPayload.OriginalCount)
+	}
+	if summaryPayload.GroundedCount != 2 {
+		t.Errorf("GroundedCount: got %d want 2 (both accepted: one anchored, one rescued)", summaryPayload.GroundedCount)
+	}
+	if summaryPayload.RescuedCount != 1 {
+		t.Errorf("RescuedCount: got %d want 1", summaryPayload.RescuedCount)
+	}
+	if summaryPayload.DropReasons[event.GroundingRescuedFileScope] != 1 {
+		t.Errorf("DropReasons[rescued_file_scope]: got %d want 1", summaryPayload.DropReasons[event.GroundingRescuedFileScope])
+	}
+
+	// The compact output must not reference the hallucinated line :81.
+	for _, e := range results {
+		if e.Type != event.AIResponseReceived {
+			continue
+		}
+		var p event.AIResponsePayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			t.Fatalf("unmarshal ai response: %v", err)
+		}
+		var canonical string
+		_ = json.Unmarshal(p.Output, &canonical)
+		if strings.Contains(canonical, ":81") {
+			t.Errorf("compact output must not contain hallucinated line :81, got: %s", canonical)
+		}
+	}
+}
