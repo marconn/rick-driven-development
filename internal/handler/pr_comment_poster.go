@@ -184,7 +184,7 @@ func (h *PRCommentPosterHandler) postStructured(ctx context.Context, fullRepo, o
 	if summary != "" {
 		evts, err := h.postSummary(ctx, fullRepo, owner, repo, prNumber, summary)
 		out = append(out, evts...)
-		if err != nil && firstErr == nil {
+		if err != nil {
 			firstErr = err
 		}
 	}
