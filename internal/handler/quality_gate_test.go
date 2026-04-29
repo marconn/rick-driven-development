@@ -412,7 +412,11 @@ func TestStackRunResultIsStackError(t *testing.T) {
 
 // TestQualityGateStackCrashesNonJSON verifies the fallback path when the stack
 // binary crashes or returns non-JSON output (e.g., segfault, stderr-only).
-// The runCheck JSON parse fails → parse_error code → NOT a stack error → VerdictFail.
+// The runCheck JSON parse fails → parse_error code. Until 2026-04-29 this was
+// a normal VerdictFail, which fed cobra-echo garbage into the developer
+// iteration loop (3× before the operator cancelled). After 2026-04-29 a
+// parse_error escalates as advisory so the workflow pauses for operator
+// review instead of looping on undiagnosable output.
 func TestQualityGateStackCrashesNonJSON(t *testing.T) {
 	tmp := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
@@ -441,15 +445,201 @@ exit 139
 	if len(got) != 1 {
 		t.Fatalf("expected 1 verdict event, got %d", len(got))
 	}
-	// parse_error is NOT a stack infrastructure error → should be VerdictFail, not skip.
+	// parse_error escalates as advisory fail: pause for operator instead of
+	// retriggering the developer with garbage diagnostics.
 	assertVerdictOutcome(t, got[0], event.VerdictFail)
 
 	var vp event.VerdictPayload
 	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(vp.Summary, "lint failed") {
-		t.Errorf("summary should report lint failure, got: %s", vp.Summary)
+	if !vp.Advisory {
+		t.Errorf("parse_error verdict must be Advisory=true, got Advisory=%v", vp.Advisory)
+	}
+	if !strings.Contains(vp.Summary, "parse_error") {
+		t.Errorf("summary should mention parse_error, got: %s", vp.Summary)
+	}
+	if len(vp.Issues) == 0 || vp.Issues[0].Category != "infrastructure" {
+		t.Errorf("expected infrastructure-category issue, got: %#v", vp.Issues)
+	}
+}
+
+// TestQualityGate_RawDiagnosticsCarriedToVerdict is the regression for
+// PR-D / 2026-04-29: when a real test run fails, the unfiltered tail of
+// stack's stdout+stderr must reach VerdictPayload.RawDiagnostics so the
+// developer's iteration prompt has actionable text even when
+// buildFailureDescription's filter trimmed Issue.Description.
+func TestQualityGate_RawDiagnosticsCarriedToVerdict(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake stack emits a realistic mix: Docker noise (would be filtered out
+	// of the human-readable description) plus the actual test failure body.
+	// RawDiagnostics must contain BOTH because the LLM is not the operator —
+	// it benefits from the full stream when reasoning about the failure.
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+args=("$@")
+matched=0
+for arg in "${args[@]}"; do
+    if [[ "$arg" == *"./run.sh lint"* ]] || [ "$arg" = "lint" ]; then
+        matched=1
+    fi
+done
+if [ "$matched" = "1" ]; then
+    cat <<'EOF'
+{"action":"create","status":"success"}
+{"action":"run","exit_code":1,"output":"Container redis Started\nContainer redis Healthy\nFAIL\tinternal/foo 0.5s\n--- FAIL: TestThing (0.01s)\n    foo_test.go:42: expected 1 got 0","stderr":"connection refused on 127.0.0.1:6379","status":"success"}
+{"action":"destroy","status":"success"}
+EOF
+    exit 1
+fi
+cat <<'EOF'
+{"action":"create","status":"success"}
+{"action":"run","exit_code":0,"output":"ok","status":"success"}
+{"action":"destroy","status":"success"}
+EOF
+exit 0
+`)
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-rawdiag"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-rawdiag"),
+	}
+
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 300}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-rawdiag")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 verdict event, got %d", len(got))
+	}
+	assertVerdictOutcome(t, got[0], event.VerdictFail)
+
+	var vp event.VerdictPayload
+	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
+		t.Fatal(err)
+	}
+	if vp.RawDiagnostics == "" {
+		t.Fatal("VerdictPayload.RawDiagnostics must be populated on a real failure")
+	}
+	for _, want := range []string{
+		"--- lint ---",                  // section header per check
+		"FAIL\tinternal/foo",            // actual test failure body
+		"connection refused",            // stderr that filterDockerNoise would also keep but is the most common diag we lose in a real-world scenario
+	} {
+		if !strings.Contains(vp.RawDiagnostics, want) {
+			t.Errorf("RawDiagnostics missing %q\n--- raw ---\n%s\n--- end ---", want, vp.RawDiagnostics)
+		}
+	}
+}
+
+// TestFormatFeedback_RendersRawDiagnostics is a small unit guard ensuring
+// formatFeedback carries RawDiagnostics into the developer prompt body.
+func TestFormatFeedback_RendersRawDiagnostics(t *testing.T) {
+	p := event.FeedbackGeneratedPayload{
+		Summary:        "lint failed",
+		Issues:         []event.Issue{{Severity: "major", Category: "correctness", Description: "filtered description"}},
+		RawDiagnostics: "FAIL: real test failure\nconnection refused on 127.0.0.1:6379",
+	}
+	got := formatFeedback(p)
+	if !strings.Contains(got, "### Raw diagnostics") {
+		t.Errorf("formatFeedback missing raw diagnostics section header:\n%s", got)
+	}
+	if !strings.Contains(got, "real test failure") {
+		t.Errorf("formatFeedback missing raw diagnostic body:\n%s", got)
+	}
+	if !strings.Contains(got, "connection refused") {
+		t.Errorf("formatFeedback missing infra-failure marker:\n%s", got)
+	}
+}
+
+// TestQualityGate_ParseErrorEscalates_CobraEcho is the precise 2026-04-29
+// regression: stack failed before reaching its run command and cobra echoed
+// `Error: command exited with code 1` to BOTH stdout and stderr. Pre-fix Rick
+// fed those bytes into the developer iteration loop as a code-regression
+// verdict, burning 3 rounds of tokens. Post-fix the verdict is advisory and
+// the captured bytes are persisted in the debug dir for the operator.
+func TestQualityGate_ParseErrorEscalates_CobraEcho(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mimic the cobra-default-error path that produced the 97-byte log file.
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+echo "Error: command exited with code 1"
+echo "Error: command exited with code 1" >&2
+exit 1
+`)
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-cobra"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-cobra"),
+	}
+
+	debugDir := filepath.Join(t.TempDir(), "qg-debug")
+	h := &QualityGateHandler{
+		store:    store,
+		name:     "quality-gate",
+		stackBin: fakeStack,
+		timeout:  300,
+		debugDir: debugDir,
+		logger:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+	}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-cobra")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 verdict event, got %d", len(got))
+	}
+	assertVerdictOutcome(t, got[0], event.VerdictFail)
+
+	var vp event.VerdictPayload
+	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
+		t.Fatal(err)
+	}
+	if !vp.Advisory {
+		t.Fatalf("parse_error verdict must be Advisory=true, got: %#v", vp)
+	}
+	if len(vp.Issues) != 1 {
+		t.Fatalf("expected exactly one issue, got: %#v", vp.Issues)
+	}
+	desc := vp.Issues[0].Description
+	if !strings.Contains(desc, "stack output unparseable") {
+		t.Errorf("issue description should explain parse_error, got: %s", desc)
+	}
+	if !strings.Contains(desc, "Error: command exited with code 1") {
+		t.Errorf("issue description should embed the captured cobra echo, got: %s", desc)
+	}
+	if !strings.Contains(desc, "[full output:") {
+		t.Errorf("issue description should reference the saved debug log, got: %s", desc)
+	}
+
+	// Debug artefact must exist with the raw captured bytes so the operator can
+	// inspect what stack actually emitted.
+	entries, rerr := os.ReadDir(debugDir)
+	if rerr != nil {
+		t.Fatalf("read debug dir: %v", rerr)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected at least one qg-*.log file in the debug dir")
+	}
+	logBytes, lerr := os.ReadFile(filepath.Join(debugDir, entries[0].Name()))
+	if lerr != nil {
+		t.Fatalf("read debug log: %v", lerr)
+	}
+	if !strings.Contains(string(logBytes), "Error: command exited with code 1") {
+		t.Errorf("debug log missing captured bytes:\n%s", string(logBytes))
 	}
 }
 

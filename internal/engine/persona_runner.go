@@ -845,25 +845,58 @@ func (r *PersonaRunner) executeDispatch(h handler.Handler, env event.Envelope, c
 			WithSource("persona-runner:"+h.Name()))
 	} else {
 		outputRef := ""
+		outputTextLen := -1 // -1 = no AIResponseReceived seen → guard does not apply
 		if result != nil {
 			for _, re := range result.Events {
 				if re.Type == event.AIResponseReceived {
 					outputRef = string(re.ID)
+					outputTextLen = aiResponseTextLen(re.Payload)
 				}
 			}
 		}
-		allEvents = append(allEvents, event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
-			Persona:      h.Name(),
-			TriggerEvent: string(env.Type),
-			TriggerID:    string(env.ID),
-			Reactive:     true,
-			OutputRef:    outputRef,
-			DurationMS:   durationMS,
-			ChainDepth:   chainDepth,
-		})).
-			WithCausation(env.ID).
-			WithCorrelation(env.CorrelationID).
-			WithSource("persona-runner:"+h.Name()))
+
+		// Developer guard rail (2026-04-29 incident, workflow d0c82058):
+		// the model wrote 4 files / 356 insertions correctly, but Rick captured
+		// the literal string `["sub"]` (7 bytes) as its persona output. The
+		// reviewer downstream got that fragment as "Implementation to Review"
+		// and FAILed every iteration. The strict ExtractJSON + sawToolUse fixes
+		// in internal/backend address known upstream causes; this guard is the
+		// catch-all defending the next variant. If the developer's textual
+		// output is suspiciously short AND the workspace has uncommitted
+		// changes (the model DID work but Rick lost the description of it),
+		// fail loudly so the operator can take over instead of feeding garbage
+		// downstream.
+		if r.developerOutputGuardTrips(h, env.CorrelationID, outputTextLen) {
+			allEvents = append(allEvents, event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
+				Persona:      h.Name(),
+				TriggerEvent: string(env.Type),
+				TriggerID:    string(env.ID),
+				Reactive:     true,
+				Error: fmt.Sprintf(
+					"developer output guard: captured %d-byte response while workspace has uncommitted changes — model produced files but Rick captured no description",
+					outputTextLen),
+				FailureKind:    event.FailureKindOutputTruncated,
+				DurationMS:     durationMS,
+				ChainDepth:     chainDepth,
+				HandlerVersion: buildinfo.Version(),
+			})).
+				WithCausation(env.ID).
+				WithCorrelation(env.CorrelationID).
+				WithSource("persona-runner:"+h.Name()))
+		} else {
+			allEvents = append(allEvents, event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+				Persona:      h.Name(),
+				TriggerEvent: string(env.Type),
+				TriggerID:    string(env.ID),
+				Reactive:     true,
+				OutputRef:    outputRef,
+				DurationMS:   durationMS,
+				ChainDepth:   chainDepth,
+			})).
+				WithCausation(env.ID).
+				WithCorrelation(env.CorrelationID).
+				WithSource("persona-runner:"+h.Name()))
+		}
 	}
 
 	r.persister.persistAndPublish(r.ctx, aggregateID, allEvents)

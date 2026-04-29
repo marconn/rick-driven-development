@@ -50,19 +50,40 @@ func extractFromFencedBlock(output string) (json.RawMessage, bool) {
 	return nil, false
 }
 
-// extractRawJSON finds the first JSON object ({...}) or array ([...]) in the output
-// by scanning for opening brackets and attempting to decode from that position.
+// extractRawJSON returns the JSON object/array that constitutes the trimmed
+// output in its entirety, or (nil, false) otherwise.
+//
+// The legacy implementation walked the string byte-by-byte and returned the
+// first decodable substring it found. That was the upstream cause of the
+// 2026-04-29 incident: developer/researcher/architect emitted prose like
+// "the JWT contains the claims [\"sub\"] for verification" and the extractor
+// collapsed the entire response to the literal string `["sub"]`. The same
+// path produced `{}` from the architect and `{"api_key":"…"}` from a developer
+// run that mentioned a config example mid-paragraph.
+//
+// New contract — the response is treated as structured only when:
+//  1. The trimmed text starts with `{` or `[`, AND
+//  2. The first JSON value consumes the whole trimmed text (no trailing prose).
+//
+// If the model wants to emit JSON inside prose it MUST use a fenced code block;
+// extractFromFencedBlock handles that case above. Mixed prose+JSON falls back
+// to plain-text storage in marshalOutput, which is strictly better than the
+// truncated-fragment failure mode.
 func extractRawJSON(output string) (json.RawMessage, bool) {
-	for i, ch := range output {
-		if ch != '{' && ch != '[' {
-			continue
-		}
-		candidate := output[i:]
-		dec := json.NewDecoder(bytes.NewReader([]byte(candidate)))
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err == nil {
-			return raw, true
-		}
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return nil, false
 	}
-	return nil, false
+	if trimmed[0] != '{' && trimmed[0] != '[' {
+		return nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader([]byte(trimmed)))
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		return nil, false
+	}
+	if rest := strings.TrimSpace(trimmed[int(dec.InputOffset()):]); rest != "" {
+		return nil, false
+	}
+	return raw, true
 }

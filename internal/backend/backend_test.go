@@ -469,6 +469,88 @@ func TestClaudeTokenExtraction(t *testing.T) {
 	}
 }
 
+// TestClaudePrintExtractor_ToolOnlyResponseSkipsResultFallback is the
+// regression for the 2026-04-29 incident on workflow d0c82058: a developer
+// run finished on tool calls only, no `text_delta` events ever fired, and the
+// legacy flat `result` envelope's Result field carried tool metadata. The
+// extractor's pre-fix fallback then emitted that metadata as the assistant's
+// "output", which ExtractJSON downstream truncated to `["sub"]`. With
+// sawToolUse tracked, the fallback is skipped and the captured text is empty.
+func TestClaudePrintExtractor_ToolOnlyResponseSkipsResultFallback(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+	}{
+		{
+			// Stream-event envelope path: content_block_start with tool_use
+			// type arms sawToolUse before the input_json_delta arrives.
+			name: "stream_event_tool_use_then_legacy_result",
+			lines: []string{
+				`{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}}`,
+				`{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tu_01","name":"Edit"}}}`,
+				`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"file\":\"x.go\"}"}}}`,
+				`{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"tool_use"}}}`,
+				`{"type":"result","subtype":"success","stop_reason":"tool_use","result":"[\"sub\"]","usage":{"input_tokens":10,"output_tokens":5}}`,
+			},
+		},
+		{
+			// Legacy flat path: assistant/tool_use event arms sawToolUse.
+			name: "flat_tool_use_then_result",
+			lines: []string{
+				`{"type":"assistant","subtype":"tool_use","name":"Edit"}`,
+				`{"type":"result","subtype":"success","stop_reason":"tool_use","result":"[\"sub\"]","usage":{"input_tokens":10,"output_tokens":5}}`,
+			},
+		},
+		{
+			// Defensive: even if individual tool blocks are dropped, a result
+			// envelope with stop_reason=tool_use must still skip the fallback.
+			name: "result_with_tool_use_stop_reason_only",
+			lines: []string{
+				`{"type":"result","subtype":"success","stop_reason":"tool_use","result":"[\"sub\"]","usage":{"input_tokens":10,"output_tokens":5}}`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			ext := NewClaudePrintExtractor()
+			sw := NewStreamWriter(&buf, ext.ExtractFn(), WithResultCheck(ClaudeCheckResult))
+			for _, line := range tc.lines {
+				if _, err := sw.Write([]byte(line + "\n")); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			_ = sw.Close()
+			if got := buf.String(); got != "" {
+				t.Errorf("tool-only response must capture empty output, got %q", got)
+			}
+		})
+	}
+}
+
+// TestClaudePrintExtractor_ResultFallbackStillFiresOnPureText guards the
+// inverse direction: when there is no tool_use anywhere, a -p run that ends
+// with the assistant text only in the result envelope must still surface
+// that text via the fallback.
+func TestClaudePrintExtractor_ResultFallbackStillFiresOnPureText(t *testing.T) {
+	var buf bytes.Buffer
+	ext := NewClaudePrintExtractor()
+	sw := NewStreamWriter(&buf, ext.ExtractFn(), WithResultCheck(ClaudeCheckResult))
+	lines := []string{
+		`{"type":"message_start","message":{"usage":{"input_tokens":10}}}`,
+		`{"type":"result","subtype":"success","stop_reason":"end_turn","result":"final answer","usage":{"input_tokens":10,"output_tokens":3}}`,
+	}
+	for _, line := range lines {
+		if _, err := sw.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	_ = sw.Close()
+	if got := buf.String(); got != "final answer" {
+		t.Errorf("pure-text fallback must still emit Result, got %q", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Stream parsing — Gemini
 // ---------------------------------------------------------------------------
@@ -593,21 +675,38 @@ func TestExtractJSON(t *testing.T) {
 			wantOK: true,
 		},
 		{
-			name:   "raw_json_object",
+			// Pre-2026-04-29 the extractor would greedily decode the embedded
+			// JSON and discard the surrounding prose. That was the upstream
+			// cause of the `["sub"]` / `{}` / `{"api_key":"…"}` collapses
+			// observed in workflow d0c82058. The new contract treats mixed
+			// prose+JSON as plain text; the LLM must use a fenced block to
+			// signal structured output.
+			name:   "raw_json_object_in_prose_no_longer_extracted",
 			input:  "The result is {\"status\": \"ok\", \"count\": 42} and that's it.",
-			want:   `{"count":42,"status":"ok"}`,
-			wantOK: true,
+			wantOK: false,
 		},
 		{
-			name:   "raw_json_array",
+			name:   "raw_json_array_in_prose_no_longer_extracted",
 			input:  "Items: [\"a\", \"b\", \"c\"]",
-			want:   `["a","b","c"]`,
+			wantOK: false,
+		},
+		{
+			name:   "nested_json_in_prose_no_longer_extracted",
+			input:  `Result: {"outer": {"inner": [1,2,3]}, "flag": true}`,
+			wantOK: false,
+		},
+		{
+			// Pure JSON (no surrounding prose) is the legitimate case: the
+			// trimmed text consists entirely of one decodable value.
+			name:   "pure_json_object",
+			input:  `{"status": "ok"}`,
+			want:   `{"status":"ok"}`,
 			wantOK: true,
 		},
 		{
-			name:   "nested_json",
-			input:  `Result: {"outer": {"inner": [1,2,3]}, "flag": true}`,
-			want:   `{"flag":true,"outer":{"inner":[1,2,3]}}`,
+			name:   "pure_json_array_with_whitespace",
+			input:  "  \n[1, 2, 3]\n  ",
+			want:   `[1,2,3]`,
 			wantOK: true,
 		},
 		{
@@ -668,23 +767,48 @@ func TestExtractJSONPrefersFencedBlock(t *testing.T) {
 	}
 }
 
-func TestExtractJSONWithSurroundingText(t *testing.T) {
-	input := "Sure! Here's the JSON you requested: {\"items\": [{\"id\": 1}, {\"id\": 2}]} Let me know if you need anything else."
-	got, ok := ExtractJSON(input)
-	if !ok {
-		t.Fatal("expected JSON extraction")
+// TestExtractJSON_RejectsFragmentInProse is the regression guard for the
+// 2026-04-29 incident on workflow d0c82058: developer / researcher / architect
+// emitted prose containing a small JSON-shaped substring (claim list, config
+// example, empty object), and ExtractJSON greedily collapsed the response to
+// that fragment. Reviewer / downstream consumers then received e.g. `["sub"]`
+// instead of the actual implementation, FAILing every iteration.
+//
+// The new contract: mixed prose+JSON is plain text. Fenced blocks remain the
+// supported structured-output mechanism.
+func TestExtractJSON_RejectsFragmentInProse(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "sub_claim_in_prose",
+			input: `the JWT contains the claims ["sub"] which we use for verification`,
+		},
+		{
+			name:  "api_key_config_example",
+			input: `An example call uses {"api_key":"apiuser_apikey_julio_ehr"} as auth.`,
+		},
+		{
+			name:  "empty_object_in_prose",
+			input: `The response body is {} on success.`,
+		},
+		{
+			name: "json_at_start_with_trailing_prose",
+			input: `["metric.label.target"]
+
+The dashboard filter only checks one label and misses target groups beyond what's listed.
+
+VERDICT: FAIL`,
+		},
 	}
-	var parsed map[string]any
-	if err := json.Unmarshal(got, &parsed); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	items, has := parsed["items"]
-	if !has {
-		t.Fatal("expected 'items' key")
-	}
-	arr, ok := items.([]any)
-	if !ok || len(arr) != 2 {
-		t.Errorf("expected 2 items, got %v", items)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ExtractJSON(tc.input)
+			if ok {
+				t.Errorf("ExtractJSON should not extract a fragment from prose; got %q", string(got))
+			}
+		})
 	}
 }
 

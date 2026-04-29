@@ -408,6 +408,17 @@ func formatFeedback(p event.FeedbackGeneratedPayload) string {
 		}
 		b.WriteString("\n")
 	}
+	// Append the unfiltered diagnostic tail when the upstream verdict carried
+	// one. The 2026-04-29 incident motivated this: when filterDockerNoise (or
+	// any other human-readability filter) collapses Issue.Description to a
+	// near-empty body, the developer still needs the raw test/lint output to
+	// act on. RawDiagnostics is forensics-grade: untouched bytes from the
+	// failure stream.
+	if rd := strings.TrimSpace(p.RawDiagnostics); rd != "" {
+		b.WriteString("\n### Raw diagnostics\n")
+		b.WriteString(rd)
+		b.WriteString("\n")
+	}
 	return strings.TrimSpace(b.String())
 }
 

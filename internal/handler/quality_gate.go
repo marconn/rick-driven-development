@@ -149,6 +149,11 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	var issues []event.Issue
 	var failSummaries []string
 	var keptStacks []string
+	// rawDiagnosticsParts accumulates the unfiltered tail of each failing
+	// check's stdout+stderr. Forwarded to VerdictPayload.RawDiagnostics so the
+	// developer's iteration prompt can act on the unredacted failure stream
+	// even when buildFailureDescription's filter trimmed Issue.Description.
+	var rawDiagnosticsParts []string
 
 	checks := []qualityCheck{
 		{name: "lint", command: []string{"./run.sh", "lint"}},
@@ -173,6 +178,36 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 			// to the real stderr. The default dir is cheap — a few KB per run.
 			fullOutput := mergeOutputAndStderr(result.Output, result.Stderr)
 			debugRef := h.saveDebugOutput(env.CorrelationID, check.name, fullOutput)
+			rawDiagnosticsParts = append(rawDiagnosticsParts, formatRawDiagnostics(check.name, fullOutput))
+
+			// parse_error: stack exited but emitted no parseable JSON envelope.
+			// 2026-04-29 incident: stack failed before reaching its run command;
+			// cobra echoed `Error: command exited with code 1` to both streams;
+			// runCheck's fallback used that as result.Output. A normal fail
+			// verdict here would feed the developer cobra-echo garbage and burn
+			// 3 iterations on a non-regression. Escalate as advisory instead so
+			// the operator decides what to do next.
+			if result.Code == "parse_error" {
+				h.destroyKeptStacks(ctx, keptStacks)
+				descLines := []string{
+					fmt.Sprintf("./run.sh %s failed: stack output unparseable (parse_error) — likely stack misconfiguration, multipass not ready, or a non-zero exit before stack emitted its JSON envelope.", check.name),
+					"",
+					"Captured raw bytes:",
+					truncateOutput(fullOutput, 2000),
+				}
+				if debugRef != "" {
+					descLines = append(descLines, "", "[full output: "+debugRef+"]")
+				}
+				return h.advisoryFailVerdict(
+					fmt.Sprintf("%s parse_error — stack output unparseable, escalating to operator", check.name),
+					[]event.Issue{{
+						Severity:    "major",
+						Category:    "infrastructure",
+						Description: strings.Join(descLines, "\n"),
+					}},
+					strings.Join(rawDiagnosticsParts, "\n\n"),
+				), nil
+			}
 
 			desc := buildFailureDescription(check.name, fullOutput, debugRef)
 			issues = append(issues, event.Issue{
@@ -191,6 +226,8 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 		return h.passVerdict("lint and test passed"), nil
 	}
 
+	rawDiagnostics := strings.Join(rawDiagnosticsParts, "\n\n")
+
 	// Cross-check GitHub CI on the same SHA before declaring a regression.
 	// If upstream CI is green here, the likelihood of a real regression drops
 	// sharply — most local fails at this point are environment flakes
@@ -201,9 +238,9 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	if h.githubCIAllGreen(ctx, env.CorrelationID) {
 		h.logger.Warn("quality-gate: local failed but GitHub CI is green on same SHA — emitting advisory",
 			"correlation", env.CorrelationID)
-		return h.advisoryFailVerdict(summary+" (GitHub CI green on same SHA — likely local-env flake)", issues), nil
+		return h.advisoryFailVerdict(summary+" (GitHub CI green on same SHA — likely local-env flake)", issues, rawDiagnostics), nil
 	}
-	return h.failVerdict(summary, issues), nil
+	return h.failVerdict(summary, issues, rawDiagnostics), nil
 }
 
 // buildFailureDescription assembles the verdict description for a failed
@@ -520,14 +557,15 @@ func (h *QualityGateHandler) passVerdict(summary string) []event.Envelope {
 	}
 }
 
-func (h *QualityGateHandler) failVerdict(summary string, issues []event.Issue) []event.Envelope {
+func (h *QualityGateHandler) failVerdict(summary string, issues []event.Issue, rawDiagnostics string) []event.Envelope {
 	return []event.Envelope{
 		event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-			Phase:       "develop",
-			SourcePhase: "quality-gate",
-			Outcome:     event.VerdictFail,
-			Issues:      issues,
-			Summary:     summary,
+			Phase:          "develop",
+			SourcePhase:    "quality-gate",
+			Outcome:        event.VerdictFail,
+			Issues:         issues,
+			Summary:        summary,
+			RawDiagnostics: rawDiagnostics,
 		})).WithSource("handler:" + h.name),
 	}
 }
@@ -535,15 +573,16 @@ func (h *QualityGateHandler) failVerdict(summary string, issues []event.Issue) [
 // advisoryFailVerdict emits a fail verdict marked Advisory=true. The aggregate
 // treats these as "pause for operator" rather than "retrigger developer", so
 // the handler can fail without starting a feedback loop on a non-regression.
-func (h *QualityGateHandler) advisoryFailVerdict(summary string, issues []event.Issue) []event.Envelope {
+func (h *QualityGateHandler) advisoryFailVerdict(summary string, issues []event.Issue, rawDiagnostics string) []event.Envelope {
 	return []event.Envelope{
 		event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-			Phase:       "develop",
-			SourcePhase: "quality-gate",
-			Outcome:     event.VerdictFail,
-			Issues:      issues,
-			Summary:     summary,
-			Advisory:    true,
+			Phase:          "develop",
+			SourcePhase:    "quality-gate",
+			Outcome:        event.VerdictFail,
+			Issues:         issues,
+			Summary:        summary,
+			Advisory:       true,
+			RawDiagnostics: rawDiagnostics,
 		})).WithSource("handler:" + h.name),
 	}
 }
@@ -591,6 +630,33 @@ func mergeOutputAndStderr(stdout, stderr string) string {
 
 // ansiRe matches ANSI escape sequences and backspace-overwrite pairs (spinner chars).
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]|.\x08`)
+
+// rawDiagnosticsTailLines is the cap on the number of trailing lines of
+// fullOutput propagated to VerdictPayload.RawDiagnostics. Sized so a typical
+// Go test failure (FAIL summary + last few stack frames) survives intact, while
+// long pre-test setup logs (Docker pulls, schema migrations) are truncated.
+const rawDiagnosticsTailLines = 64
+
+// formatRawDiagnostics returns the last rawDiagnosticsTailLines lines of the
+// merged stdout/stderr blob, prefixed with the check name so multi-check
+// failures (lint + test) stay disambiguated in the developer prompt.
+func formatRawDiagnostics(checkName, fullOutput string) string {
+	tail := tailLines(fullOutput, rawDiagnosticsTailLines)
+	return fmt.Sprintf("--- %s ---\n%s", checkName, tail)
+}
+
+// tailLines returns the last n lines of s. If s has fewer than n lines, it is
+// returned unchanged. Empty input → empty output.
+func tailLines(s string, n int) string {
+	if s == "" || n <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
+}
 
 // truncateOutput strips ANSI escape codes, then caps command output using a
 // head+tail strategy to preserve both context and actionable errors.

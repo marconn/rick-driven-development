@@ -91,6 +91,16 @@ func ExtractClaudeText(line []byte) (string, bool) {
 type ClaudePrintExtractor struct {
 	sawText bool
 
+	// sawToolUse is set when a tool_use content block (or its incremental
+	// input deltas / a tool_use stop_reason) is observed. The 2026-04-29
+	// `["sub"]` incident motivated this: when a -p run finishes on tool calls
+	// without ever emitting a final assistant text block, the legacy `result`
+	// envelope's Result field could carry tool metadata that the fallback at
+	// the bottom of handleFlatEvent then treated as the assistant's output.
+	// With this flag set the fallback is skipped, leaving the captured text
+	// empty (which marshalOutput correctly stores as plain text).
+	sawToolUse bool
+
 	// inputTokens + outputTokens track the last-seen message_start / message_delta
 	// values as a fallback when no authoritative result event arrives.
 	inputTokens  int
@@ -171,6 +181,23 @@ func (e *ClaudePrintExtractor) extract(line []byte) (string, bool) {
 // handleStreamEvent processes unwrapped stream_event inner events.
 func (e *ClaudePrintExtractor) handleStreamEvent(innerType string, delta claudeStreamDelta, rawEnvelope []byte) (string, bool) {
 	switch innerType {
+	case "content_block_start":
+		// Inspect the content_block.type to detect tool_use blocks. This
+		// arms the sawToolUse guard before any tool-input deltas arrive.
+		var env claudeStreamEvent
+		if err := json.Unmarshal(rawEnvelope, &env); err == nil {
+			var inner struct {
+				ContentBlock struct {
+					Type string `json:"type"`
+				} `json:"content_block"`
+			}
+			if err := json.Unmarshal(env.Event, &inner); err == nil {
+				if inner.ContentBlock.Type == "tool_use" {
+					e.sawToolUse = true
+				}
+			}
+		}
+
 	case "content_block_delta":
 		if delta.Type == "text_delta" {
 			e.sawText = true
@@ -185,6 +212,12 @@ func (e *ClaudePrintExtractor) handleStreamEvent(innerType string, delta claudeS
 				e.progress()
 			}
 			return delta.Text, true
+		}
+		// Tool-input deltas (the JSON-encoded arguments to a tool_use block)
+		// are not assistant text; record them so the result fallback knows
+		// to skip the Result field when the run finished on tool calls.
+		if delta.Type == "input_json_delta" || delta.Type == "tool_use_delta" {
+			e.sawToolUse = true
 		}
 
 	case "message_start":
@@ -222,6 +255,12 @@ func (e *ClaudePrintExtractor) handleStreamEvent(innerType string, delta claudeS
 				if inner.Delta.StopReason != "" && e.progress != nil {
 					e.progress()
 				}
+				// stop_reason=tool_use is the canonical "model finished by
+				// invoking a tool" signal. Defensive: arm sawToolUse even if
+				// individual content_block_start frames were dropped.
+				if inner.Delta.StopReason == "tool_use" {
+					e.sawToolUse = true
+				}
 			}
 		}
 	}
@@ -233,12 +272,13 @@ func (e *ClaudePrintExtractor) handleStreamEvent(innerType string, delta claudeS
 func (e *ClaudePrintExtractor) handleFlatEvent(line []byte) (string, bool) {
 	// Use a broad struct to capture all fields we care about.
 	var ev struct {
-		Type    string      `json:"type"`
-		Subtype string      `json:"subtype"`
-		Text    string      `json:"text"`
-		Result  string      `json:"result"`
-		Usage   claudeUsage `json:"usage"`
-		Message struct {
+		Type       string      `json:"type"`
+		Subtype    string      `json:"subtype"`
+		Text       string      `json:"text"`
+		Result     string      `json:"result"`
+		StopReason string      `json:"stop_reason"`
+		Usage      claudeUsage `json:"usage"`
+		Message    struct {
 			Usage claudeUsage `json:"usage"`
 		} `json:"message"`
 	}
@@ -259,6 +299,9 @@ func (e *ClaudePrintExtractor) handleFlatEvent(line []byte) (string, bool) {
 				e.progress()
 			}
 			return ev.Text, true
+		}
+		if ev.Subtype == "tool_use" {
+			e.sawToolUse = true
 		}
 
 	case "message_start":
@@ -287,8 +330,19 @@ func (e *ClaudePrintExtractor) handleFlatEvent(line []byte) (string, bool) {
 		if e.progress != nil {
 			e.progress()
 		}
-		// Fallback: emit result text only if no incremental text events were seen.
-		if ev.Result != "" && !e.sawText {
+		// stop_reason=tool_use is the canonical "model finished by tool call"
+		// signal; arm sawToolUse defensively in case earlier per-block frames
+		// were dropped.
+		if ev.StopReason == "tool_use" {
+			e.sawToolUse = true
+		}
+		// Fallback: emit result text only if no incremental text events fired
+		// AND no tool_use blocks were observed. The tool_use guard prevents the
+		// 2026-04-29 `["sub"]` corruption: when a -p run finished entirely on
+		// tool calls, ev.Result could carry tool metadata that the legacy code
+		// then forwarded as the assistant's "output", to be mis-parsed by
+		// ExtractJSON downstream.
+		if ev.Result != "" && !e.sawText && !e.sawToolUse {
 			return ev.Result, true
 		}
 	}

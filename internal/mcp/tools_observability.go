@@ -550,21 +550,31 @@ func (s *Server) toolDiff(ctx context.Context, raw json.RawMessage) (any, error)
 		return nil, fmt.Errorf("invalid branch name: %q", baseBranch)
 	}
 
-	// Run git diff.
-	diffArgs := []string{"-C", workDir, "diff"}
+	// Two-section diff. Bug 2026-04-29: prior single `git diff origin/<base>...HEAD`
+	// only showed commits since base, hiding 4 staged files / 356 insertions
+	// during operator triage of a paused workflow. Always include the
+	// uncommitted (working tree vs HEAD) section so a paused-mid-pipeline
+	// workspace is never reported as empty.
+	const sectionCap = 25000
+	var sections []string
+
 	if baseBranch != "" {
-		diffArgs = append(diffArgs, "origin/"+baseBranch+"...HEAD")
-	}
-	if args.StatOnly {
-		diffArgs = append(diffArgs, "--stat")
-	}
-
-	out, err := exec.CommandContext(ctx, "git", diffArgs...).Output()
-	if err != nil {
-		return nil, fmt.Errorf("git diff: %w", err)
+		committed, cerr := runGitDiff(ctx, workDir, args.StatOnly, "origin/"+baseBranch+"...HEAD")
+		if cerr != nil {
+			committed = "[error: " + cerr.Error() + "]"
+		}
+		sections = append(sections,
+			"=== Committed since origin/"+baseBranch+" ===\n"+capDiffSection(committed, sectionCap))
 	}
 
-	diff := string(out)
+	uncommitted, uerr := runGitDiff(ctx, workDir, args.StatOnly, "HEAD")
+	if uerr != nil {
+		uncommitted = "[error: " + uerr.Error() + "]"
+	}
+	sections = append(sections,
+		"=== Uncommitted (staged + unstaged) ===\n"+capDiffSection(uncommitted, sectionCap))
+
+	diff := strings.Join(sections, "\n\n")
 	truncated := false
 	if len(diff) > 50000 {
 		diff = diff[:50000]
@@ -577,6 +587,29 @@ func (s *Server) toolDiff(ctx context.Context, raw json.RawMessage) (any, error)
 		"diff":        diff,
 		"truncated":   truncated,
 	}, nil
+}
+
+// runGitDiff executes `git -C <workDir> diff [--stat] <ref>` and returns
+// stdout. Stderr is intentionally discarded — git writes warnings (e.g.
+// missing remote ref) there that would mask the actual diff for callers.
+func runGitDiff(ctx context.Context, workDir string, statOnly bool, ref string) (string, error) {
+	cmdArgs := []string{"-C", workDir, "diff"}
+	if statOnly {
+		cmdArgs = append(cmdArgs, "--stat")
+	}
+	cmdArgs = append(cmdArgs, ref)
+	out, err := exec.CommandContext(ctx, "git", cmdArgs...).Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func capDiffSection(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "\n... (section truncated) ...\n"
 }
 
 func (s *Server) toolPRDiff(ctx context.Context, raw json.RawMessage) (any, error) {

@@ -146,6 +146,14 @@ type VerdictPayload struct {
 	// demoted from FAIL. Forensics-only — engine ignores it. Empty zero value
 	// preserves back-compat for events written before this field existed.
 	Source VerdictSource `json:"verdict_source,omitempty"`
+	// RawDiagnostics carries the unfiltered tail of the captured output that
+	// produced this verdict — typically the last ~64 lines of stack/test
+	// stdout+stderr before any human-readable filtering. Populated by
+	// quality-gate so the developer's feedback prompt can act on the raw
+	// diagnostics even when the human-readable Issue.Description has been
+	// trimmed of Docker/multipass lifecycle noise. Empty when the verdict
+	// source did not capture a diagnostic stream.
+	RawDiagnostics string `json:"raw_diagnostics,omitempty"`
 }
 
 // VerdictSource records which parser path produced a VerdictPayload. Used to
@@ -175,11 +183,16 @@ const (
 
 // FeedbackGeneratedPayload is emitted when feedback is prepared for a retry.
 type FeedbackGeneratedPayload struct {
-	TargetPhase string  `json:"target_phase"`          // phase to reschedule (e.g., "develop")
+	TargetPhase string  `json:"target_phase"`           // phase to reschedule (e.g., "develop")
 	SourcePhase string  `json:"source_phase,omitempty"` // phase that generated feedback (e.g., "review")
 	Iteration   int     `json:"iteration"`
 	Issues      []Issue `json:"issues"`
 	Summary     string  `json:"summary"`
+	// RawDiagnostics is forwarded from the source VerdictPayload so the
+	// developer's iteration prompt has the unfiltered tail of the failure
+	// stream, even when Issue.Description has been trimmed for human
+	// readability. Empty when the upstream verdict carried none.
+	RawDiagnostics string `json:"raw_diagnostics,omitempty"`
 }
 
 // FeedbackConsumedPayload is emitted when a handler acknowledges feedback.
@@ -280,6 +293,14 @@ const (
 	// before or after the backend call — prompt build failure, context
 	// load failure, etc. Deterministic; retry rarely helps.
 	FailureKindHandlerError FailureKind = "handler_error"
+	// FailureKindOutputTruncated means the persona-runner's developer guard
+	// rail tripped: the handler produced suspiciously short output (< 64
+	// bytes) while the workspace had uncommitted changes — meaning the
+	// model wrote files correctly but Rick lost the descriptive output
+	// somewhere upstream (the 2026-04-29 `["sub"]` incident). Surfacing
+	// this as a failure pauses the workflow so the operator can inspect
+	// the workspace directly instead of running review/qa against garbage.
+	FailureKindOutputTruncated FailureKind = "output_truncated"
 )
 
 // PersonaFailedPayload is emitted when a persona handler fails.

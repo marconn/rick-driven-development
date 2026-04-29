@@ -523,11 +523,12 @@ func (w *WorkflowAggregate) decideVerdictRendered(env event.Envelope) ([]event.E
 	}
 
 	fbPayload := event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: targetPersona,
-		SourcePhase: sourcePersona,
-		Iteration:   iteration,
-		Issues:      v.Issues,
-		Summary:     v.Summary,
+		TargetPhase:    targetPersona,
+		SourcePhase:    sourcePersona,
+		Iteration:      iteration,
+		Issues:         v.Issues,
+		Summary:        v.Summary,
+		RawDiagnostics: v.RawDiagnostics,
 	})
 	return []event.Envelope{
 		event.New(event.FeedbackGenerated, 1, fbPayload).
