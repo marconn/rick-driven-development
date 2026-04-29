@@ -62,6 +62,24 @@ type WorkflowAggregate struct {
 	// source so a flaky quality-gate can't mask an independent reviewer
 	// failure, and vice versa.
 	LastVerdictFingerprint map[string]string
+	// LastFailingVerdict caches the most recent failing VerdictPayload's
+	// SourcePhase + RawDiagnostics per resolved target persona, so
+	// decideWorkflowResumed can rehydrate them into the FeedbackGenerated it
+	// re-emits after operator guidance. Without this, every operator resume
+	// strips the developer's iteration prompt of the unfiltered failure tail
+	// (the same bug class as the 2026-04-29 incident, just on the resume
+	// path that PR-D didn't cover). Last-write-wins per target — older
+	// diagnostics aren't useful when the operator just intervened.
+	LastFailingVerdict map[string]cachedVerdict
+}
+
+// cachedVerdict carries the subset of VerdictPayload that
+// decideWorkflowResumed needs to reconstruct a FeedbackGenerated after a
+// pause. Kept narrow on purpose — caching the full payload would bloat the
+// aggregate snapshot for fields the resume path doesn't read.
+type cachedVerdict struct {
+	SourcePhase    string
+	RawDiagnostics string
 }
 
 // MaxAutoRetriesPerPersona caps how many automatic retries the engine
@@ -81,6 +99,7 @@ func NewWorkflowAggregate(id string) *WorkflowAggregate {
 		FeedbackPending:        make(map[string]string),
 		AutoRetries:            make(map[string]int),
 		LastVerdictFingerprint: make(map[string]string),
+		LastFailingVerdict:     make(map[string]cachedVerdict),
 		MaxIterations:          3,
 	}
 }
@@ -213,10 +232,18 @@ func (w *WorkflowAggregate) Apply(env event.Envelope) {
 		if w.LastVerdictFingerprint == nil {
 			w.LastVerdictFingerprint = make(map[string]string)
 		}
+		if w.LastFailingVerdict == nil {
+			w.LastFailingVerdict = make(map[string]cachedVerdict)
+		}
 		if vp.Outcome == event.VerdictFail {
 			w.LastVerdictFingerprint[key] = verdictFingerprint(vp)
+			w.LastFailingVerdict[target] = cachedVerdict{
+				SourcePhase:    source,
+				RawDiagnostics: vp.RawDiagnostics,
+			}
 		} else {
 			delete(w.LastVerdictFingerprint, key)
+			delete(w.LastFailingVerdict, target)
 		}
 
 	default:
@@ -606,10 +633,18 @@ func (w *WorkflowAggregate) decideWorkflowResumed(env event.Envelope) ([]event.E
 			// doesn't immediately hit the limit again.
 			w.MaxIterations = count + 1
 
+			// Rehydrate the last failing verdict's SourcePhase + RawDiagnostics
+			// (cached during Apply(VerdictRendered)) so the developer's next
+			// iteration prompt isn't stripped of the unfiltered failure tail.
+			// Empty cache (e.g., resume from a non-failure pause) leaves the
+			// fields zero — formatFeedback skips the section, no error.
+			cached := w.LastFailingVerdict[phase]
 			fbPayload := event.MustMarshal(event.FeedbackGeneratedPayload{
-				TargetPhase: phase,
-				Iteration:   count + 1,
-				Summary:     "re-triggered after operator guidance",
+				TargetPhase:    phase,
+				SourcePhase:    cached.SourcePhase,
+				Iteration:      count + 1,
+				Summary:        "re-triggered after operator guidance",
+				RawDiagnostics: cached.RawDiagnostics,
 			})
 			return []event.Envelope{
 				event.New(event.FeedbackGenerated, 1, fbPayload).
