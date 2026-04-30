@@ -89,6 +89,7 @@ Set in `~/.config/rick/env` or shell.
 | Variable | Effect |
 |---|---|
 | `RICK_DISABLE_QUALITY_GATE` | Strip quality-gate from all DAGs. Use on VM-less machines. |
+| `RICK_MAX_ITERATION` | Override every workflow's `MaxIterations` (positive int). Replaces per-workflow hardcoded values at registration time. Unset = baked-in defaults (3 for most code-producing workflows, 1-2 for plan/PR workflows). |
 | `RICK_MAX_WORKFLOWS` | Concurrent workflow cap (0 = unlimited). Excess requests queue. |
 | `RICK_REPOS_PATH` | Root for isolated workspaces + repo clones. Required by workspace/wave tools. |
 | `RICK_CLAUDE_BIN` / `RICK_GEMINI_BIN` / `RICK_CODEX_BIN` | CLI binary paths. |

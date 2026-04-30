@@ -1,6 +1,31 @@
 package engine
 
-import "github.com/marconn/rick-event-driven-development/internal/event"
+import (
+	"os"
+	"strconv"
+
+	"github.com/marconn/rick-event-driven-development/internal/event"
+)
+
+// maxIterationsEnvVar is the override for every registered workflow's
+// MaxIterations. When set to a positive integer, it replaces the per-workflow
+// hardcoded value. Centralised so the Engine and PersonaRunner agree on the
+// effective cap without each call site having to remember to apply it.
+const maxIterationsEnvVar = "RICK_MAX_ITERATION"
+
+// applyEnvOverrides returns a copy of def with environment-driven overrides
+// applied. Currently only RICK_MAX_ITERATION; future per-workflow overrides
+// (e.g., RICK_MAX_ITERATION_GITHUB_DEV) can layer in here without touching
+// callers. Idempotent: safe to call from both Engine.RegisterWorkflow and
+// PersonaRunner.RegisterWorkflow so both internal stores are consistent.
+func applyEnvOverrides(def WorkflowDef) WorkflowDef {
+	if v := os.Getenv(maxIterationsEnvVar); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			def.MaxIterations = n
+		}
+	}
+	return def
+}
 
 // WorkflowDef defines a workflow's execution topology and completion criteria.
 // Graph declares the DAG — each handler maps to its predecessors. Required

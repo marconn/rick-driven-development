@@ -192,7 +192,12 @@ func (e *Engine) ThrottleSnapshot() ThrottleSnapshot {
 
 // RegisterWorkflow registers a workflow definition by ID. Safe to call after
 // Start() — concurrent reads in the process loop are protected by a mutex.
+//
+// Applies env-var overrides (RICK_MAX_ITERATION) before storage so the engine's
+// authoritative copy reflects the runtime configuration without requiring
+// every workflow factory to consult the env itself.
 func (e *Engine) RegisterWorkflow(def WorkflowDef) {
+	def = applyEnvOverrides(def)
 	e.workflowsMu.Lock()
 	e.workflows[def.ID] = def
 	e.workflowsMu.Unlock()

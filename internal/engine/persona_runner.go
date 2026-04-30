@@ -275,7 +275,13 @@ func (r *PersonaRunner) releaseSlot(corrID string) {
 
 // RegisterWorkflow registers a workflow definition for DAG-based dispatch.
 // Must be called before Start() for built-in workflows, or after for dynamic ones.
+//
+// Applies env-var overrides (RICK_MAX_ITERATION) before storage so the runner's
+// view of the def matches the engine's — both call this on the same factory
+// output, and both must apply the same overrides for max-iter behaviour to
+// be consistent across the lifecycle and dispatch sides.
 func (r *PersonaRunner) RegisterWorkflow(def WorkflowDef) {
+	def = applyEnvOverrides(def)
 	r.resolver.registerWorkflow(def)
 }
 
