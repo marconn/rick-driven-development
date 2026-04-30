@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -471,6 +472,12 @@ func (r *PersonaRunner) UnregisterHook(persona string, hookName string) {
 
 // subscribeWorkflowStarted subscribes to all workflow.started.* events to
 // populate the correlationID → workflowID cache.
+//
+// Uses WithSync so the cache is populated inline in the publisher's goroutine.
+// Async subscription was raced by the root-handler wrap on workflow.started.<id>
+// — the wrap could reach frontRunAdvisoryPause (which depends on the cache)
+// before the async cache update fired, defaulting frontRunAdvisoryPause's
+// "unknown workflow → don't pre-pause" fallback and leaving the race open.
 func (r *PersonaRunner) subscribeWorkflowStarted() {
 	unsub := r.bus.SubscribeAll(func(_ context.Context, env event.Envelope) error {
 		if !strings.HasPrefix(string(env.Type), "workflow.started.") {
@@ -490,7 +497,7 @@ func (r *PersonaRunner) subscribeWorkflowStarted() {
 			r.resolver.cacheWorkflowID(corrID, workflowID)
 		}
 		return nil
-	}, eventbus.WithName("persona-runner:workflow-cache"))
+	}, eventbus.WithName("persona-runner:workflow-cache"), eventbus.WithSync())
 	r.unsubs = append(r.unsubs, unsub)
 }
 
@@ -752,7 +759,30 @@ func (r *PersonaRunner) enqueueAndDrain(h handler.Handler, env event.Envelope, c
 	go func() {
 		defer r.wg.Done()
 		for {
+			// Drain-time pause check. The wrap pause check at line 677 is
+			// the fast path, but it races with engine.processLoop's
+			// VerdictRendered → WorkflowPaused → pauser.pause sequence: a
+			// PersonaCompleted published in the same batch as an advisory
+			// verdict can have its wrap fire (and pass the pre-enqueue
+			// check) before pauser.pause is set. By the time the drain
+			// reaches this point, the engine's FIFO has typically processed
+			// the verdict and the sync-ified pause subscription has flipped
+			// the state — so we catch any racy enqueues here. Items found
+			// while paused are moved to the blocked list for replay on
+			// resume, preserving priority order.
 			q.mu.Lock()
+			if r.pauser.isPaused(env.CorrelationID) {
+				for {
+					item, ok := q.pop()
+					if !ok {
+						break
+					}
+					r.pauser.addBlocked(env.CorrelationID, h, item.env)
+				}
+				q.draining = false
+				q.mu.Unlock()
+				return
+			}
 			item, ok := q.pop()
 			if !ok {
 				q.draining = false
@@ -899,9 +929,66 @@ func (r *PersonaRunner) executeDispatch(h handler.Handler, env event.Envelope, c
 		}
 	}
 
+	// Front-run the engine's deterministic pause emission for advisory verdicts.
+	//
+	// Background: when a handler returns an advisory-fail VerdictRendered, the
+	// engine's aggregate is guaranteed to emit WorkflowPaused (advisory branch
+	// in decideVerdictRendered). But that emission happens asynchronously in
+	// engine.processLoop, racing against the wraps fired by PersonaCompleted
+	// (which is also in this batch). If a downstream handler's wrap reaches its
+	// pause check (line 677) before the engine's pauser.pause runs, the wrap
+	// enqueues and the drain dispatches on top of an advisory pause.
+	//
+	// Setting pauser.pause here, BEFORE we publish anything, makes the pause
+	// visible to every wrap fired by this batch. Idempotent with the engine's
+	// later pauser.pause via the WorkflowPaused sync subscription.
+	r.frontRunAdvisoryPause(env.CorrelationID, allEvents)
+
 	r.persister.persistAndPublish(r.ctx, aggregateID, allEvents)
 }
 
+// frontRunAdvisoryPause inspects a handler's emitted batch for an advisory-fail
+// VerdictRendered and, if found, calls pauser.pause iff the engine would
+// actually escalate (i.e., the verdict's targetPhase resolves to a required
+// persona for this workflow). Skipping the pause for non-required phases
+// avoids stalling review-only workflows whose verdicts are output, not gates.
+func (r *PersonaRunner) frontRunAdvisoryPause(correlationID string, events []event.Envelope) {
+	if correlationID == "" {
+		return
+	}
+	for _, ev := range events {
+		if ev.Type != event.VerdictRendered {
+			continue
+		}
+		var v event.VerdictPayload
+		if err := json.Unmarshal(ev.Payload, &v); err != nil {
+			continue
+		}
+		if !v.Advisory || v.Outcome != event.VerdictFail {
+			continue
+		}
+		// Only pre-pause if the engine would actually escalate. This mirrors
+		// the isRequiredPersona guard at aggregate.go:502 + the advisory
+		// branch at :510.
+		wfID, ok := r.resolver.resolveWorkflowID(correlationID)
+		if !ok {
+			// Unknown correlation — defer to the engine's authoritative
+			// decision rather than guessing. Race window remains for this
+			// (rare) case but matches pre-fix behavior.
+			return
+		}
+		def, ok := r.resolver.getWorkflowDef(wfID)
+		if !ok {
+			return
+		}
+		target := def.ResolvePhase(v.Phase)
+		if !slices.Contains(def.Required, target) {
+			return
+		}
+		r.pauser.pause(correlationID)
+		return
+	}
+}
 
 // =============================================================================
 // Pause / Resume / Cancel
@@ -909,6 +996,16 @@ func (r *PersonaRunner) executeDispatch(h handler.Handler, env event.Envelope, c
 
 
 // subscribePauseResume wires the PersonaRunner to pause/resume events.
+//
+// The pause subscription uses eventbus.WithSync so that pauser.pause runs
+// inline in the publisher's goroutine. This closes a race where a downstream
+// handler's wrap goroutine (fired async on a PersonaCompleted that was
+// published in the same batch as the verdict that pauses the workflow) could
+// pass its pause check at line 677 BEFORE pauser.pause was set — and then
+// enqueue + dispatch on top of an advisory pause. With WithSync, by the time
+// bus.Publish(WorkflowPaused) returns from engine.processLoop, the pause
+// state is visible to the drain goroutine's pause check (see drain loop in
+// enqueueAndDrain).
 func (r *PersonaRunner) subscribePauseResume() {
 	unsub1 := r.bus.Subscribe(event.WorkflowPaused, func(_ context.Context, env event.Envelope) error {
 		corrID := env.CorrelationID
@@ -918,7 +1015,7 @@ func (r *PersonaRunner) subscribePauseResume() {
 		r.pauser.pause(corrID)
 		r.logger.Info("persona runner: workflow paused", slog.String("correlation", corrID))
 		return nil
-	}, eventbus.WithName("persona-runner:pause"))
+	}, eventbus.WithName("persona-runner:pause"), eventbus.WithSync())
 
 	unsub2 := r.bus.Subscribe(event.WorkflowResumed, func(_ context.Context, env event.Envelope) error {
 		corrID := env.CorrelationID
