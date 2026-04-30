@@ -115,6 +115,11 @@ func TestQualityGateNoWorkspace(t *testing.T) {
 	}
 }
 
+// TestQualityGateNoRunScript: when the workspace has no run.sh and no
+// Makefile, the gate cannot drive any quality checks. It must escalate as
+// an advisory-fail (operator pause), NOT silently pass — historically the
+// silent-pass path let unverified diffs through to the committer on
+// Makefile-driven repos like hulilabs/huli.
 func TestQualityGateNoRunScript(t *testing.T) {
 	tmp := t.TempDir()
 
@@ -124,7 +129,7 @@ func TestQualityGateNoRunScript(t *testing.T) {
 		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-2"),
 	}
 
-	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: "stack", timeout: 300}
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: "stack", timeout: 300, logger: slog.Default()}
 	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-2")
 
 	got, err := h.Handle(context.Background(), triggerEvt)
@@ -134,7 +139,69 @@ func TestQualityGateNoRunScript(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 verdict event, got %d", len(got))
 	}
-	assertVerdictOutcome(t, got[0], event.VerdictPass)
+	assertVerdictOutcome(t, got[0], event.VerdictFail)
+
+	var vp event.VerdictPayload
+	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
+		t.Fatal(err)
+	}
+	if !vp.Advisory {
+		t.Errorf("verdict must be Advisory=true so engine escalates to operator, got Advisory=%v", vp.Advisory)
+	}
+	if !strings.Contains(vp.Summary, "no_run_sh") {
+		t.Errorf("summary should name the kind 'no_run_sh', got: %s", vp.Summary)
+	}
+	if len(vp.Issues) != 1 || vp.Issues[0].Category != "infrastructure" {
+		t.Errorf("expected one infrastructure issue, got: %+v", vp.Issues)
+	}
+	// Workspace path must appear in description so operator UI shows where
+	// to manually verify.
+	if !strings.Contains(vp.Issues[0].Description, tmp) {
+		t.Errorf("issue description must include workspace path %q for operator action; got: %s", tmp, vp.Issues[0].Description)
+	}
+}
+
+// TestQualityGate_NoRunScript_WithMakefile names the Makefile in the
+// operator-facing description so the resume-after-manual-verify loop is
+// concrete instead of abstract. Without this, Makefile-driven repos
+// (hulilabs/huli, etc.) generate pauses with no actionable next step,
+// driving operators toward auto-resume without checking.
+func TestQualityGate_NoRunScript_WithMakefile(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "Makefile"), []byte("check:\n\techo ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-mk"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-mk"),
+	}
+
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: "stack", timeout: 300, logger: slog.Default()}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-mk")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var vp event.VerdictPayload
+	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
+		t.Fatal(err)
+	}
+	if !vp.Advisory {
+		t.Fatalf("verdict must be Advisory=true even when Makefile is present (we still don't drive Make), got: %+v", vp)
+	}
+	if len(vp.Issues) != 1 {
+		t.Fatalf("expected one issue, got %d", len(vp.Issues))
+	}
+	desc := vp.Issues[0].Description
+	if !strings.Contains(desc, "Makefile") {
+		t.Errorf("description should name the Makefile so operator knows what to run; got: %s", desc)
+	}
+	if !strings.Contains(desc, "make check") {
+		t.Errorf("description should suggest `make check`; got: %s", desc)
+	}
 }
 
 func TestQualityGatePassingChecks(t *testing.T) {
@@ -286,7 +353,10 @@ exit 1
 	}
 }
 
-func TestQualityGateNoComposeFileSkips(t *testing.T) {
+// TestQualityGateNoComposeFileEscalates: stack returning no_compose_file
+// means we cannot drive checks even with run.sh present. Same gap as
+// missing-run.sh — escalate as advisory rather than silently passing.
+func TestQualityGateNoComposeFileEscalates(t *testing.T) {
 	tmp := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -301,7 +371,7 @@ func TestQualityGateNoComposeFileSkips(t *testing.T) {
 		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-7"),
 	}
 
-	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 300}
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 300, logger: slog.Default()}
 	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-7")
 
 	got, err := h.Handle(context.Background(), triggerEvt)
@@ -311,15 +381,17 @@ func TestQualityGateNoComposeFileSkips(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 verdict event, got %d", len(got))
 	}
-	// Stack-level errors should result in a pass (skip), not a failure.
-	assertVerdictOutcome(t, got[0], event.VerdictPass)
+	assertVerdictOutcome(t, got[0], event.VerdictFail)
 
 	var vp event.VerdictPayload
 	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
 		t.Fatal(err)
 	}
-	if vp.Summary != "stack unavailable (no_compose_file), skipping quality checks" {
-		t.Errorf("unexpected summary: %s", vp.Summary)
+	if !vp.Advisory {
+		t.Errorf("verdict must be Advisory=true so engine escalates, got Advisory=%v", vp.Advisory)
+	}
+	if !strings.Contains(vp.Summary, "stack_no_compose_file") {
+		t.Errorf("summary should name kind 'stack_no_compose_file', got: %s", vp.Summary)
 	}
 }
 
@@ -644,7 +716,9 @@ exit 1
 }
 
 // TestQualityGateStackRepoNotFound verifies that repo_not_found stack errors
-// are treated as infrastructure skip (pass), just like no_compose_file.
+// escalate as advisory-fail (operator pause) — Rick cannot verify the diff
+// against a missing workspace, so silently passing would be a confidence
+// regression.
 func TestQualityGateStackRepoNotFound(t *testing.T) {
 	tmp := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
@@ -664,24 +738,29 @@ exit 31
 		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-norepo"),
 	}
 
-	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 300}
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 300, logger: slog.Default()}
 	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-norepo")
 
 	got, err := h.Handle(context.Background(), triggerEvt)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertVerdictOutcome(t, got[0], event.VerdictPass)
+	assertVerdictOutcome(t, got[0], event.VerdictFail)
 
 	var vp event.VerdictPayload
 	_ = json.Unmarshal(got[0].Payload, &vp)
-	if !strings.Contains(vp.Summary, "repo_not_found") {
-		t.Errorf("summary should mention repo_not_found, got: %s", vp.Summary)
+	if !vp.Advisory {
+		t.Errorf("verdict must be Advisory=true, got Advisory=%v", vp.Advisory)
+	}
+	if !strings.Contains(vp.Summary, "stack_repo_not_found") {
+		t.Errorf("summary should name kind 'stack_repo_not_found', got: %s", vp.Summary)
 	}
 }
 
 // TestQualityGateStackMultipassNotInstalled verifies that
-// multipass_not_installed stack errors are treated as infrastructure skip.
+// multipass_not_installed stack errors escalate as advisory-fail. The
+// operator-facing description must surface the install instruction (or
+// the RICK_DISABLE_QUALITY_GATE bypass) so the resume action is concrete.
 func TestQualityGateStackMultipassNotInstalled(t *testing.T) {
 	tmp := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmp, "run.sh"), []byte("#!/bin/bash\n"), 0o755); err != nil {
@@ -701,19 +780,25 @@ exit 31
 		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-nomp"),
 	}
 
-	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 300}
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 300, logger: slog.Default()}
 	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-nomp")
 
 	got, err := h.Handle(context.Background(), triggerEvt)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertVerdictOutcome(t, got[0], event.VerdictPass)
+	assertVerdictOutcome(t, got[0], event.VerdictFail)
 
 	var vp event.VerdictPayload
 	_ = json.Unmarshal(got[0].Payload, &vp)
-	if !strings.Contains(vp.Summary, "multipass_not_installed") {
-		t.Errorf("summary should mention multipass_not_installed, got: %s", vp.Summary)
+	if !vp.Advisory {
+		t.Errorf("verdict must be Advisory=true, got Advisory=%v", vp.Advisory)
+	}
+	if !strings.Contains(vp.Summary, "stack_multipass_not_installed") {
+		t.Errorf("summary should name kind 'stack_multipass_not_installed', got: %s", vp.Summary)
+	}
+	if !strings.Contains(vp.Issues[0].Description, "RICK_DISABLE_QUALITY_GATE") {
+		t.Errorf("issue description should mention the bypass env var; got: %s", vp.Issues[0].Description)
 	}
 }
 

@@ -125,7 +125,12 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 
 	runScript := filepath.Join(wsPath, "run.sh")
 	if _, statErr := os.Stat(runScript); os.IsNotExist(statErr) {
-		return h.passVerdict("no run.sh found, skipping quality checks"), nil
+		// We cannot drive this repo's build system. Escalate as advisory
+		// rather than silently passing — the operator must verify the
+		// developer's diff manually before approving the commit. Surface
+		// the alternative build runner (Makefile) when present so the
+		// operator's resume action is clear, not a guess.
+		return h.unverifiableVerdict(env.CorrelationID, wsPath, "no_run_sh", reasonNoRunScript(wsPath)), nil
 	}
 
 	// Docs-only fast-pass: if every modified file is a .md/docs/* path,
@@ -168,8 +173,11 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 		if runErr != nil {
 			// Stack-level errors (no compose file, repo not found, stack binary
 			// missing) — the repo doesn't support stack-based quality checks.
+			// Same gap as the missing-run.sh path: we cannot verify the diff,
+			// so escalate as advisory rather than silently passing.
 			if result.isStackError() {
-				return h.passVerdict(fmt.Sprintf("stack unavailable (%s), skipping quality checks", result.Code)), nil
+				h.destroyKeptStacks(ctx, keptStacks)
+				return h.unverifiableVerdict(env.CorrelationID, wsPath, "stack_"+result.Code, reasonStackUnavailable(result.Code, result.Message)), nil
 			}
 
 			// Always save full raw output to debug dir. Before this change the
@@ -567,6 +575,72 @@ func (h *QualityGateHandler) failVerdict(summary string, issues []event.Issue, r
 			Summary:        summary,
 			RawDiagnostics: rawDiagnostics,
 		})).WithSource("handler:" + h.name),
+	}
+}
+
+// unverifiableVerdict emits an advisory-fail verdict for cases where the
+// quality-gate has no path to actually run lint/test on this repo (no run.sh
+// at the workspace root, or stack returned an infrastructure-level error).
+// The summary leads with the structural cause (kind) so operators can tell
+// "we cannot verify" from "we ran and it failed". The Issue.Description
+// includes the workspace path and any detectable build-runner alternative
+// (Makefile) so the operator's manual verification step is named, not
+// guessed at — directly addressing the pause-fatigue risk.
+func (h *QualityGateHandler) unverifiableVerdict(correlationID, wsPath, kind, reason string) []event.Envelope {
+	h.logger.Info("quality-gate: unverifiable, escalating to operator",
+		slog.String("correlation", correlationID),
+		slog.String("kind", kind),
+		slog.String("workspace", wsPath),
+	)
+	desc := fmt.Sprintf(
+		"Rick's quality-gate cannot run on this workspace.\n\n"+
+			"Workspace: %s\nReason: %s\n\n"+
+			"Operator action: verify the developer's diff manually (build / lint / "+
+			"test using whatever runner this repo supports) and resume the workflow "+
+			"to allow the committer to proceed. The diff has been reviewed by the "+
+			"reviewer and qa personas but not actually executed.",
+		wsPath, reason,
+	)
+	return h.advisoryFailVerdict(
+		fmt.Sprintf("%s — quality checks cannot run; escalating to operator", kind),
+		[]event.Issue{{
+			Severity:    "major",
+			Category:    "infrastructure",
+			Description: desc,
+		}},
+		"", // no raw diagnostics — nothing was executed
+	)
+}
+
+// reasonNoRunScript builds the operator-facing reason text for a missing
+// run.sh. When a Makefile is present, name it explicitly so the operator's
+// manual verification step is concrete (e.g., "run `make check`") rather
+// than abstract.
+func reasonNoRunScript(wsPath string) string {
+	if _, err := os.Stat(filepath.Join(wsPath, "Makefile")); err == nil {
+		return "no run.sh at the workspace root, but a Makefile is present — operator can verify with `make check` (or whichever target the repo defines)"
+	}
+	return "no run.sh at the workspace root and no Makefile fallback — Rick has no driver for this repo's build system"
+}
+
+// reasonStackUnavailable builds the operator-facing reason text for stack
+// infrastructure errors. The error code distinguishes user-actionable issues
+// (multipass not installed) from environmental ones (no compose file).
+func reasonStackUnavailable(code, message string) string {
+	switch code {
+	case "no_compose_file":
+		return "stack could not find a docker-compose.yml at the workspace root — this repo's compose layout is non-standard or absent (e.g., compose lives under deploy/docker/)"
+	case "repo_not_found":
+		return "stack could not find the workspace path it was given — this is likely a deploy bug; check the workspace clone exists"
+	case "multipass_not_installed":
+		return "stack requires multipass for VM isolation; multipass is not installed on this host (install it or set RICK_DISABLE_QUALITY_GATE=1 to bypass the gate entirely)"
+	case "multipass_error":
+		if message != "" {
+			return "stack's multipass invocation failed: " + message
+		}
+		return "stack's multipass invocation failed (see logs)"
+	default:
+		return "stack returned an infrastructure error (" + code + ")"
 	}
 }
 
