@@ -49,15 +49,17 @@ func TestE2EFeedbackLoopMaxIterationsTerminates(t *testing.T) {
 		stubHandler: stubHandler{
 			name: "reviewer",
 			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
-				reviewRuns.Add(1)
-				// Always fail — never passes.
+				n := reviewRuns.Add(1)
+				// Always fail — never passes. Verdict summary varies per
+				// iteration so the byte-identical fingerprint guard does
+				// NOT preempt the max-iter exit this test is exercising.
 				// Uses phase verbs ("develop", not "developer") to match real handler behavior.
 				return []event.Envelope{
 					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
 						Phase:       "develop",
 						SourcePhase: "review",
 						Outcome:     event.VerdictFail,
-						Summary:     "code is bad",
+						Summary:     fmt.Sprintf("code is bad (iter %d)", n),
 					})),
 				}, nil
 			},
@@ -1617,11 +1619,20 @@ func TestAggregate_IdenticalVerdictDedupePauses(t *testing.T) {
 		t.Fatalf("first verdict: expected FeedbackGenerated, got %v", out1)
 	}
 
-	// Apply both the verdict (fingerprint) and the feedback (count++) so the
-	// aggregate reflects the real Engine flow before the second decision.
-	agg.Apply(env1)
+	// Apply the engine-emitted VerdictTracked mirror (which is what production
+	// folds onto the workflow aggregate after Decide returns) and the
+	// matching FeedbackGenerated. Pre-fix this test used Apply(VerdictRendered)
+	// directly — that branch existed but was dead in production because
+	// VerdictRendered lives on the persona-scoped aggregate, not the workflow
+	// aggregate. The test passed despite the production bug; switching to
+	// VerdictTracked here exercises the actual production code path.
 	agg.Apply(event.Envelope{
-		Version: 2, Type: event.FeedbackGenerated,
+		Version: 2, Type: event.VerdictTracked,
+		AggregateID: "wf-dedup", CorrelationID: "corr-dedup",
+		Payload: event.MustMarshal(verdict),
+	})
+	agg.Apply(event.Envelope{
+		Version: 3, Type: event.FeedbackGenerated,
 		Payload: event.MustMarshal(event.FeedbackGeneratedPayload{
 			TargetPhase: "developer", SourcePhase: "quality-gate", Iteration: 1,
 		}),
@@ -1629,7 +1640,7 @@ func TestAggregate_IdenticalVerdictDedupePauses(t *testing.T) {
 
 	// Second verdict with byte-identical payload — must escalate.
 	env2 := event.Envelope{
-		Version: 3, Type: event.VerdictRendered,
+		Version: 4, Type: event.VerdictRendered,
 		AggregateID: "wf-dedup", CorrelationID: "corr-dedup",
 		Payload: event.MustMarshal(verdict),
 	}
@@ -1674,9 +1685,16 @@ func TestAggregate_DifferentVerdictsDoNotDedup(t *testing.T) {
 	if _, err := agg.Decide(env1); err != nil {
 		t.Fatal(err)
 	}
-	agg.Apply(env1)
+	// Apply VerdictTracked (the production mirror) instead of VerdictRendered
+	// directly — see TestAggregate_IdenticalVerdictDedupePauses for the
+	// rationale.
 	agg.Apply(event.Envelope{
-		Version: 2, Type: event.FeedbackGenerated,
+		Version: 2, Type: event.VerdictTracked,
+		AggregateID: "wf-diff", CorrelationID: "corr-diff",
+		Payload: event.MustMarshal(first),
+	})
+	agg.Apply(event.Envelope{
+		Version: 3, Type: event.FeedbackGenerated,
 		Payload: event.MustMarshal(event.FeedbackGeneratedPayload{TargetPhase: "developer", SourcePhase: "quality-gate"}),
 	})
 
@@ -1716,12 +1734,180 @@ func TestAggregate_PassClearsFingerprint(t *testing.T) {
 		Summary: "ok",
 	}
 
-	agg.Apply(event.Envelope{Version: 1, Type: event.VerdictRendered, Payload: event.MustMarshal(failVerdict)})
+	// Apply VerdictTracked (the production mirror) — VerdictRendered itself
+	// lives on the persona-scoped aggregate and never lands on the workflow
+	// aggregate, so its old Apply branch was dead code.
+	agg.Apply(event.Envelope{Version: 1, Type: event.VerdictTracked, Payload: event.MustMarshal(failVerdict)})
 	if agg.LastVerdictFingerprint["quality-gate|developer"] == "" {
 		t.Fatal("fail verdict should have recorded a fingerprint")
 	}
-	agg.Apply(event.Envelope{Version: 2, Type: event.VerdictRendered, Payload: event.MustMarshal(passVerdict)})
+	agg.Apply(event.Envelope{Version: 2, Type: event.VerdictTracked, Payload: event.MustMarshal(passVerdict)})
 	if fp := agg.LastVerdictFingerprint["quality-gate|developer"]; fp != "" {
 		t.Errorf("pass verdict should have cleared fingerprint, got %q", fp)
+	}
+}
+
+// TestE2E_IdenticalVerdictDedupePauses_ProductionFlow is the production-path
+// regression for the identical-fingerprint guard. The unit test
+// TestAggregate_IdenticalVerdictDedupePauses passes only because it manually
+// calls Apply(VerdictRendered) between Decides — but VerdictRendered events
+// live on persona-scoped aggregates, not the workflow aggregate, so production
+// loadAggregate never replays them onto the workflow agg and
+// LastVerdictFingerprint is always empty when Decide reads it. Result: the
+// guard never fires, and identical-fail loops burn the full RICK_MAX_ITERATION
+// budget instead of escalating at 2.
+//
+// This test drives the full Engine + Store flow: two byte-identical
+// VerdictRendered events from the quality-gate persona aggregate, expecting
+// WorkflowPaused on the second. Without the VerdictTracked mirror, this test
+// observes a second FeedbackGenerated instead and times out waiting for the
+// pause.
+func TestE2E_IdenticalVerdictDedupePauses_ProductionFlow(t *testing.T) {
+	// Required includes a "committer" join on quality-gate so the workflow
+	// stays Running while we drive verdicts. Without that, the developer's
+	// first PersonaCompleted would satisfy Required and the workflow would
+	// auto-complete — VerdictRendered arriving on a Completed workflow is a
+	// no-op (decideVerdictRendered guards on Status==Running).
+	def := WorkflowDef{
+		ID:                "e2e-fp-dedup",
+		Required:          []string{"developer", "committer"},
+		MaxIterations:     5,
+		EscalateOnMaxIter: true,
+		PhaseMap:          corePhaseMap,
+		Graph: map[string][]string{
+			"developer": {},
+			"committer": {"developer"}, // never completes — see committer handler below
+		},
+		RetriggeredBy: map[string][]event.Type{"developer": {event.FeedbackGenerated}},
+	}
+
+	env := newE2EEnv(t, def)
+	ctx := context.Background()
+
+	// Developer is a no-op stub; we drive the verdicts ourselves so that the
+	// test is deterministic — no race between the developer running and the
+	// next verdict arriving.
+	_ = env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name:   "developer",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) { return nil, nil },
+		},
+		trigger: handler.Trigger{
+			Events: []event.Type{event.WorkflowStartedFor("e2e-fp-dedup"), event.FeedbackGenerated},
+		},
+	})
+
+	// Committer keeps the workflow Running by never returning normally — it
+	// returns ErrIncomplete so PersonaRunner persists nothing and never emits
+	// PersonaCompleted, leaving the workflow waiting forever (or until our
+	// pause assertion fires).
+	_ = env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "committer",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				return nil, handler.ErrIncomplete
+			},
+		},
+		trigger: handler.Trigger{
+			Events:        []event.Type{event.PersonaCompleted},
+			AfterPersonas: []string{"developer"},
+		},
+	})
+
+	// Watch for WorkflowPaused with the byte-identical reason. Subscribe before
+	// firing anything so we never miss it.
+	pausedCh := make(chan event.Envelope, 4)
+	unsub := env.bus.Subscribe(event.WorkflowPaused, func(_ context.Context, e event.Envelope) error {
+		if e.CorrelationID == "wf-fp-dedup" || e.AggregateID == "wf-fp-dedup" {
+			pausedCh <- e
+		}
+		return nil
+	}, eventbus.WithName("test:paused-watcher"))
+	t.Cleanup(unsub)
+
+	// Watch for FeedbackGenerated to count iterations.
+	var feedbackCount atomic.Int32
+	unsub2 := env.bus.Subscribe(event.FeedbackGenerated, func(_ context.Context, e event.Envelope) error {
+		if e.CorrelationID == "wf-fp-dedup" {
+			feedbackCount.Add(1)
+		}
+		return nil
+	}, eventbus.WithName("test:feedback-counter"))
+	t.Cleanup(unsub2)
+
+	env.start(ctx)
+	env.fireWorkflow(ctx, t, "wf-fp-dedup", "e2e-fp-dedup")
+
+	// Wait until the developer's PersonaCompleted has been processed before we
+	// inject the first verdict — otherwise verdict can arrive before the
+	// aggregate knows the workflow is even running.
+	time.Sleep(200 * time.Millisecond)
+
+	// Build a verdict whose fingerprint will be identical across both copies.
+	// The fingerprint hashes summary + sorted issue descriptions, so we use
+	// fixed strings.
+	verdict := event.MustMarshal(event.VerdictPayload{
+		Phase:       "develop",
+		SourcePhase: "quality-gate",
+		Outcome:     event.VerdictFail,
+		Issues: []event.Issue{{
+			Severity:    "major",
+			Category:    "correctness",
+			Description: "./run.sh test failed:\n[no output captured]",
+		}},
+		Summary: "test failed",
+	})
+
+	personaAgg := "wf-fp-dedup:persona:quality-gate"
+
+	// First fail verdict — must produce FeedbackGenerated, not pause.
+	v1 := event.New(event.VerdictRendered, 1, verdict).
+		WithAggregate(personaAgg, 1).
+		WithCorrelation("wf-fp-dedup").
+		WithSource("handler:quality-gate")
+	if err := env.store.Append(ctx, personaAgg, 0, []event.Envelope{v1}); err != nil {
+		t.Fatalf("append v1: %v", err)
+	}
+	if err := env.bus.Publish(ctx, v1); err != nil {
+		t.Fatalf("publish v1: %v", err)
+	}
+
+	// Wait for the first FeedbackGenerated so we know v1 was processed before v2 arrives.
+	deadline := time.Now().Add(3 * time.Second)
+	for feedbackCount.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if feedbackCount.Load() < 1 {
+		t.Fatal("first verdict did not produce FeedbackGenerated — workflow not running?")
+	}
+
+	// Second BYTE-IDENTICAL fail verdict — must escalate to WorkflowPaused.
+	v2 := event.New(event.VerdictRendered, 1, verdict).
+		WithAggregate(personaAgg, 2).
+		WithCorrelation("wf-fp-dedup").
+		WithSource("handler:quality-gate")
+	if err := env.store.Append(ctx, personaAgg, 1, []event.Envelope{v2}); err != nil {
+		t.Fatalf("append v2: %v", err)
+	}
+	if err := env.bus.Publish(ctx, v2); err != nil {
+		t.Fatalf("publish v2: %v", err)
+	}
+
+	select {
+	case got := <-pausedCh:
+		var p event.WorkflowPausedPayload
+		_ = json.Unmarshal(got.Payload, &p)
+		if !strings.Contains(p.Reason, "byte-identical") {
+			t.Errorf("expected pause reason to mention byte-identical, got: %s", p.Reason)
+		}
+	case <-time.After(5 * time.Second):
+		// Dump for diagnosis.
+		events, _ := env.store.LoadByCorrelation(ctx, "wf-fp-dedup")
+		t.Logf("=== correlation events (%d) ===", len(events))
+		for _, e := range events {
+			t.Logf("  %s (agg=%s)", e.Type, e.AggregateID)
+		}
+		t.Fatalf("expected WorkflowPaused on byte-identical second verdict; got none. feedbackCount=%d (a value of 2 means the dedup guard never fired in production flow)",
+			feedbackCount.Load())
 	}
 }

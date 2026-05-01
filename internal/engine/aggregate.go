@@ -211,13 +211,15 @@ func (w *WorkflowAggregate) Apply(env event.Envelope) {
 			w.FeedbackPending[p.SourcePhase] = p.TargetPhase
 		}
 
-	case event.VerdictRendered:
-		// Track fingerprint of failing verdicts so decideVerdictRendered can
-		// detect byte-identical failures across iterations. Apply is
-		// side-effect-free: we just record state so the next decision round
-		// can compare. Pass verdicts clear the slot so a transient fail
-		// followed by a pass doesn't trigger dedup on an unrelated later
-		// regression.
+	case event.VerdictTracked:
+		// VerdictTracked is the storage-only mirror of VerdictRendered on the
+		// workflow aggregate (the original lives on the persona-scoped
+		// aggregate, where loadAggregate(workflow) cannot see it). The mirror
+		// gives Apply something to fold so the identical-fingerprint dedup
+		// guard in decideVerdictRendered actually has prior-verdict state to
+		// compare against. Apply is side-effect-free: we just record state.
+		// Pass verdicts clear the slot so a transient fail followed by a pass
+		// doesn't trigger dedup on an unrelated later regression.
 		var vp event.VerdictPayload
 		_ = json.Unmarshal(env.Payload, &vp)
 		if w.WorkflowDef == nil {

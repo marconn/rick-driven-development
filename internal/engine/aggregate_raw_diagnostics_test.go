@@ -105,9 +105,12 @@ func TestDecideWorkflowResumed_RehydratesRawDiagnostics(t *testing.T) {
 
 	raw := "stderr tail from quality-gate\nconnection refused"
 
-	// Apply a failing verdict so the cache populates, and a matching
+	// Apply a failing verdict tracker so the cache populates, and a matching
 	// FeedbackGenerated so FeedbackCount[developer] reaches MaxIterations.
-	failVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+	// VerdictRendered itself lives on the persona-scoped aggregate; only
+	// VerdictTracked lands on the workflow aggregate, so that's the event
+	// Apply consumes for fingerprint/cache state.
+	failVerdict := event.New(event.VerdictTracked, 1, event.MustMarshal(event.VerdictPayload{
 		Phase:          "develop",
 		SourcePhase:    "quality-gate",
 		Outcome:        event.VerdictFail,

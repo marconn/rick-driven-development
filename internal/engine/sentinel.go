@@ -24,6 +24,7 @@ var internalEvents = map[event.Type]bool{
 	event.PersonaFailed:         true,
 	event.PersonaFailedTracked:  true,
 	event.VerdictRendered:       true,
+	event.VerdictTracked:        true,
 	event.FeedbackGenerated:     true,
 	event.FeedbackConsumed:      true,
 	event.TokenBudgetExceeded:   true,

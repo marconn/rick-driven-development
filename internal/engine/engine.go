@@ -452,6 +452,33 @@ func (e *Engine) tryProcessDecision(ctx context.Context, aggID string, env event
 	}
 	allEvents = append(allEvents, newEvents...)
 
+	// Mirror VerdictRendered onto the workflow aggregate as VerdictTracked so
+	// the byte-identical fingerprint dedup guard (decideVerdictRendered) has
+	// prior-verdict state to compare against on subsequent verdicts. Without
+	// this mirror, VerdictRendered events live only on the persona-scoped
+	// aggregate (<corr>:persona:<handler>) which loadAggregate(workflow_agg)
+	// never sees, and LastVerdictFingerprint stays empty across loads — the
+	// guard is dead code in production. Mirror is intentionally placed AFTER
+	// Decide: if it ran before, Apply would set LastVerdictFingerprint from
+	// the *current* verdict, which the *current* Decide would then read and
+	// falsely self-match. After-Decide means current Decide reads only PRIOR
+	// verdicts' fingerprints (rebuilt from earlier VerdictTracked replays),
+	// and the current verdict is recorded only for FUTURE Decides.
+	//
+	// Storage-only; not published on the bus, since VerdictRendered was
+	// already published by the handler. Version is computed as the next slot
+	// after all Decide outputs, since Decide numbers its events from
+	// agg.Version+1 without applying them in-place.
+	if env.Type == event.VerdictRendered && aggID != env.AggregateID {
+		nextVersion := agg.Version + len(newEvents) + 1
+		mirror := event.New(event.VerdictTracked, 1, env.Payload).
+			WithAggregate(agg.ID, nextVersion).
+			WithCausation(env.ID).
+			WithCorrelation(env.CorrelationID).
+			WithSource("engine:tracking")
+		allEvents = append(allEvents, mirror)
+	}
+
 	if len(allEvents) == 0 {
 		return nil, nil
 	}
@@ -505,13 +532,45 @@ func (e *Engine) loadAggregate(ctx context.Context, aggregateID string) (*Workfl
 		return nil, fmt.Errorf("engine: load events for %s: %w", aggregateID, err)
 	}
 
+	// Pre-attach WorkflowDef BEFORE the Apply loop so Apply branches that
+	// depend on WorkflowDef.PhaseMap (VerdictTracked → fingerprint dedup) or
+	// WorkflowDef.PartialReviewOnFailure (PersonaFailedTracked) actually fold
+	// state during replay. The original Apply→attach order silently no-op'd
+	// those branches on every load, leaving LastVerdictFingerprint state dead
+	// across restarts and after the workflow aggregate's first reload — which
+	// is the entire production lifetime, since every event is processed
+	// against a freshly-loaded aggregate.
+	//
+	// We scan for the WorkflowRequested envelope to extract WorkflowID
+	// without running Apply, then attach the registered def. The post-loop
+	// re-attach below stays as a safety net for the rare case where the
+	// registry mutates between scan and replay.
+	for _, env := range events {
+		if env.Type != event.WorkflowRequested {
+			continue
+		}
+		var p event.WorkflowRequestedPayload
+		if json.Unmarshal(env.Payload, &p) != nil || p.WorkflowID == "" {
+			break
+		}
+		e.workflowsMu.RLock()
+		if def, ok := e.workflows[p.WorkflowID]; ok {
+			agg.WorkflowDef = &def
+			agg.MaxIterations = def.MaxIterations
+		}
+		e.workflowsMu.RUnlock()
+		break
+	}
+
 	for _, env := range events {
 		agg.Apply(env)
 	}
 
 	// Attach WorkflowDef from registered workflows based on the workflow ID
 	// set by WorkflowRequested. MaxIterations on the aggregate is authoritative
-	// for Decide(), so sync it from the registered definition.
+	// for Decide(), so sync it from the registered definition. This second
+	// attach is a no-op when the pre-Apply attach above succeeded, but stays
+	// in place for back-compat with code paths that bypass the pre-scan.
 	if agg.WorkflowID != "" {
 		e.workflowsMu.RLock()
 		def, ok := e.workflows[agg.WorkflowID]

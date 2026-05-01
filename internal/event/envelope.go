@@ -69,6 +69,21 @@ const (
 	// last tracked completion and WorkflowRetried / WorkflowFailed. Never
 	// published to the bus; carries the same payload shape as PersonaFailed.
 	PersonaFailedTracked Type = "persona.failed.tracked"
+	// VerdictTracked is the storage-only mirror of VerdictRendered on the
+	// workflow aggregate. The original VerdictRendered lives on the
+	// persona-scoped aggregate (<corr>:persona:<handler>) where the source
+	// handler emitted it; that aggregate is never replayed when
+	// loadAggregate(<workflow_agg>) runs, so the workflow aggregate's
+	// LastVerdictFingerprint state can never be rebuilt from the
+	// persona-scoped event stream. Mirroring as VerdictTracked on the
+	// workflow aggregate gives Apply something to fold so the
+	// identical-fingerprint dedup guard in decideVerdictRendered actually
+	// fires on the second byte-identical failure (instead of staying
+	// dead code, as it did before this mirror existed). Mirror is appended
+	// AFTER Decide returns so the *current* verdict's fingerprint is not
+	// visible to the *current* Decide call (which would falsely self-match).
+	// Never published on the bus — diagnostic / state-rehydration only.
+	VerdictTracked Type = "verdict.tracked"
 
 	// Compensation
 	CompensationStarted   Type = "compensation.started"
