@@ -161,25 +161,120 @@ func TestQualityGateNoRunScript(t *testing.T) {
 	}
 }
 
-// TestQualityGate_NoRunScript_WithMakefile names the Makefile in the
-// operator-facing description so the resume-after-manual-verify loop is
-// concrete instead of abstract. Without this, Makefile-driven repos
-// (hulilabs/huli, etc.) generate pauses with no actionable next step,
-// driving operators toward auto-resume without checking.
-func TestQualityGate_NoRunScript_WithMakefile(t *testing.T) {
+// TestQualityGate_MakefileFallback_RunsMakeCheck verifies the runner-fallback
+// path: when run.sh is absent but the workspace's Makefile declares a
+// top-level `check:` target, the gate runs `make check` via stack instead of
+// advisory-pausing the workflow. Eliminates the Makefile-only-repo pauses
+// that accounted for ~35% of operator-pause noise on 2026-04-29..30.
+func TestQualityGate_MakefileFallback_RunsMakeCheck(t *testing.T) {
 	tmp := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmp, "Makefile"), []byte("check:\n\techo ok\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmp, "Makefile"),
+		[]byte("check: lint test\n\t@echo ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeStack := writeFakeStack(t, t.TempDir(), fakeStackSuccess())
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-mk-ok"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-mk-ok"),
+	}
+
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 300, logger: slog.Default()}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-mk-ok")
+
+	got, err := h.Handle(context.Background(), triggerEvt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 verdict event, got %d", len(got))
+	}
+	assertVerdictOutcome(t, got[0], event.VerdictPass)
+
+	var vp event.VerdictPayload
+	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
+		t.Fatal(err)
+	}
+	if vp.Advisory {
+		t.Errorf("verdict must NOT be Advisory when make check passes; got: %+v", vp)
+	}
+	if !strings.Contains(vp.Summary, "make check") {
+		t.Errorf("summary should name the runner used (make check); got: %s", vp.Summary)
+	}
+}
+
+// TestQualityGate_MakefileFallback_PassesMakeArgsToStack pins the exact stack
+// invocation. Argument shape is load-bearing: cobra needs the `--` separator
+// before the inner command, and we must not silently revert to ./run.sh on
+// Makefile-only repos.
+func TestQualityGate_MakefileFallback_PassesMakeArgsToStack(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "Makefile"),
+		[]byte("check:\n\t@echo ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	argsFile := filepath.Join(t.TempDir(), "captured-args")
+	fakeStack := writeFakeStack(t, t.TempDir(), `#!/bin/bash
+printf '%s\n' "$@" > `+argsFile+`
+cat <<'EOF'
+{"status":"success","action":"run","exit_code":0,"stack":"tmp-test","kept":false,"output":"ok"}
+EOF
+exit 0
+`)
+
+	store := newMockStore()
+	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
+	store.correlationEvents["corr-mk-args"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-mk-args"),
+	}
+
+	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: fakeStack, timeout: 42, logger: slog.Default()}
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-mk-args")
+
+	if _, err := h.Handle(context.Background(), triggerEvt); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	argsRaw, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	args := strings.Split(strings.TrimSpace(string(argsRaw)), "\n")
+
+	want := []string{"run", "--json", "--timeout", "42", tmp, "--", "make", "check"}
+	if len(args) != len(want) {
+		t.Fatalf("expected %d args, got %d: %v", len(want), len(args), args)
+	}
+	for i, w := range want {
+		if args[i] != w {
+			t.Errorf("arg[%d]: want %q, got %q", i, w, args[i])
+		}
+	}
+}
+
+// TestQualityGate_MakefileWithoutCheckTarget_PausesAdvisory: a Makefile with
+// no `check:` target is not a usable runner. Behavior is identical to the
+// no-Makefile case (advisory pause) — but the operator-facing description
+// must still mention the Makefile so they know which file to extend.
+func TestQualityGate_MakefileWithoutCheckTarget_PausesAdvisory(t *testing.T) {
+	tmp := t.TempDir()
+	// Only `build:`, no `check:`. The probe must reject this.
+	if err := os.WriteFile(filepath.Join(tmp, "Makefile"),
+		[]byte("build:\n\t@echo built\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	store := newMockStore()
 	wsPayload := event.MustMarshal(event.WorkspaceReadyPayload{Path: tmp, Branch: "test"})
-	store.correlationEvents["corr-mk"] = []event.Envelope{
-		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-mk"),
+	store.correlationEvents["corr-mk-no-check"] = []event.Envelope{
+		event.New(event.WorkspaceReady, 1, wsPayload).WithCorrelation("corr-mk-no-check"),
 	}
 
 	h := &QualityGateHandler{store: store, name: "quality-gate", stackBin: "stack", timeout: 300, logger: slog.Default()}
-	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-mk")
+	triggerEvt := event.New(event.PersonaCompleted, 1, nil).WithCorrelation("corr-mk-no-check")
 
 	got, err := h.Handle(context.Background(), triggerEvt)
 	if err != nil {
@@ -190,17 +285,17 @@ func TestQualityGate_NoRunScript_WithMakefile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !vp.Advisory {
-		t.Fatalf("verdict must be Advisory=true even when Makefile is present (we still don't drive Make), got: %+v", vp)
+		t.Fatalf("Makefile without `check:` is not driveable; verdict must be Advisory=true. got: %+v", vp)
 	}
 	if len(vp.Issues) != 1 {
 		t.Fatalf("expected one issue, got %d", len(vp.Issues))
 	}
 	desc := vp.Issues[0].Description
 	if !strings.Contains(desc, "Makefile") {
-		t.Errorf("description should name the Makefile so operator knows what to run; got: %s", desc)
+		t.Errorf("description should mention the Makefile; got: %s", desc)
 	}
-	if !strings.Contains(desc, "make check") {
-		t.Errorf("description should suggest `make check`; got: %s", desc)
+	if !strings.Contains(desc, "check") {
+		t.Errorf("description should reference the missing `check` target so the operator knows what to add; got: %s", desc)
 	}
 }
 

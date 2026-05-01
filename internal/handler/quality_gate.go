@@ -25,9 +25,73 @@ import (
 // because each `stack run` is a one-shot VM — services started in a separate
 // invocation would be torn down with their VM. Compound shell commands ensure
 // setup and execution share the same VM.
+//
+// label is the human-readable command form used in failure descriptions
+// (e.g. "./run.sh test", "make check"). It is decoupled from `command`
+// because the latter may include shell wrappers (bash -c "...") that look
+// confusing in operator-facing output.
 type qualityCheck struct {
 	name    string
+	label   string
 	command []string
+}
+
+// runnerKind identifies which build runner the gate detected for a workspace.
+// runnerNone means no driveable runner was found and the gate must escalate
+// as advisory rather than execute anything.
+type runnerKind string
+
+const (
+	runnerNone      runnerKind = ""
+	runnerRunSh     runnerKind = "run.sh"
+	runnerMakeCheck runnerKind = "make check"
+)
+
+// makefileCheckTargetRe matches a top-level `check:` rule in a Makefile.
+// Tolerates optional whitespace before the colon and prerequisites/recipe
+// after it. Static grep — false negatives are possible if `check:` lives in
+// an `include`d file; those workspaces fall through to the advisory-pause
+// path, preserving current behavior. We do not invoke `make` to probe
+// because that would require running it inside the stack VM (which is the
+// thing we are trying to decide whether to do at all).
+var makefileCheckTargetRe = regexp.MustCompile(`(?m)^check[ \t]*:`)
+
+// detectRunner picks the build runner for this workspace.
+// Probe order: run.sh → Makefile with a `check:` target → none.
+// Returns (runnerNone, nil) when neither is available; the caller emits
+// an advisory verdict in that case.
+func detectRunner(wsPath string) (runnerKind, []qualityCheck) {
+	if _, err := os.Stat(filepath.Join(wsPath, "run.sh")); err == nil {
+		// `test` is wrapped in `bash -c "./run.sh up && ./run.sh test"`
+		// because many repos (e.g. hulihealth-web) require services to be
+		// running before tests can exec into them. Each `stack run` is a
+		// one-shot VM, so up and test must share one invocation.
+		return runnerRunSh, []qualityCheck{
+			{name: "lint", label: "./run.sh lint", command: []string{"./run.sh", "lint"}},
+			{name: "test", label: "./run.sh test", command: []string{"bash", "-c", "./run.sh up && ./run.sh test"}},
+		}
+	}
+	if makefileHasCheckTarget(wsPath) {
+		// One unified target. Org convention (per pre-commit gate) is that
+		// `make check` runs lint + test + race in a single invocation.
+		// Splitting into separate make calls would change the contract and
+		// double the number of stack VMs spawned per workflow.
+		return runnerMakeCheck, []qualityCheck{
+			{name: "check", label: "make check", command: []string{"make", "check"}},
+		}
+	}
+	return runnerNone, nil
+}
+
+// makefileHasCheckTarget reports whether the workspace's Makefile declares
+// a top-level `check:` rule. Returns false when the file is absent or
+// unreadable — both are equivalent to "we can't drive this".
+func makefileHasCheckTarget(wsPath string) bool {
+	data, err := os.ReadFile(filepath.Join(wsPath, "Makefile"))
+	if err != nil {
+		return false
+	}
+	return makefileCheckTargetRe.Match(data)
 }
 
 // QualityGateHandler runs project-level quality checks (lint, test) inside an
@@ -115,6 +179,15 @@ func (h *QualityGateHandler) Subscribes() []event.Type { return nil }
 // into an advisory failure that the engine escalates to the operator instead
 // of looping the developer on what is almost certainly a local-env flake.
 func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Envelope, error) {
+	// Defensive default: tests that construct QualityGateHandler via struct
+	// literal sometimes omit the logger field. Pre-existing log sites tolerated
+	// this because no log call fired on the run.sh success path; the new
+	// "runner detected" Info changed that. Fixing it here covers every log
+	// site at once instead of patching individual test fixtures.
+	if h.logger == nil {
+		h.logger = slog.Default()
+	}
+
 	wsPath, err := h.resolveWorkspacePath(ctx, env.CorrelationID)
 	if err != nil {
 		return nil, fmt.Errorf("quality-gate: resolve workspace: %w", err)
@@ -123,14 +196,15 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 		return nil, fmt.Errorf("quality-gate: no workspace found in correlation chain — workflow requires a provisioned workspace")
 	}
 
-	runScript := filepath.Join(wsPath, "run.sh")
-	if _, statErr := os.Stat(runScript); os.IsNotExist(statErr) {
+	runner, checks := detectRunner(wsPath)
+	if runner == runnerNone {
 		// We cannot drive this repo's build system. Escalate as advisory
 		// rather than silently passing — the operator must verify the
-		// developer's diff manually before approving the commit. Surface
-		// the alternative build runner (Makefile) when present so the
-		// operator's resume action is clear, not a guess.
-		return h.unverifiableVerdict(env.CorrelationID, wsPath, "no_run_sh", reasonNoRunScript(wsPath)), nil
+		// developer's diff manually before approving the commit. The reason
+		// text discriminates the three "no driver" sub-cases (no Makefile,
+		// Makefile without `check:`, neither) so the operator's next step
+		// is concrete, not a guess.
+		return h.unverifiableVerdict(env.CorrelationID, wsPath, "no_run_sh", reasonNoRunner(wsPath)), nil
 	}
 
 	// Docs-only fast-pass: if every modified file is a .md/docs/* path,
@@ -143,14 +217,16 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 		return h.passVerdict(fmt.Sprintf("docs-only diff (%d file(s)), skipping runtime checks", len(files))), nil
 	}
 
-	// Run lint first, then test. Collect all failures before reporting.
+	h.logger.Info("quality-gate: runner detected",
+		slog.String("runner", string(runner)),
+		slog.String("correlation", env.CorrelationID),
+	)
+
+	// Iterate the runner's checks. Collect all failures before reporting so
+	// the developer sees the full picture in one feedback round (lint and
+	// test both fail → one verdict naming both, not two iterations).
 	// Track kept stacks so we can destroy them at the end — VMs must not
 	// survive across iterations; a failed gate means a fresh VM on retry.
-	//
-	// `test` is wrapped in `bash -c "./run.sh up && ./run.sh test"` because
-	// many repos (e.g. hulihealth-web) require services to be running before
-	// tests can exec into them. Each `stack run` is a one-shot VM, so up and
-	// test must share the same invocation.
 	var issues []event.Issue
 	var failSummaries []string
 	var keptStacks []string
@@ -159,11 +235,6 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	// developer's iteration prompt can act on the unredacted failure stream
 	// even when buildFailureDescription's filter trimmed Issue.Description.
 	var rawDiagnosticsParts []string
-
-	checks := []qualityCheck{
-		{name: "lint", command: []string{"./run.sh", "lint"}},
-		{name: "test", command: []string{"bash", "-c", "./run.sh up && ./run.sh test"}},
-	}
 
 	for _, check := range checks {
 		result, runErr := h.runCheck(ctx, wsPath, check)
@@ -198,7 +269,7 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 			if result.Code == "parse_error" {
 				h.destroyKeptStacks(ctx, keptStacks)
 				descLines := []string{
-					fmt.Sprintf("./run.sh %s failed: stack output unparseable (parse_error) — likely stack misconfiguration, multipass not ready, or a non-zero exit before stack emitted its JSON envelope.", check.name),
+					fmt.Sprintf("%s failed: stack output unparseable (parse_error) — likely stack misconfiguration, multipass not ready, or a non-zero exit before stack emitted its JSON envelope.", check.label),
 					"",
 					"Captured raw bytes:",
 					truncateOutput(fullOutput, 2000),
@@ -217,7 +288,7 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 				), nil
 			}
 
-			desc := buildFailureDescription(check.name, fullOutput, debugRef)
+			desc := buildFailureDescription(check.label, fullOutput, debugRef)
 			issues = append(issues, event.Issue{
 				Severity:    "major",
 				Category:    "correctness",
@@ -231,7 +302,7 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	h.destroyKeptStacks(ctx, keptStacks)
 
 	if len(issues) == 0 {
-		return h.passVerdict("lint and test passed"), nil
+		return h.passVerdict(passSummary(runner)), nil
 	}
 
 	rawDiagnostics := strings.Join(rawDiagnosticsParts, "\n\n")
@@ -252,13 +323,17 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 }
 
 // buildFailureDescription assembles the verdict description for a failed
-// check. Two failure modes must survive: (a) normal case — keep the tail of
-// the cleaned output; (b) degenerate case — filter stripped everything, fall
+// check. The commandLabel is the human-readable form (e.g. "./run.sh test"
+// or "make check") rather than just the logical name, so the developer
+// reads the actual command they would re-run to reproduce.
+//
+// Two failure modes must survive: (a) normal case — keep the tail of the
+// cleaned output; (b) degenerate case — filter stripped everything, fall
 // back to the raw unfiltered tail with a marker so the body is never empty.
 // The reporter on 2026-04-22 hit (b): two identical `./run.sh test failed:\n`
 // verdicts with zero body forced the developer to re-run the suite manually
 // just to discover what failed.
-func buildFailureDescription(checkName, rawOutput, debugRef string) string {
+func buildFailureDescription(commandLabel, rawOutput, debugRef string) string {
 	const maxLen = 2000
 	cleaned := strings.TrimSpace(filterDockerNoise(rawOutput))
 	var body string
@@ -276,7 +351,7 @@ func buildFailureDescription(checkName, rawOutput, debugRef string) string {
 		// developer sees *something* more actionable than a bare newline.
 		body = "[no output captured — command exited non-zero with empty stdout/stderr]"
 	}
-	desc := fmt.Sprintf("./run.sh %s failed:\n%s", checkName, body)
+	desc := fmt.Sprintf("%s failed:\n%s", commandLabel, body)
 	if debugRef != "" {
 		desc += "\n\n[full output: " + debugRef + "]"
 	}
@@ -612,15 +687,36 @@ func (h *QualityGateHandler) unverifiableVerdict(correlationID, wsPath, kind, re
 	)
 }
 
-// reasonNoRunScript builds the operator-facing reason text for a missing
-// run.sh. When a Makefile is present, name it explicitly so the operator's
-// manual verification step is concrete (e.g., "run `make check`") rather
-// than abstract.
-func reasonNoRunScript(wsPath string) string {
-	if _, err := os.Stat(filepath.Join(wsPath, "Makefile")); err == nil {
-		return "no run.sh at the workspace root, but a Makefile is present — operator can verify with `make check` (or whichever target the repo defines)"
+// passSummary names the runner in the success summary so operators reading
+// verdicts can tell at a glance which gate actually ran. Existing
+// run.sh-driven repos keep the historical "lint and test passed" wording so
+// log scrapers and dashboards filtering on it don't break.
+func passSummary(runner runnerKind) string {
+	switch runner {
+	case runnerMakeCheck:
+		return "make check passed"
+	default:
+		return "lint and test passed"
 	}
-	return "no run.sh at the workspace root and no Makefile fallback — Rick has no driver for this repo's build system"
+}
+
+// reasonNoRunner builds the operator-facing reason text when no driveable
+// runner could be found. Discriminates three sub-cases so the operator's
+// next step is concrete:
+//   - no run.sh, no Makefile → repo has no Rick-driveable build system
+//   - no run.sh, Makefile without `check:` → operator should add a `check`
+//     target (preferred) or a run.sh
+//   - no run.sh, Makefile WITH `check:` → unreachable from here (detectRunner
+//     would have returned runnerMakeCheck), but kept for safety
+func reasonNoRunner(wsPath string) string {
+	mfPath := filepath.Join(wsPath, "Makefile")
+	if _, err := os.Stat(mfPath); err != nil {
+		return "no run.sh at the workspace root and no Makefile fallback — Rick has no driver for this repo's build system"
+	}
+	// Makefile present but no `check:` target — detectRunner already verified
+	// the absence; surface that fact so the operator can add the target rather
+	// than guess at a manual command.
+	return "no run.sh at the workspace root, and the Makefile has no `check` target Rick can call — add a `check` target (the org convention is `check: lint test test-race`) or a run.sh"
 }
 
 // reasonStackUnavailable builds the operator-facing reason text for stack
