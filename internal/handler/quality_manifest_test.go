@@ -178,6 +178,45 @@ func TestResolveQualityManifestsDir(t *testing.T) {
 	})
 }
 
+// TestLoadLocalQualityManifest_InRepoPath: the primary lookup — a manifest
+// at <wsPath>/.rick/quality.yaml wins over operator-config paths. This is
+// the path consumer-repo operators use (file is gitignored in the consumer
+// repo and carried into the rick workspace by `cp -r` provisioning).
+func TestLoadLocalQualityManifest_InRepoPath(t *testing.T) {
+	ws := makeNamedWorkspace(t, "ehr-rick-ws-x")
+	if err := os.MkdirAll(filepath.Join(ws, ".rick"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".rick", "quality.yaml"), []byte(`
+runtime: stack
+checks:
+  - name: lint
+    command: ["./run.sh", "lint"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Even with a competing owner-scoped manifest in operator config, the
+	// in-repo file must win — repo-local intent overrides global config.
+	dir := t.TempDir()
+	writeLocalManifest(t, dir, "", "ehr", `
+checks:
+  - name: lint
+    command: ["should-not-win"]
+`)
+
+	mf, err := loadLocalQualityManifest(ws, dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if mf == nil {
+		t.Fatal("expected in-repo manifest to win, got nil")
+	}
+	if got := mf.Checks[0].Command[0]; got != "./run.sh" {
+		t.Errorf("in-repo manifest must win; got command[0]=%q", got)
+	}
+}
+
 // TestLoadLocalQualityManifest_OwnerNamePath: the canonical case — owner and
 // name resolved from git origin, manifest at <dir>/<owner>/<name>.yaml.
 func TestLoadLocalQualityManifest_OwnerNamePath(t *testing.T) {

@@ -197,18 +197,31 @@ func nameFromWorkspaceBasename(wsPath string) string {
 	return base
 }
 
-// loadLocalQualityManifest looks up the manifest for the workspace's repo in
-// the operator's local config dir. Lookup precedence:
+// inRepoManifestRelPath is the in-workspace manifest location. It is
+// gitignored in the consumer repo (kept off origin) but survives `cp -r`
+// workspace provisioning, so a file the operator drops in their canonical
+// checkout reaches every rick workspace cloned from it.
+const inRepoManifestRelPath = ".rick/quality.yaml"
+
+// loadLocalQualityManifest looks up the manifest for this workspace. Lookup
+// precedence (first present file wins):
 //
-//  1. <dir>/<owner>/<name>.yaml  (when owner is known via git origin)
-//  2. <dir>/<name>.yaml          (always tried as a fallback / cross-org alias)
+//  1. <wsPath>/.rick/quality.yaml — repo-local, gitignored. Carried into rick
+//     workspaces by the cp -r provisioning in internal/workspace.
+//  2. <manifestsDir>/<owner>/<name>.yaml — operator config, owner-scoped.
+//  3. <manifestsDir>/<name>.yaml — operator config, cross-org alias.
 //
-// First file that exists wins; later candidates are not consulted. Empty
-// manifestsDir or undetectable repo identity → (nil, nil), letting the caller
-// fall through to legacy probing. A file that exists but fails to parse or
-// validate returns (nil, err) so detectQualityPlan can escalate as advisory
-// rather than silently picking the next candidate.
+// Empty manifestsDir disables (2) and (3); (1) still works. Undetectable
+// repo identity disables (2) and (3) but again leaves (1) usable. A file
+// that exists at any path but fails to parse/validate returns (nil, err)
+// so detectQualityPlan can escalate as advisory rather than silently
+// picking the next candidate.
 func loadLocalQualityManifest(wsPath, manifestsDir string) (*QualityManifest, error) {
+	if mf, err := loadManifestFile(filepath.Join(wsPath, inRepoManifestRelPath)); err != nil {
+		return nil, err
+	} else if mf != nil {
+		return mf, nil
+	}
 	if manifestsDir == "" {
 		return nil, nil
 	}
