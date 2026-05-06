@@ -9,11 +9,17 @@ import (
 )
 
 // defaultStallTimeout is applied when RICK_BACKEND_STALL_TIMEOUT is unset.
-// 2 minutes is long enough for any modern LLM CLI to emit its first token
-// under normal load — if a subprocess sits silent for that long, it's
-// almost certainly wedged and should be killed so the concurrency slot can
-// be reclaimed well before the wall-clock timeout fires.
-const defaultStallTimeout = 2 * time.Minute
+// 6 minutes covers the worst-case stdout-silence window observed in
+// anthropics/claude-code#51568 (extended-thinking gaps up to 7.5 min) and
+// the long-tool-execution gap (between system.task_started and
+// system.task_notification, the parent stdout is silent for the tool's full
+// runtime). Shorter values produce false-positive idle timeouts on healthy
+// developer-phase runs that spend time in MCP / Bash / Task subagents. The
+// CLI's own internal stream watchdog (CLAUDE_CODE_STREAM_TIMEOUT, 45s
+// default; 5min full-abort+retry since 2.1.105) is the primary liveness
+// detector — this outer timeout exists only to bound the dead time when
+// the CLI itself wedges past its own watchdogs.
+const defaultStallTimeout = 6 * time.Minute
 
 // New creates a backend by name. Valid names: "claude", "gemini", "codex".
 // Backend binary paths can be overridden via RICK_CLAUDE_BIN, RICK_GEMINI_BIN,
@@ -74,9 +80,10 @@ func newRaw(name string) (Backend, error) {
 	}
 }
 
-// stallTimeoutFromEnv reads RICK_BACKEND_STALL_TIMEOUT. Unset → default (2m);
-// "0" → disabled (idle watchdog off, only the wall-clock timeout applies);
-// unparseable → default with no noise. Negative values are treated as 0.
+// stallTimeoutFromEnv reads RICK_BACKEND_STALL_TIMEOUT. Unset → default
+// (defaultStallTimeout); "0" → disabled (idle watchdog off, only the
+// wall-clock timeout applies); unparseable → default with no noise.
+// Negative values are treated as 0.
 func stallTimeoutFromEnv() time.Duration {
 	raw := os.Getenv("RICK_BACKEND_STALL_TIMEOUT")
 	if raw == "" {

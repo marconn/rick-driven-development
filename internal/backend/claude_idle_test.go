@@ -180,48 +180,42 @@ wait
 	}
 }
 
-// TestClaude_Run_IdleTimeout_ProtocolNoiseDoesNotResetWatchdog is the
-// regression test for the 2026-04-18 idle_timeout operator bug: Claude CLI
-// emits stream_event envelopes (tool_use, message_start, keep-alive pings)
-// that previously reset the idle watchdog via newProgressWriter on raw stdout,
-// even though no text was ever generated. A wedged model could therefore
-// suppress the 2m watchdog for the full 9m wall-clock budget.
-//
-// The fix threads progress() into ClaudePrintExtractor so it fires only on
-// content_block_delta→text_delta events and terminal result/message_delta
-// events. This test verifies that a subprocess emitting ONLY non-text protocol
-// frames still idle-times-out within the stall window even though stdout is
-// actively chattering protocol noise.
-func TestClaude_Run_IdleTimeout_ProtocolNoiseDoesNotResetWatchdog(t *testing.T) {
+// TestClaude_Run_ToolExecutionPhaseDoesNotIdleTimeout pins the post-2026-05-06
+// contract: any stdout byte from the CLI counts as progress, including
+// tool_use blocks, input_json_delta frames, system.task_started/notification
+// events, and user/tool_result echoes — none of which contain a text_delta
+// but all of which are real signals that the CLI is alive. Earlier revisions
+// gated progress on content_block_delta→text_delta only; that misclassified
+// long-tool-execution windows (Bash / Task / MCP) as wedges and SIGKILL'd
+// healthy subprocesses. The CLI's own internal stream watchdog (~45s with
+// 5min full-abort+retry) is the authoritative wedge detector now.
+func TestClaude_Run_ToolExecutionPhaseDoesNotIdleTimeout(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("claude backend is linux/macos only — script-based fake binary not portable to windows")
 	}
 
-	// The script emits tool_use, message_start, and ping stream_event frames
-	// in a tight loop — exactly the protocol noise the real Claude CLI emits
-	// while waiting for an upstream Anthropic response. None of these frames
-	// contain a text_delta, so the extractor must NOT fire progress() on them.
-	// After the noise loop the script sleeps to simulate a permanently wedged
-	// model. The watchdog must fire within stallTimeout regardless.
+	// Emit tool-execution-shape stdout (matches what the real CLI 2.1.131
+	// emits during a Bash tool run) at 80ms intervals across a window that
+	// exceeds the stallTimeout. None of these frames carry a text_delta;
+	// the watchdog must NOT fire because raw stdout is active.
 	script := `#!/bin/sh
-# Emit protocol-noise frames (tool_use, message_start, ping) in a tight loop.
-# None contain text_delta — the extractor must NOT reset the idle watchdog.
 i=0
-while [ $i -lt 20 ]; do
-  printf '{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}}\n'
-  printf '{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tu_01","name":"bash"}}}\n'
-  printf '{"type":"stream_event","event":{"type":"ping"}}\n'
+while [ $i -lt 12 ]; do
+  printf '{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tu_01","name":"Bash"}}}\n'
+  printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"x"}}}\n'
+  printf '{"type":"system","subtype":"task_started"}\n'
+  printf '{"type":"system","subtype":"task_notification","status":"completed"}\n'
+  sleep 0.08
   i=$((i+1))
 done
-# Then go silent — a permanently wedged generator.
-sleep 10
+printf '{"type":"result","subtype":"success","stop_reason":"end_turn","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}\n'
 `
-	binPath := writeFakeBinary(t, "fake-claude-noise.sh", script)
+	binPath := writeFakeBinary(t, "fake-claude-tool-exec.sh", script)
 
 	c := NewClaude(binPath)
-	// Stall window must be short enough that the test finishes quickly.
-	// The noise loop completes in well under 100ms on any machine; the
-	// watchdog must fire after that without the noise having reset it.
+	// 300ms stall + 80ms inter-frame gap: pre-fix would idle-timeout because
+	// none of these frames are text_delta. Post-fix, the script runs to
+	// completion and Run returns nil error.
 	c.stallTimeout = 300 * time.Millisecond
 
 	start := time.Now()
@@ -231,88 +225,17 @@ sleep 10
 	})
 	elapsed := time.Since(start)
 
-	if resp != nil {
-		t.Fatalf("want nil response on idle timeout, got %#v", resp)
+	if err != nil {
+		t.Fatalf("Run returned error during healthy tool-execution stream: %v (after %s)", err, elapsed)
 	}
-	if err == nil {
-		t.Fatal("want ErrIdleTimeout, got nil")
+	if resp == nil {
+		t.Fatal("want non-nil response on successful run, got nil")
 	}
-	// Must time out well before the 10s sleep ends — generous 4s ceiling.
-	if elapsed > 4*time.Second {
-		t.Errorf("Run took %s — protocol noise reset the idle watchdog (regression of 2026-04-18 bug)", elapsed)
-	}
-	if !errors.Is(err, ErrIdleTimeout) {
-		t.Errorf("want ErrIdleTimeout, got %v", err)
-	}
-}
-
-// TestClaude_Run_IdleTimeout_EmptyTextDeltasDoNotResetWatchdog is the
-// regression test for the 2026-04-20 developer-stall recurrence. The initial
-// 2026-04-18 fix threaded progress() into the extractor to reject protocol
-// noise, but still fired progress() on every content_block_delta whose
-// delta.type was "text_delta" — regardless of whether delta.text was empty.
-// Claude CLI under internal stall (cache fetch, network retry, etc.) dribbles
-// empty text_delta frames that kept the 2m idle watchdog alive indefinitely
-// while producing zero tokens. Operator had to cancel manually.
-//
-// The fix adds a delta.Text != "" guard so empty deltas no longer count as
-// generation progress. This test emits only empty text_delta frames followed
-// by a long sleep; the watchdog must fire within stallTimeout.
-func TestClaude_Run_IdleTimeout_EmptyTextDeltasDoNotResetWatchdog(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("claude backend is linux/macos only — script-based fake binary not portable to windows")
-	}
-
-	// The script emits content_block_delta frames whose inner delta.type is
-	// "text_delta" but whose delta.text is empty, pacing them so the stream
-	// continues well past the stallTimeout window. This reproduces the
-	// 2026-04-20 stall shape: a wedged Claude session dribbles empty deltas
-	// faster than stallTimeout, indefinitely resetting the watchdog in the
-	// pre-fix code while producing zero tokens. The watchdog must fire on
-	// the *generation progress* (empty deltas are not progress), not on raw
-	// stdout activity — so it should fire even while the stream is active.
-	script := `#!/bin/sh
-# Emit empty-text content_block_delta frames at 50ms intervals, far faster
-# than stallTimeout (300ms). Pre-fix, each frame calls progress() because
-# delta.type == "text_delta", so the watchdog never fires and this loop
-# runs for the full budget. Post-fix, the empty-text guard skips progress()
-# and the watchdog fires within stallTimeout.
-i=0
-while [ $i -lt 100 ]; do
-  printf '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}}\n'
-  sleep 0.05
-  i=$((i+1))
-done
-`
-	binPath := writeFakeBinary(t, "fake-claude-empty-delta.sh", script)
-
-	c := NewClaude(binPath)
-	// 300ms stall window + 50ms delta interval → a broken watchdog would run
-	// the full 5s script; a working watchdog fires within ~350ms. A 2s ceiling
-	// comfortably distinguishes the two.
-	c.stallTimeout = 300 * time.Millisecond
-
-	start := time.Now()
-	resp, err := c.Run(context.Background(), Request{
-		SystemPrompt: "sys",
-		UserPrompt:   "hello",
-	})
-	elapsed := time.Since(start)
-
-	if resp != nil {
-		t.Fatalf("want nil response on idle timeout, got %#v", resp)
-	}
-	if err == nil {
-		t.Fatal("want ErrIdleTimeout, got nil")
-	}
-	// Must time out well before the 5s script ends. 2s ceiling is ~6× the
-	// stallTimeout — generous for CI jitter while still catching the
-	// regression (which would take the full script duration).
-	if elapsed > 2*time.Second {
-		t.Errorf("Run took %s — empty text_delta frames reset the idle watchdog (regression of 2026-04-20 bug)", elapsed)
-	}
-	if !errors.Is(err, ErrIdleTimeout) {
-		t.Errorf("want ErrIdleTimeout, got %v", err)
+	// Sanity: must have actually run for at least a few intervals — otherwise
+	// the script exited before producing the tool-execution noise we're
+	// guarding.
+	if elapsed < 500*time.Millisecond {
+		t.Errorf("Run completed in %s — script likely didn't exercise the tool-exec window", elapsed)
 	}
 }
 

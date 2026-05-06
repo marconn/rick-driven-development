@@ -48,12 +48,11 @@ func (c *Claude) buildArgs(req Request) (args []string, stdinPrompt string) {
 	args = append(args, "--output-format", "stream-json", "--verbose", "--include-partial-messages")
 
 	// Force a fixed extended-thinking budget so the model emits visible
-	// stream activity early instead of going silent for >2m of internal
-	// reasoning that the watchdog can't see. Workaround for
+	// stream activity early instead of going silent for an unbounded
+	// internal-reasoning window. Workaround for
 	// anthropics/claude-code#20127: in CLI v2.1.8+, stream-json silently
 	// drops thinking blocks, so a model that decides to think before
-	// generating any text_delta looks identical to a wedged subprocess to
-	// our idle watchdog (internal/backend/idle_watchdog.go). Pinning a
+	// emitting any other stdout looks like a wedged subprocess. Pinning a
 	// finite budget bounds the silent window — the model has to commit to
 	// emitting something within the cap rather than drifting on adaptive
 	// thinking. 31999 keeps us one token under the 32K Anthropic ceiling.
@@ -133,16 +132,23 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 		inner = io.MultiWriter(&captured, req.Output)
 	}
 
-	// Thread progress into the extractor rather than wrapping raw stdout.
-	// Claude CLI emits stream_event envelopes, tool_use blocks, and keep-alive
-	// frames that would reset the idle watchdog without ever producing text if
-	// we used newProgressWriter on the raw byte stream. By wiring progress
-	// into the extractor, only genuine text deltas (content_block_delta →
-	// text_delta) and terminal result/message_delta events count — protocol
-	// noise never resets the timer.
-	extractor := NewClaudePrintExtractor(WithProgress(progress))
+	// Wire progress on raw stdout — any byte the CLI emits counts. Earlier
+	// revisions wired progress into the extractor and required a non-empty
+	// content_block_delta.text_delta or a terminal event, intending to ignore
+	// "protocol noise". In Claude CLI 2.1.x this misclassifies real work:
+	// while a tool_use is executing (Bash / Edit / Task / MCP), the parent
+	// stdout emits content_block_start, input_json_delta, content_block_stop,
+	// system.task_started/notification, and user/tool_result events — none of
+	// which the extractor counted. A multi-minute tool run therefore looked
+	// identical to a wedged subprocess and got SIGKILL'd before its first
+	// text_delta. The CLI's own internal stream watchdog
+	// (CLAUDE_CODE_STREAM_TIMEOUT, 45s default; full 5min abort+retry since
+	// 2.1.105) is the authoritative liveness signal — our outer watchdog is
+	// just the safety net that fires when the CLI itself has hung. Counting
+	// every stdout byte gives the CLI room to drive its own retries.
+	extractor := NewClaudePrintExtractor()
 	sw := NewStreamWriter(inner, extractor.ExtractFn(), WithResultCheck(ClaudeCheckResult))
-	cmd.Stdout = sw
+	cmd.Stdout = newProgressWriter(sw, progress)
 
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
