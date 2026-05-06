@@ -29,7 +29,8 @@ Defines the `Handler` plugin interface and the concrete handler implementations 
 - `committer.go` — `CommitterHandler` wraps `AIHandler`. Pre-checks the workspace via `git status`/divergence; if no changes exist, short-circuits with `VerdictRendered{fail, phase=develop}` to force a developer retry instead of silently completing.
 - `workspace.go` — provisions a git workspace from `WorkflowRequested` (+ optional `context.enrichment` from `jira-context`). Uses correlationID-derived suffix to prevent collisions. Errors out if `ticket` provided without `repo`.
 - `context_snapshot.go` — non-AI; walks the workspace filesystem and git log to capture ground-truth codebase state (file tree, key files, schemas, recent commits) within size budgets. Feeds the developer prompt.
-- `quality_gate.go` — runs `stack run --json` to execute `./run.sh lint` + `./run.sh test` inside a Multipass VM, parses JSON output, emits `VerdictRendered`. Stripped from DAGs by `RICK_DISABLE_QUALITY_GATE`.
+- `quality_gate.go` — drives a per-repo quality contract (lint + test). Resolution order: operator-local `.yaml` manifest → legacy `run.sh` probe → legacy `Makefile check:` probe → advisory escalation. Output capture is via `stack run --json` (16 MiB scanner buffer; oversized envelopes surface as `parse_error`). Stripped from DAGs by `RICK_DISABLE_QUALITY_GATE`. Manifest schema + lookup details below.
+- `quality_manifest.go` — manifest loader, repo-identity resolver (git origin URL → workspace-basename fallback), runtime gating helpers.
 - Personas registered through `AIHandler`: `researcher`, `architect`, `developer`, `feedback-analyzer`. `reviewer`/`qa` via `ReviewHandler`. `committer` via `CommitterHandler`.
 
 ### pr-review
@@ -69,6 +70,57 @@ These handlers do **not** live in this package — they're defined in `internal/
 - `jira_context.go` — `jira-context` handler used by `jira-dev`. Resolves repo from Jira labels (`repo:name`) or first component, emits `ContextEnrichment` consumed by `workspace`.
 - `feedback-analyzer` (registered in `handlers.go`, uses base `AIHandler`) — used by `pr-feedback`/`ci-fix` flows.
 - GitHub PR fetcher — registered conditionally as a before-hook for `feedback-analyzer` when `d.GitHub != nil`. Lives in `internal/github`, not this package.
+
+## Quality-gate manifest
+
+Quality-gate's lint/test commands are repo-specific. The contract is declared in an **operator-local** YAML file, NOT committed to the consumer repo (huli-api / ehr / huli / practice-api are owned by other teams and shouldn't carry rick-specific config).
+
+### Lookup
+
+Manifests live under `$RICK_QUALITY_MANIFESTS_DIR` (default `$XDG_CONFIG_HOME/rick/quality-manifests` then `$HOME/.config/rick/quality-manifests`). Repo identity is resolved from the workspace's git origin URL — `git@github.com:hulilabs/ehr.git` parses to `(owner=hulilabs, name=ehr)`. When the workspace has no origin, the basename minus `-rick-ws-<corrid>` is used (yields name only).
+
+Two file paths are tried in order; the first found wins:
+
+1. `<dir>/<owner>/<name>.yaml` — owner-scoped, preferred when both are known
+2. `<dir>/<name>.yaml` — bare-name fallback (for the no-remote case or as a cross-org alias)
+
+Absent manifest = fall through to legacy probing (`run.sh` / `Makefile check:`). A *malformed* manifest is NOT a fall-through — it produces an advisory `manifest_invalid` verdict so the operator must fix the file rather than silently get the heuristic.
+
+### Schema
+
+```yaml
+runtime: stack          # stack | host (default: stack)
+checks:
+  - name: lint          # logical id; appears in summaries + qg-*-<name>.log
+    label: "./run.sh lint"   # optional; defaults to space-joined command
+    command: ["./run.sh", "lint"]
+  - name: test
+    command: ["bash", "-c", "./run.sh up && ./run.sh test"]
+```
+
+`command` is argv, not a shell line — wrap with `bash -c "..."` if you need shell features. Rick performs no expansion or quoting.
+
+### Runtime kinds
+
+- **`stack`** (default) — runs the command in a one-shot Multipass VM via `stack run --json --timeout <n> <wsPath> -- <command>`. The stack tool inlines stdout into the run envelope's `output` field and stderr (plus its own diagnostics) into `stderr`. Single envelopes can exceed 64 KiB easily — quality-gate uses a 16 MiB scanner buffer and surfaces `bufio.ErrTooLong` as `parse_error` rather than fall back to a partial parse.
+- **`host`** — runs the command directly with `cwd=<workspace>`, no stack involved. Reserved for repos that cannot be stack-virtualized (e.g. monorepos with no docker-compose). Gated behind `RICK_ALLOW_HOST_RUNTIME=1` because a manifest is an arbitrary code execution vector — default-deny is the safety boundary. A missing executable produces an advisory `host_executable_missing` infra verdict, not a regression report.
+
+### Common manifest shapes
+
+- **Standard huli-style service** (`runtime: stack` + `./run.sh lint` + `./run.sh test`): the test target must call `up` itself, otherwise wrap with `bash -c "./run.sh up && ./run.sh test"` so a single VM hosts both setup and execution.
+- **Go monorepo without docker-compose** (`runtime: host` + `make -C backend test-backend`): no stack, runs on the operator's host with their permissions; only place behind `RICK_ALLOW_HOST_RUNTIME=1`.
+- **PHP repo with positional-arg test target**: `command: ["bash", "-c", "./run.sh up && ./run.sh test '' --testsuite=all"]` (or whatever runs the full suite — repo-team-specific).
+
+### Failure modes
+
+| Mode | Verdict | Operator action |
+|---|---|---|
+| Manifest absent + no probe match | advisory `no_run_sh` | Add a manifest or a `run.sh` / `make check` target |
+| Manifest malformed | advisory `manifest_invalid` | Fix the YAML file |
+| `runtime: host` + env unset | advisory `host_runtime_not_allowed` | Set `RICK_ALLOW_HOST_RUNTIME=1` in `~/.config/rick/env` |
+| Stack envelope > 16 MiB | advisory `parse_error` | Genuine infra anomaly — investigate stack output |
+| Host executable missing | advisory `host_executable_missing` | Install the binary or fix the manifest command |
+| Inner command exited non-zero, stdout/stderr captured | regular fail (developer retriggers) | Read the verdict |
 
 ## Patterns
 

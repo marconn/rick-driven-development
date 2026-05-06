@@ -89,6 +89,8 @@ Set in `~/.config/rick/env` or shell.
 | Variable | Effect |
 |---|---|
 | `RICK_DISABLE_QUALITY_GATE` | Strip quality-gate from all DAGs. Use on VM-less machines. |
+| `RICK_QUALITY_MANIFESTS_DIR` | Operator-local directory holding per-repo quality manifests (`<owner>/<name>.yaml` or `<name>.yaml`). Defaults to `$XDG_CONFIG_HOME/rick/quality-manifests` then `$HOME/.config/rick/quality-manifests`. See `internal/handler/CLAUDE.md` for the manifest schema. |
+| `RICK_ALLOW_HOST_RUNTIME` | Set to `1` to allow `runtime: host` quality manifests to execute commands directly on the host (no stack VM isolation). Default-deny — required for repos that cannot be stack-virtualized (e.g. huli's Go monorepo with no docker-compose). |
 | `RICK_MAX_ITERATION` | Override every workflow's `MaxIterations` (positive int). Replaces per-workflow hardcoded values at registration time. Unset = baked-in defaults (3 for most code-producing workflows, 1-2 for plan/PR workflows). |
 | `RICK_MAX_WORKFLOWS` | Concurrent workflow cap (0 = unlimited). Excess requests queue. |
 | `RICK_REPOS_PATH` | Root for isolated workspaces + repo clones. Required by workspace/wave tools. |
