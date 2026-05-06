@@ -292,8 +292,9 @@ func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPerso
 	}
 
 	type verdictTracker struct {
-		active bool
-		sealed bool
+		active   bool
+		sealed   bool
+		advisory bool
 	}
 	latestByPersona := make(map[string]string)
 	verdicts := make(map[string]*verdictTracker)
@@ -361,7 +362,8 @@ func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPerso
 			var v event.VerdictPayload
 			if err := json.Unmarshal(e.Payload, &v); err == nil && v.SourcePersona != "" {
 				verdicts[v.SourcePersona] = &verdictTracker{
-					active: v.Outcome == event.VerdictFail,
+					active:   v.Outcome == event.VerdictFail,
+					advisory: v.Advisory,
 				}
 			}
 		case event.FeedbackGenerated:
@@ -396,9 +398,15 @@ func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPerso
 			missing = append(missing, req)
 			continue
 		}
-		if vt := verdicts[req]; vt != nil && vt.active && wfDef != nil && len(wfDef.RetriggeredBy) > 0 {
+		if vt := verdicts[req]; vt != nil && vt.active && !vt.advisory && wfDef != nil && len(wfDef.RetriggeredBy) > 0 {
 			// An active (fail) verdict is pending feedback — predecessor is
-			// effectively not complete from the join's perspective.
+			// effectively not complete from the join's perspective. Advisory
+			// fails are excluded: the aggregate's escalateVerdict path emits
+			// WorkflowPaused without a FeedbackGenerated, so there is no
+			// pending feedback to await — the operator's resume is the
+			// signal to advance, and the runner's pauser/blocked-replay path
+			// drives downstream handlers correctly once the join itself
+			// stops blocking.
 			missing = append(missing, req+"(pending_feedback)")
 			continue
 		}

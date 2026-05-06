@@ -1153,6 +1153,209 @@ func TestE2EAutoEscalationPausesThenResumes(t *testing.T) {
 	t.Logf("dev runs=%d, review runs=%d", devRuns.Load(), reviewRuns.Load())
 }
 
+// TestE2EAdvisoryPauseResumeFiresDownstream is the regression for the
+// resume-from-advisory-pause wedge observed in pr-feedback workflow
+// 993320c4 (PR #979 round 2). Reproduction:
+//
+//  1. Pipeline: developer → reviewer + qa → quality-gate → committer.
+//  2. reviewer/qa pass; quality-gate emits Advisory=true fail verdict.
+//  3. Aggregate's escalateVerdict path emits WorkflowPaused — no
+//     FeedbackGenerated.
+//  4. Pre-fix: committer's PersonaCompleted-from-quality-gate join check
+//     flagged the predecessor as `pending_feedback` purely because vt.active
+//     was set on Outcome=Fail. Dispatch was DROPPED at the join, never
+//     deferred to pauser.blocked. Operator's WorkflowResumed found nothing
+//     to replay; decideWorkflowResumed only re-emits FeedbackGenerated for
+//     max-iter pauses → workflow wedged in `running` state forever.
+//
+// Post-fix: vt.advisory short-circuits the pending_feedback predicate. The
+// join passes; the runner's pause check (step 7 in wrap) defers the
+// dispatch to pauser.blocked; resume replays it; committer fires;
+// WorkflowCompleted.
+func TestE2EAdvisoryPauseResumeFiresDownstream(t *testing.T) {
+	def := WorkflowDef{
+		ID:                "e2e-advisory-resume",
+		Required:          []string{"developer", "reviewer", "qa", "quality-gate", "committer"},
+		MaxIterations:     3,
+		EscalateOnMaxIter: true,
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+			"committer":    {"quality-gate"},
+		},
+		RetriggeredBy: map[string][]event.Type{"developer": {event.FeedbackGenerated}},
+	}
+	env := newE2EEnv(t, def)
+
+	var committerFired atomic.Int32
+
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name:   "developer",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) { return nil, nil },
+		},
+		trigger: handler.Trigger{
+			Events: []event.Type{event.WorkflowStartedFor("e2e-advisory-resume"), event.FeedbackGenerated},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "reviewer",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Persona: "developer", SourcePersona: "reviewer", Outcome: event.VerdictPass,
+						Summary: "looks good",
+					})),
+				}, nil
+			},
+		},
+		trigger: handler.Trigger{
+			Events:        []event.Type{event.PersonaCompleted},
+			AfterPersonas: []string{"developer"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "qa",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Persona: "developer", SourcePersona: "qa", Outcome: event.VerdictPass,
+						Summary: "tests pass",
+					})),
+				}, nil
+			},
+		},
+		trigger: handler.Trigger{
+			Events:        []event.Type{event.PersonaCompleted},
+			AfterPersonas: []string{"developer"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// quality-gate emits an advisory fail — mirrors the stack_no_compose_file
+	// case from the production trace.
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "quality-gate",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Persona:       "developer",
+						SourcePersona: "quality-gate",
+						Outcome:       event.VerdictFail,
+						Advisory:      true,
+						Summary:       "stack_no_compose_file",
+					})),
+				}, nil
+			},
+		},
+		trigger: handler.Trigger{
+			Events:        []event.Type{event.PersonaCompleted},
+			AfterPersonas: []string{"reviewer", "qa"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "committer",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				committerFired.Add(1)
+				return nil, nil
+			},
+		},
+		trigger: handler.Trigger{
+			Events:        []event.Type{event.PersonaCompleted},
+			AfterPersonas: []string{"quality-gate"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	paused := make(chan event.Envelope, 1)
+	unsubPause := env.bus.Subscribe(event.WorkflowPaused, func(_ context.Context, e event.Envelope) error {
+		if e.CorrelationID == "wf-advisory-resume" {
+			select {
+			case paused <- e:
+			default:
+			}
+		}
+		return nil
+	}, eventbus.WithName("test:advisory-pause-detect"))
+	defer unsubPause()
+
+	result := awaitWorkflowResult(t, env.bus, "wf-advisory-resume")
+	env.start(ctx)
+	env.fireWorkflow(ctx, t, "wf-advisory-resume", "e2e-advisory-resume")
+
+	select {
+	case pauseEvt := <-paused:
+		var p event.WorkflowPausedPayload
+		_ = json.Unmarshal(pauseEvt.Payload, &p)
+		if !strings.Contains(p.Reason, "advisory failure") {
+			t.Errorf("expected advisory pause reason, got: %s", p.Reason)
+		}
+		t.Logf("advisory pause triggered: %s", p.Reason)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout: advisory pause never triggered")
+	}
+
+	if committerFired.Load() != 0 {
+		t.Errorf("committer fired before resume (count=%d) — should be paused", committerFired.Load())
+	}
+
+	// Give the runner time to register the pause and defer committer's
+	// dispatch to pauser.blocked.
+	time.Sleep(200 * time.Millisecond)
+
+	events, _ := env.store.Load(ctx, "wf-advisory-resume")
+	currentVersion := events[len(events)-1].Version
+
+	resumeEvt := event.New(event.WorkflowResumed, 1, event.MustMarshal(event.WorkflowResumedPayload{
+		Reason: "operator validated diff manually",
+	})).WithAggregate("wf-advisory-resume", currentVersion+1).
+		WithCorrelation("wf-advisory-resume").
+		WithSource("test:operator")
+
+	if err := env.store.Append(ctx, "wf-advisory-resume", currentVersion, []event.Envelope{resumeEvt}); err != nil {
+		t.Fatalf("append resume: %v", err)
+	}
+	if err := env.bus.Publish(ctx, resumeEvt); err != nil {
+		t.Fatalf("publish resume: %v", err)
+	}
+
+	select {
+	case got := <-result:
+		if got.Type != event.WorkflowCompleted {
+			t.Fatalf("expected WorkflowCompleted after resume, got %s", got.Type)
+		}
+	case <-time.After(10 * time.Second):
+		corr, _ := env.store.LoadByCorrelation(ctx, "wf-advisory-resume")
+		for _, e := range corr {
+			t.Logf("  event: %s (agg=%s)", e.Type, e.AggregateID)
+		}
+		t.Fatalf("timeout: workflow never completed after resume (committer fired=%d)", committerFired.Load())
+	}
+
+	if committerFired.Load() != 1 {
+		t.Errorf("expected committer to fire exactly once after resume, got %d", committerFired.Load())
+	}
+}
+
 // TestWorkspaceDevWorkflowDefHasEscalation verifies the workspace-dev workflow
 // has EscalateOnMaxIter enabled by default.
 func TestWorkspaceDevWorkflowDefHasEscalation(t *testing.T) {

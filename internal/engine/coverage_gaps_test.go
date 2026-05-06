@@ -1297,3 +1297,163 @@ func TestCheckJoinCondition_PartialRefire(t *testing.T) {
 	}
 }
 
+// TestCheckJoinCondition_AdvisoryVerdictDoesNotBlockDownstream is the
+// regression for the resume-from-advisory-pause wedge observed in pr-feedback
+// workflow 993320c4 (PR #979 round 2). Reproduction:
+//
+//  1. Predecessor (quality-gate) emits a fail verdict with Advisory=true. The
+//     aggregate's escalateVerdict path turns this into WorkflowPaused — no
+//     FeedbackGenerated is emitted, so there is nothing for downstream to
+//     wait on.
+//  2. Downstream join (committer) re-evaluates after the predecessor's
+//     PersonaCompleted lands. Pre-fix, checkJoinCondition flagged the
+//     predecessor as `pending_feedback` purely because vt.active was set on
+//     any Outcome=Fail, blocking the join forever.
+//  3. Operator's WorkflowResumed flips Status to Running, but the runner's
+//     pauser.blocked queue is empty (the dispatch was DROPPED at the join,
+//     not deferred at the pause check) and decideWorkflowResumed only
+//     re-emits FeedbackGenerated for max-iter pauses — so nothing fires.
+//
+// Post-fix: vt.advisory short-circuits the pending_feedback predicate. The
+// join passes; the runner's pause check (step 7 in wrap) defers the dispatch
+// to pauser.blocked; resume replays it.
+func TestCheckJoinCondition_AdvisoryVerdictDoesNotBlockDownstream(t *testing.T) {
+	store, err := eventstore.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	resolver := newWorkflowResolver(store, slog.Default())
+	def := WorkflowDef{
+		ID:       "test-advisory-join",
+		Required: []string{"developer", "reviewer", "qa", "quality-gate", "committer"},
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+			"committer":    {"quality-gate"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+	}
+	resolver.registerWorkflow(def)
+
+	ctx := context.Background()
+	corrID := "corr-advisory"
+	resolver.cacheWorkflowID(corrID, "test-advisory-join")
+
+	aggVersions := map[string]int{}
+	seedEvent := func(aggSuffix string, env event.Envelope) {
+		agg := corrID
+		if aggSuffix != "" {
+			agg = corrID + ":persona:" + aggSuffix
+		}
+		aggVersions[agg]++
+		v := aggVersions[agg]
+		env = env.WithAggregate(agg, v).WithCorrelation(corrID)
+		if err := store.Append(ctx, agg, v-1, []event.Envelope{env}); err != nil {
+			t.Fatalf("seed event in %s: %v", agg, err)
+		}
+	}
+
+	// Lifecycle through quality-gate, mirroring the 993320c4 production trace.
+	seedEvent("developer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "developer"})))
+	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
+	seedEvent("qa", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "qa"})))
+
+	// quality-gate's emit batch: VerdictRendered{advisory,fail} first, then
+	// PersonaCompleted (matches resultPersister ordering).
+	seedEvent("quality-gate", event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+		Persona:       "developer",
+		SourcePersona: "quality-gate",
+		Outcome:       event.VerdictFail,
+		Advisory:      true,
+		Summary:       "stack_no_compose_file",
+	})))
+	seedEvent("quality-gate", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "quality-gate"})))
+
+	// committer joins on [quality-gate]. The advisory verdict must NOT block
+	// the join — it is operator-escalated, not a pending-feedback gate.
+	satisfied, _, missing, err := resolver.checkJoinCondition(ctx, []string{"quality-gate"}, corrID)
+	if err != nil {
+		t.Fatalf("checkJoinCondition: %v", err)
+	}
+	if !satisfied {
+		t.Errorf("join should be satisfied — advisory verdict from quality-gate is operator-escalated, not pending feedback. missing=%v", missing)
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing should be empty for advisory predecessor, got %v", missing)
+	}
+}
+
+// TestCheckJoinCondition_NonAdvisoryFailStillBlocks is the negative pair to
+// the advisory test above: a regular (non-advisory) fail verdict on a
+// retriggerable workflow MUST still flag the predecessor as pending_feedback
+// so the in-flight feedback loop completes before downstream fires. Without
+// this guard, a stale PersonaCompleted from before the FeedbackGenerated
+// would prematurely satisfy the join.
+func TestCheckJoinCondition_NonAdvisoryFailStillBlocks(t *testing.T) {
+	store, err := eventstore.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	resolver := newWorkflowResolver(store, slog.Default())
+	def := WorkflowDef{
+		ID:       "test-non-advisory-blocks",
+		Required: []string{"developer", "reviewer", "quality-gate"},
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"quality-gate": {"reviewer"},
+		},
+		RetriggeredBy: map[string][]event.Type{
+			"developer": {event.FeedbackGenerated},
+		},
+	}
+	resolver.registerWorkflow(def)
+
+	ctx := context.Background()
+	corrID := "corr-non-advisory"
+	resolver.cacheWorkflowID(corrID, "test-non-advisory-blocks")
+
+	aggVersions := map[string]int{}
+	seedEvent := func(aggSuffix string, env event.Envelope) {
+		agg := corrID
+		if aggSuffix != "" {
+			agg = corrID + ":persona:" + aggSuffix
+		}
+		aggVersions[agg]++
+		v := aggVersions[agg]
+		env = env.WithAggregate(agg, v).WithCorrelation(corrID)
+		if err := store.Append(ctx, agg, v-1, []event.Envelope{env}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	seedEvent("developer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "developer"})))
+	seedEvent("reviewer", event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+		Persona:       "developer",
+		SourcePersona: "reviewer",
+		Outcome:       event.VerdictFail,
+		Advisory:      false,
+		Summary:       "real failure",
+	})))
+	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
+
+	satisfied, _, missing, err := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
+	if err != nil {
+		t.Fatalf("checkJoinCondition: %v", err)
+	}
+	if satisfied {
+		t.Error("join should NOT be satisfied — non-advisory fail verdict on retriggerable workflow gates downstream until feedback loop completes")
+	}
+	if len(missing) != 1 || missing[0] != "reviewer(pending_feedback)" {
+		t.Errorf("expected missing=[reviewer(pending_feedback)], got %v", missing)
+	}
+}
+
