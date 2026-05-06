@@ -557,7 +557,7 @@ func TestToolWorkflowStatus_SurfacesFailureDetail(t *testing.T) {
 	// WorkflowFailed with the new diagnostic fields populated.
 	failEvt := event.New(event.WorkflowFailed, 1, event.MustMarshal(event.WorkflowFailedPayload{
 		Reason:      "persona developer failed: handler developer: backend: claude: backend: idle timeout exceeded (stall=2m0s)",
-		Phase:       "developer",
+		Persona:     "developer",
 		FailureKind: event.FailureKindIdleTimeout,
 		Backend:     "claude",
 		Stderr:      "YOLO mode is enabled. All tool calls will be automatically approved.",
@@ -740,7 +740,7 @@ func TestToolTokenUsage(t *testing.T) {
 
 	// Seed token usage
 	aiEvt := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-		Phase: "research", Backend: "claude", TokensUsed: 1500, DurationMS: 3000,
+		Persona: "researcher", Backend: "claude", TokensUsed: 1500, DurationMS: 3000,
 	})).WithAggregate("tk-wf-1", 1).WithCorrelation("c-1")
 	_ = deps.Tokens.Handle(context.Background(), aiEvt)
 
@@ -763,8 +763,8 @@ func TestToolTokenUsage(t *testing.T) {
 	if usage.Total != 1500 {
 		t.Errorf("expected 1500 tokens, got %d", usage.Total)
 	}
-	if usage.ByPhase["research"] != 1500 {
-		t.Errorf("expected 1500 for research, got %d", usage.ByPhase["research"])
+	if usage.ByPhase["researcher"] != 1500 {
+		t.Errorf("expected 1500 for researcher, got %d", usage.ByPhase["researcher"])
 	}
 }
 
@@ -1187,8 +1187,8 @@ func TestToolWorkflowVerdicts(t *testing.T) {
 
 	// Seed verdict via the projection.
 	verdictEvt := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase:       "develop",
-		SourcePhase: "review",
+		Persona:     "developer",
+		SourcePersona: "reviewer",
 		Outcome:     event.VerdictFail,
 		Summary:     "Missing error handling",
 		Issues: []event.Issue{
@@ -1224,11 +1224,11 @@ func TestToolWorkflowVerdicts(t *testing.T) {
 	if vr.Verdicts[0].Outcome != "fail" {
 		t.Errorf("expected outcome fail, got %s", vr.Verdicts[0].Outcome)
 	}
-	if vr.Verdicts[0].Phase != "develop" {
-		t.Errorf("expected phase develop, got %s", vr.Verdicts[0].Phase)
+	if vr.Verdicts[0].Phase != "developer" {
+		t.Errorf("expected phase developer, got %s", vr.Verdicts[0].Phase)
 	}
-	if vr.Verdicts[0].SourcePhase != "review" {
-		t.Errorf("expected source_phase review, got %s", vr.Verdicts[0].SourcePhase)
+	if vr.Verdicts[0].SourcePhase != "reviewer" {
+		t.Errorf("expected source_phase reviewer, got %s", vr.Verdicts[0].SourcePhase)
 	}
 	if len(vr.Verdicts[0].Issues) != 1 {
 		t.Fatalf("expected 1 issue, got %d", len(vr.Verdicts[0].Issues))
@@ -1274,7 +1274,7 @@ func seedPersonaOutput(t *testing.T, deps Deps, workflowID, persona, outputText 
 	aggregateID := workflowID + ":persona:" + persona
 
 	aiEvt := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-		Phase:      persona,
+		Persona:    persona,
 		Backend:    "claude",
 		TokensUsed: 2500,
 		DurationMS: 8000,

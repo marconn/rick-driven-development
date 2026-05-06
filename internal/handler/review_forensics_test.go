@@ -49,7 +49,6 @@ func TestRewriteAIResponseTextPreservesRaw(t *testing.T) {
 	rawJSON, _ := json.Marshal(rawText)
 	events := []event.Envelope{
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:  "pr-category-review",
 			Output: rawJSON,
 		})),
 	}
@@ -86,7 +85,6 @@ func TestRewriteAIResponseTextOmitsRawWhenUnchanged(t *testing.T) {
 	textJSON, _ := json.Marshal(text)
 	events := []event.Envelope{
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:  "pr-category-review",
 			Output: textJSON,
 		})),
 	}
@@ -145,14 +143,13 @@ func TestReviewHandlerPRCategoryReviewEmitsGroundingSummary(t *testing.T) {
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
 			Name:     "pr-data",
-			Phase:    "pr-category-review",
 			Persona:  persona.PRData,
 			Backend:  mb,
 			Store:    store,
 			Personas: persona.DefaultRegistry(),
 			Builder:  persona.NewPromptBuilder(),
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 
 	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -252,14 +249,13 @@ func TestReviewHandlerPRCategoryReviewDowngradeStampsSource(t *testing.T) {
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
 			Name:     "pr-testing",
-			Phase:    "pr-category-review",
 			Persona:  persona.PRTesting,
 			Backend:  mb,
 			Store:    store,
 			Personas: persona.DefaultRegistry(),
 			Builder:  persona.NewPromptBuilder(),
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 
 	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -327,14 +323,13 @@ func TestNonPRReviewerOmitsOutputRaw(t *testing.T) {
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
 			Name:     "reviewer",
-			Phase:    "review",
 			Persona:  persona.Reviewer,
 			Backend:  mb,
 			Store:    store,
 			Personas: persona.DefaultRegistry(),
 			Builder:  persona.NewPromptBuilder(),
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 
 	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -403,14 +398,13 @@ func TestRegressionFC2DE5A1Pattern(t *testing.T) {
 			h := NewReviewHandler(ReviewHandlerConfig{
 				AIConfig: AIHandlerConfig{
 					Name:     name,
-					Phase:    "pr-category-review",
 					Persona:  persona.PRData, // any persona — the system prompt isn't asserted
 					Backend:  mb,
 					Store:    store,
 					Personas: persona.DefaultRegistry(),
 					Builder:  persona.NewPromptBuilder(),
 				},
-				TargetPhase: "develop",
+				TargetPersona: "developer",
 			})
 
 			env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -772,14 +766,13 @@ func TestGroundPRCategoryReviewRescueCountsAndOutput(t *testing.T) {
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
 			Name:     "pr-testing",
-			Phase:    "pr-category-review",
 			Persona:  persona.PRTesting,
 			Backend:  mb,
 			Store:    store,
 			Personas: persona.DefaultRegistry(),
 			Builder:  persona.NewPromptBuilder(),
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 
 	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{

@@ -143,25 +143,6 @@ func TestLoadSystemPromptCustomDir(t *testing.T) {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// Phase persona mapping
-// ---------------------------------------------------------------------------
-
-func TestPhasePersonaMapping(t *testing.T) {
-	expected := map[string]string{
-		"research":  Researcher,
-		"architect": Architect,
-		"develop":   Developer,
-		"review":    Reviewer,
-		"qa":        QA,
-		"commit":    Committer,
-	}
-	for phase, persona := range expected {
-		if got := PhasePersona[phase]; got != persona {
-			t.Errorf("PhasePersona[%s]: want %q, got %q", phase, persona, got)
-		}
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Prompt building
@@ -189,7 +170,7 @@ func TestPromptBuilderArchitect(t *testing.T) {
 	ctx := PromptContext{
 		Task: "Build a REST API",
 		Outputs: map[string]string{
-			"research": "Domain analysis: User entity with CRUD operations.",
+			"researcher": "Domain analysis: User entity with CRUD operations.",
 		},
 	}
 	prompt, err := b.Build("architect", ctx)
@@ -227,7 +208,7 @@ func TestPromptBuilderDevelopWithFeedback(t *testing.T) {
 		Task: "Build a REST API",
 		Outputs: map[string]string{
 			"architect": "Use Go with chi router.",
-			"develop":   "Previous implementation...",
+			"developer": "Previous implementation...",
 		},
 		Feedback:  "1. Missing error handling in handler\n2. No input validation",
 		Iteration: 1,
@@ -250,7 +231,7 @@ func TestPromptBuilderReview(t *testing.T) {
 		Task: "Build a REST API",
 		Outputs: map[string]string{
 			"architect": "Architecture plan.",
-			"develop":   "Implementation code.",
+			"developer": "Implementation code.",
 		},
 	}
 	prompt, err := b.Build("review", ctx)
@@ -270,7 +251,7 @@ func TestPromptBuilderCommit(t *testing.T) {
 	ctx := PromptContext{
 		Task: "Build a REST API",
 		Outputs: map[string]string{
-			"develop": "Implementation changes.",
+			"developer": "Implementation changes.",
 		},
 		Ticket:     "PROJ-123",
 		BaseBranch: "main",

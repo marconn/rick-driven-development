@@ -24,7 +24,6 @@ func TestReviewHandlerPassVerdict(t *testing.T) {
 			Prompt: "Build REST API",
 		})).WithCorrelation(corrID),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:  "develop",
 			Output: marshalText("implementation code..."),
 		})).WithCorrelation(corrID),
 	}
@@ -40,14 +39,13 @@ func TestReviewHandlerPassVerdict(t *testing.T) {
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
 			Name:     "reviewer",
-			Phase:    "review",
 			Persona:  persona.Reviewer,
 			Backend:  mb,
 			Store:    store,
 			Personas: persona.DefaultRegistry(),
 			Builder:  persona.NewPromptBuilder(),
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 
 	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -83,11 +81,11 @@ func TestReviewHandlerPassVerdict(t *testing.T) {
 	if verdict.Outcome != event.VerdictPass {
 		t.Errorf("want pass, got %s", verdict.Outcome)
 	}
-	if verdict.Phase != "develop" {
-		t.Errorf("want target phase 'develop', got %q", verdict.Phase)
+	if verdict.Persona != "developer" {
+		t.Errorf("want target persona 'developer', got %q", verdict.Persona)
 	}
-	if verdict.SourcePhase != "review" {
-		t.Errorf("want source phase 'review', got %q", verdict.SourcePhase)
+	if verdict.SourcePersona != "reviewer" {
+		t.Errorf("want source persona 'reviewer', got %q", verdict.SourcePersona)
 	}
 }
 
@@ -123,14 +121,13 @@ VERDICT: FAIL
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
 			Name:     "reviewer",
-			Phase:    "review",
 			Persona:  persona.Reviewer,
 			Backend:  mb,
 			Store:    store,
 			Personas: persona.DefaultRegistry(),
 			Builder:  persona.NewPromptBuilder(),
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 
 	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -198,14 +195,13 @@ func TestQAHandlerFailVerdict(t *testing.T) {
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
 			Name:     "qa",
-			Phase:    "qa",
 			Persona:  persona.QA,
 			Backend:  mb,
 			Store:    store,
 			Personas: persona.DefaultRegistry(),
 			Builder:  persona.NewPromptBuilder(),
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 
 	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -219,11 +215,11 @@ func TestQAHandlerFailVerdict(t *testing.T) {
 
 	var verdict event.VerdictPayload
 	_ = json.Unmarshal(results[3].Payload, &verdict)
-	if verdict.SourcePhase != "qa" {
-		t.Errorf("want source phase 'qa', got %q", verdict.SourcePhase)
+	if verdict.SourcePersona != "qa" {
+		t.Errorf("want source persona 'qa', got %q", verdict.SourcePersona)
 	}
-	if verdict.Phase != "develop" {
-		t.Errorf("want target phase 'develop', got %q", verdict.Phase)
+	if verdict.Persona != "developer" {
+		t.Errorf("want target persona 'developer', got %q", verdict.Persona)
 	}
 	if len(verdict.Issues) != 2 {
 		t.Errorf("want 2 issues, got %d", len(verdict.Issues))
@@ -246,12 +242,11 @@ func TestReviewHandlerBackendError(t *testing.T) {
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
 			Name:    "reviewer",
-			Phase:   "review",
 			Persona: persona.Reviewer,
 			Backend: &mockBackend{name: "claude", err: context.DeadlineExceeded},
 			Store:   store, Personas: persona.DefaultRegistry(), Builder: persona.NewPromptBuilder(),
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 
 	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -280,7 +275,6 @@ func TestReviewHandlerEventSource(t *testing.T) {
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
 			Name:    "reviewer",
-			Phase:   "review",
 			Persona: persona.Reviewer,
 			Backend: &mockBackend{
 				name:     "claude",
@@ -288,7 +282,7 @@ func TestReviewHandlerEventSource(t *testing.T) {
 			},
 			Store: store, Personas: persona.DefaultRegistry(), Builder: persona.NewPromptBuilder(),
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 
 	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -338,14 +332,13 @@ func TestReviewHandlerPRCategoryReviewFiltersUngroundedIssues(t *testing.T) {
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
 			Name:     "pr-testing",
-			Phase:    "pr-category-review",
 			Persona:  persona.PRTesting,
 			Backend:  mb,
 			Store:    store,
 			Personas: persona.DefaultRegistry(),
 			Builder:  persona.NewPromptBuilder(),
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 
 	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -405,14 +398,13 @@ func TestReviewHandlerPRCategoryReviewKeepsGroundedIssues(t *testing.T) {
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
 			Name:     "pr-observability",
-			Phase:    "pr-category-review",
 			Persona:  persona.PRObservability,
 			Backend:  mb,
 			Store:    store,
 			Personas: persona.DefaultRegistry(),
 			Builder:  persona.NewPromptBuilder(),
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 
 	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -457,7 +449,6 @@ func TestExtractResponseTextNoAIResponse(t *testing.T) {
 	// Only AIRequestSent — no AIResponseReceived.
 	events := []event.Envelope{
 		event.New(event.AIRequestSent, 1, event.MustMarshal(event.AIRequestPayload{
-			Phase:   "review",
 			Backend: "claude",
 		})),
 	}

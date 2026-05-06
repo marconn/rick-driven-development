@@ -69,7 +69,7 @@ func (h *QAJiraWriterHandler) extractInputs(events []event.Envelope) (ticketKey,
 
 		case event.AIResponseReceived:
 			var p event.AIResponsePayload
-			if err := json.Unmarshal(e.Payload, &p); err == nil && p.Phase == "qa-analyze" {
+			if err := json.Unmarshal(e.Payload, &p); err == nil && p.Persona == "qa-analyzer" {
 				qaOutput = unmarshalOutput(p.Output, p.Structured)
 			}
 		}

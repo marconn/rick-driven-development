@@ -45,11 +45,11 @@ func (p *VerdictProjection) Handle(_ context.Context, env event.Envelope) error 
 	}
 
 	record := VerdictRecord{
-		Phase:       payload.Phase,
-		SourcePhase: payload.SourcePhase,
-		Outcome:     string(payload.Outcome),
-		Summary:     payload.Summary,
-		Issues:      issues,
+		Persona:       payload.Persona,
+		SourcePersona: payload.SourcePersona,
+		Outcome:       string(payload.Outcome),
+		Summary:       payload.Summary,
+		Issues:        issues,
 	}
 
 	p.mu.Lock()
@@ -72,10 +72,10 @@ func (p *VerdictProjection) ForWorkflow(correlationID string) []VerdictRecord {
 	result := make([]VerdictRecord, len(src))
 	for i, v := range src {
 		result[i] = VerdictRecord{
-			Phase:       v.Phase,
-			SourcePhase: v.SourcePhase,
-			Outcome:     v.Outcome,
-			Summary:     v.Summary,
+			Persona:       v.Persona,
+			SourcePersona: v.SourcePersona,
+			Outcome:       v.Outcome,
+			Summary:       v.Summary,
 		}
 		if len(v.Issues) > 0 {
 			result[i].Issues = make([]VerdictIssue, len(v.Issues))

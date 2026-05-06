@@ -26,9 +26,9 @@ import (
 // dispatched, masking dispatch-vs-backend bugs (see incident
 // 2d8b4b99-f8e8-4af4-917c-9102fa6ca33a).
 type AIHandler struct {
-	name     string
-	phase    string            // workflow phase this handler processes
+	name     string            // handler name, also the persona key used in events and prompt-output reuse
 	persona  string            // persona name for system prompt
+	template string            // user-prompt template file name (defaults to handler name when empty)
 	backend  backend.Backend   // AI provider (claude, gemini)
 	store    eventstore.Store  // for loading workflow context + inline AIRequestSent persist
 	bus      eventbus.Bus      // optional: publishes AIRequestSent before backend.Run
@@ -42,9 +42,15 @@ type AIHandler struct {
 
 // AIHandlerConfig configures an AI handler.
 type AIHandlerConfig struct {
-	Name    string            // handler name (e.g., "researcher", "developer")
-	Phase   string            // workflow phase (e.g., "research", "develop")
+	Name    string            // handler name, also the persona key (e.g., "developer", "reviewer")
 	Persona string            // persona name for system prompt
+	// Template names the user-prompt template to load (e.g., "develop",
+	// "review", "pr-category-review"). Empty means use Name. Multiple
+	// handlers can share a template — the 12 pr-* category reviewers all
+	// resolve to "pr-category-review", and the historical names (develop,
+	// research, commit) are kept so the embedded markdown files don't have
+	// to be renamed alongside the handler-name collapse.
+	Template string
 	Backend backend.Backend   // AI backend to call
 	Store   eventstore.Store  // event store for context loading + inline AIRequestSent persist
 	// Bus is optional. When non-nil, AIRequestSent is persisted to the
@@ -64,12 +70,49 @@ type AIHandlerConfig struct {
 	BackendTimeout time.Duration
 }
 
+// defaultTemplate returns the prompt-template file name for a handler. The
+// embedded markdown files are still organized by phase verb (develop.md,
+// research.md) and by shared-template kind (pr-category-review.md for the 12
+// pr-* reviewers); this map keeps the verb-keyed filenames stable across the
+// handler-name collapse so we don't have to rename embedded markdown
+// alongside Go-side code. Unknown handler names fall back to the name itself,
+// which lets new handlers ship a `phases/<name>.md` template without touching
+// this map.
+func defaultTemplate(handlerName string) string {
+	switch handlerName {
+	case "developer":
+		return "develop"
+	case "researcher":
+		return "research"
+	case "committer":
+		return "commit"
+	case "reviewer":
+		return "review"
+	case "feedback-analyzer":
+		return "feedback-analyze"
+	case "qa-analyzer":
+		return "qa-analyze"
+	case "pr-replier":
+		return "pr-reply"
+	case "pr-security", "pr-concurrency", "pr-error-handling",
+		"pr-observability", "pr-api-contract", "pr-idempotency",
+		"pr-testing", "pr-integration", "pr-performance",
+		"pr-data", "pr-hygiene", "pr-vendor-resilience":
+		return "pr-category-review"
+	}
+	return handlerName
+}
+
 // NewAIHandler creates an AI handler with the given configuration.
 func NewAIHandler(cfg AIHandlerConfig) *AIHandler {
+	tmpl := cfg.Template
+	if tmpl == "" {
+		tmpl = defaultTemplate(cfg.Name)
+	}
 	return &AIHandler{
 		name:     cfg.Name,
-		phase:    cfg.Phase,
 		persona:  cfg.Persona,
+		template: tmpl,
 		backend:  cfg.Backend,
 		store:    cfg.Store,
 		bus:      cfg.Bus,
@@ -82,8 +125,7 @@ func NewAIHandler(cfg AIHandlerConfig) *AIHandler {
 	}
 }
 
-func (h *AIHandler) Name() string  { return h.name }
-func (h *AIHandler) Phase() string { return h.phase }
+func (h *AIHandler) Name() string { return h.name }
 
 // Subscribes returns empty — DAG-based dispatch handles subscriptions.
 func (h *AIHandler) Subscribes() []event.Type { return nil }
@@ -108,7 +150,7 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		return nil, fmt.Errorf("handler %s: load system prompt: %w", h.name, err)
 	}
 
-	userPrompt, err := h.builder.Build(h.phase, pctx)
+	userPrompt, err := h.builder.Build(h.template, pctx)
 	if err != nil {
 		return nil, fmt.Errorf("handler %s: build prompt: %w", h.name, err)
 	}
@@ -120,9 +162,8 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 	// by tests that don't wire a bus).
 	promptHash := sha256Short(userPrompt)
 	reqEvt := event.New(event.AIRequestSent, 1, event.MustMarshal(event.AIRequestPayload{
-		Phase:      h.phase,
+		Persona:    h.name,
 		Backend:    h.backend.Name(),
-		Persona:    h.persona,
 		PromptHash: promptHash,
 	})).WithSource("handler:" + h.name)
 
@@ -179,9 +220,8 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 	// AIResponseReceived measures subprocess runtime. Operators diagnose
 	// pre-spawn vs. subprocess-side stalls by which gap dominates.
 	startEvt := event.New(event.AIRequestStarted, 1, event.MustMarshal(event.AIRequestStartedPayload{
-		Phase:         h.phase,
+		Persona:       h.name,
 		Backend:       h.backend.Name(),
-		Persona:       h.persona,
 		PromptHash:    promptHash,
 		SpawnUnixNano: time.Now().UnixNano(),
 	})).WithSource("handler:" + h.name)
@@ -215,7 +255,7 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 
 	// AIResponseReceived
 	respEvt := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-		Phase:      h.phase,
+		Persona:    h.name,
 		Backend:    h.backend.Name(),
 		TokensUsed: resp.TokensUsed,
 		DurationMS: resp.Duration.Milliseconds(),
@@ -296,12 +336,12 @@ func (h *AIHandler) buildPromptContext(ctx context.Context, env event.Envelope) 
 		case event.AIResponseReceived:
 			var p event.AIResponsePayload
 			if err := json.Unmarshal(e.Payload, &p); err == nil {
-				pctx.Outputs[p.Phase] = unmarshalOutput(p.Output, p.Structured)
+				pctx.Outputs[p.Persona] = unmarshalOutput(p.Output, p.Structured)
 			}
 
 		case event.FeedbackGenerated:
 			var p event.FeedbackGeneratedPayload
-			if err := json.Unmarshal(e.Payload, &p); err == nil && p.TargetPhase == h.phase {
+			if err := json.Unmarshal(e.Payload, &p); err == nil && p.TargetPersona == h.name {
 				pctx.Feedback = formatFeedback(p)
 				pctx.Iteration = p.Iteration
 			}
@@ -345,7 +385,7 @@ func (h *AIHandler) buildPromptContext(ctx context.Context, env event.Envelope) 
 		case event.OperatorGuidance:
 			var p event.OperatorGuidancePayload
 			if err := json.Unmarshal(e.Payload, &p); err == nil {
-				if p.Target == "" || p.Target == h.phase {
+				if p.Target == "" || p.Target == h.name {
 					if pctx.Feedback != "" {
 						pctx.Feedback += "\n\n"
 					}

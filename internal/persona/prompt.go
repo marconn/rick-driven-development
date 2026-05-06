@@ -20,7 +20,7 @@ var phaseFS embed.FS
 type PromptContext struct {
 	Task          string            // original user request (from WorkflowRequestedPayload.Prompt)
 	Source        string            // source reference (e.g., "jira:PROJ-123", "gh:owner/repo#1")
-	Outputs       map[string]string // previous phase outputs (phase name → output text)
+	Outputs       map[string]string // previous handler outputs (handler name → output text)
 	Feedback      string            // accumulated review/QA feedback for retry iterations
 	Iteration     int               // current iteration (0-based)
 	Ticket        string            // jira ticket ID (for commit phase)
@@ -81,10 +81,10 @@ func (b *PromptBuilder) Build(phase string, ctx PromptContext) (string, error) {
 
 	data := promptData{
 		Source:           ctx.Task,
-		Research:         ctx.Outputs["research"],
+		Research:         ctx.Outputs["researcher"],
 		Architecture:     ctx.Outputs["architect"],
-		Develop:          ctx.Outputs["develop"],
-		FeedbackAnalysis: ctx.Outputs["feedback-analyze"],
+		Develop:          ctx.Outputs["developer"],
+		FeedbackAnalysis: ctx.Outputs["feedback-analyzer"],
 		Ticket:           ctx.Ticket,
 		BaseBranch:       ctx.BaseBranch,
 		WorkspacePath:    ctx.WorkspacePath,
@@ -94,10 +94,10 @@ func (b *PromptBuilder) Build(phase string, ctx PromptContext) (string, error) {
 		Enrichments:      formatEnrichments(ctx.Enrichments),
 	}
 
-	// For develop iterations after the first, include feedback and previous output.
+	// For developer iterations after the first, include feedback and previous output.
 	if ctx.Feedback != "" {
 		data.Feedback = ctx.Feedback
-		data.PreviousDevelop = ctx.Outputs["develop"]
+		data.PreviousDevelop = ctx.Outputs["developer"]
 	}
 
 	var buf bytes.Buffer

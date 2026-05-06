@@ -76,8 +76,8 @@ func TestWorkflowFailed_PropagatesFailureKindAndStderr(t *testing.T) {
 	if wfp.Reason == "" {
 		t.Errorf("Reason = empty; want a human-readable summary for log/UI fallback")
 	}
-	if wfp.Phase != "developer" {
-		t.Errorf("Phase = %q; want developer (failure attribution)", wfp.Phase)
+	if wfp.Persona != "developer" {
+		t.Errorf("Persona = %q; want developer (failure attribution)", wfp.Persona)
 	}
 }
 
@@ -100,7 +100,7 @@ func TestWorkflowFailed_EmptyFailureKindStaysEmpty(t *testing.T) {
 		Payload: event.MustMarshal(event.TokenBudgetExceededPayload{
 			TotalUsed: 100,
 			Budget:    50,
-			Phase:     "developer",
+			Persona:   "developer",
 		}),
 	})
 	if err != nil {
@@ -395,8 +395,8 @@ func TestEngineCapExceeded_TerminalFailurePropagatesClassifiers(t *testing.T) {
 	if wfp.Stderr == "" {
 		t.Error("terminal WorkflowFailed.Stderr empty — operators can't see subprocess tail without replaying persona aggregate")
 	}
-	if wfp.Phase != "developer" {
-		t.Errorf("terminal WorkflowFailed.Phase = %q; want developer", wfp.Phase)
+	if wfp.Persona != "developer" {
+		t.Errorf("terminal WorkflowFailed.Persona = %q; want developer", wfp.Persona)
 	}
 
 	// Both PersonaFailed events should have been mirrored onto the workflow

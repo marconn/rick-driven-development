@@ -719,7 +719,7 @@ func (s *Server) toolWorkflowStatus(ctx context.Context, raw json.RawMessage) (a
 		for _, pt := range s.deps.Timelines.ForWorkflow(args.WorkflowID) {
 			if pt.Status == "running" && !pt.StartedAt.IsZero() {
 				result.RunningPhases = append(result.RunningPhases, runningPhaseSummary{
-					Phase:     pt.Phase,
+					Phase:     pt.Persona,
 					ElapsedMS: time.Since(pt.StartedAt).Milliseconds(),
 				})
 			}
@@ -751,7 +751,7 @@ func (s *Server) loadWorkflowFailure(workflowID string, events []event.Envelope)
 			if ws.FailReason != "" || ws.FailureKind != "" || ws.FailBackend != "" {
 				return &workflowFailureDetail{
 					Reason:      ws.FailReason,
-					Phase:       ws.FailPhase,
+					Phase:       ws.FailPersona,
 					FailureKind: ws.FailureKind,
 					Backend:     ws.FailBackend,
 					Stderr:      ws.FailStderr,
@@ -776,7 +776,7 @@ func (s *Server) loadWorkflowFailure(workflowID string, events []event.Envelope)
 		}
 		return &workflowFailureDetail{
 			Reason:      p.Reason,
-			Phase:       p.Phase,
+			Phase:       p.Persona,
 			FailureKind: string(p.FailureKind),
 			Backend:     p.Backend,
 			Stderr:      p.Stderr,
@@ -890,7 +890,7 @@ func (s *Server) toolListWorkflows(_ context.Context, _ json.RawMessage) (any, e
 			Source:            ws.Source,
 			Ticket:            ws.Ticket,
 			FailReason:        ws.FailReason,
-			FailPhase:         ws.FailPhase,
+			FailPhase:         ws.FailPersona,
 			FailureKind:       ws.FailureKind,
 			FailBackend:       ws.FailBackend,
 			PendingHintsCount: ws.PendingHintsCount,
@@ -1013,7 +1013,7 @@ func (s *Server) toolTokenUsage(_ context.Context, raw json.RawMessage) (any, er
 	return tokenUsageResult{
 		WorkflowID: args.WorkflowID,
 		Total:      usage.Total,
-		ByPhase:    usage.ByPhase,
+		ByPhase:    usage.ByPersona,
 		ByBackend:  usage.ByBackend,
 	}, nil
 }
@@ -1061,7 +1061,7 @@ func (s *Server) toolPhaseTimeline(_ context.Context, raw json.RawMessage) (any,
 	entries := make([]phaseTimelineEntry, 0, len(timelines))
 	for _, pt := range timelines {
 		entry := phaseTimelineEntry{
-			Phase:      pt.Phase,
+			Phase:      pt.Persona,
 			Status:     pt.Status,
 			Iterations: pt.Iterations,
 			DurationMS: pt.Duration.Milliseconds(),
@@ -1477,8 +1477,8 @@ func (s *Server) toolWorkflowVerdicts(_ context.Context, raw json.RawMessage) (a
 	verdicts := make([]verdictResult, 0, len(records))
 	for _, r := range records {
 		vr := verdictResult{
-			Phase:       r.Phase,
-			SourcePhase: r.SourcePhase,
+			Phase:       r.Persona,
+			SourcePhase: r.SourcePersona,
 			Outcome:     r.Outcome,
 			Summary:     r.Summary,
 		}

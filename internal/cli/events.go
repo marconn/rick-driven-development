@@ -102,7 +102,7 @@ func eventSummary(env event.Envelope) string {
 	case event.WorkflowFailed:
 		var p event.WorkflowFailedPayload
 		if json.Unmarshal(env.Payload, &p) == nil {
-			return fmt.Sprintf("phase=%s: %s", p.Phase, truncate(p.Reason, 50))
+			return fmt.Sprintf("persona=%s: %s", p.Persona, truncate(p.Reason, 50))
 		}
 	case event.WorkflowPaused:
 		var p event.WorkflowPausedPayload
@@ -127,22 +127,22 @@ func eventSummary(env event.Envelope) string {
 	case event.AIRequestSent:
 		var p event.AIRequestPayload
 		if json.Unmarshal(env.Payload, &p) == nil {
-			return fmt.Sprintf("%s via %s", p.Phase, p.Backend)
+			return fmt.Sprintf("%s via %s", p.Persona, p.Backend)
 		}
 	case event.AIResponseReceived:
 		var p event.AIResponsePayload
 		if json.Unmarshal(env.Payload, &p) == nil {
-			return fmt.Sprintf("%s %dms tokens=%d", p.Phase, p.DurationMS, p.TokensUsed)
+			return fmt.Sprintf("%s %dms tokens=%d", p.Persona, p.DurationMS, p.TokensUsed)
 		}
 	case event.VerdictRendered:
 		var p event.VerdictPayload
 		if json.Unmarshal(env.Payload, &p) == nil {
-			return fmt.Sprintf("%s: %s (%d issues)", p.Phase, p.Outcome, len(p.Issues))
+			return fmt.Sprintf("%s: %s (%d issues)", p.Persona, p.Outcome, len(p.Issues))
 		}
 	case event.FeedbackGenerated:
 		var p event.FeedbackGeneratedPayload
 		if json.Unmarshal(env.Payload, &p) == nil {
-			return fmt.Sprintf("→%s iteration=%d", p.TargetPhase, p.Iteration)
+			return fmt.Sprintf("→%s iteration=%d", p.TargetPersona, p.Iteration)
 		}
 	case event.OperatorGuidance:
 		var p event.OperatorGuidancePayload

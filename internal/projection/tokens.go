@@ -44,8 +44,8 @@ func (p *TokenUsageProjection) Handle(_ context.Context, env event.Envelope) err
 	tu := p.getOrCreate(env.AggregateID)
 	tu.Total += payload.TokensUsed
 
-	if payload.Phase != "" {
-		tu.ByPhase[payload.Phase] += payload.TokensUsed
+	if payload.Persona != "" {
+		tu.ByPersona[payload.Persona] += payload.TokensUsed
 	}
 	if payload.Backend != "" {
 		tu.ByBackend[payload.Backend] += payload.TokensUsed
@@ -58,7 +58,7 @@ func (p *TokenUsageProjection) getOrCreate(aggregateID string) *TokenUsage {
 	if !ok {
 		tu = &TokenUsage{
 			AggregateID: aggregateID,
-			ByPhase:     make(map[string]int),
+			ByPersona:     make(map[string]int),
 			ByBackend:   make(map[string]int),
 		}
 		p.usage[aggregateID] = tu
@@ -76,8 +76,8 @@ func (p *TokenUsageProjection) Get(aggregateID string) (TokenUsage, bool) {
 	}
 	// Return a copy with cloned maps
 	result := *tu
-	result.ByPhase = make(map[string]int, len(tu.ByPhase))
-	maps.Copy(result.ByPhase, tu.ByPhase)
+	result.ByPersona = make(map[string]int, len(tu.ByPersona))
+	maps.Copy(result.ByPersona, tu.ByPersona)
 	result.ByBackend = make(map[string]int, len(tu.ByBackend))
 	maps.Copy(result.ByBackend, tu.ByBackend)
 	return result, true
@@ -93,7 +93,7 @@ func (p *TokenUsageProjection) ForWorkflow(correlationID string) (TokenUsage, bo
 	prefix := correlationID + ":"
 	result := TokenUsage{
 		AggregateID: correlationID,
-		ByPhase:     make(map[string]int),
+		ByPersona:     make(map[string]int),
 		ByBackend:   make(map[string]int),
 	}
 	found := false
@@ -101,8 +101,8 @@ func (p *TokenUsageProjection) ForWorkflow(correlationID string) (TokenUsage, bo
 		if aggID == correlationID || strings.HasPrefix(aggID, prefix) {
 			found = true
 			result.Total += tu.Total
-			for k, v := range tu.ByPhase {
-				result.ByPhase[k] += v
+			for k, v := range tu.ByPersona {
+				result.ByPersona[k] += v
 			}
 			for k, v := range tu.ByBackend {
 				result.ByBackend[k] += v

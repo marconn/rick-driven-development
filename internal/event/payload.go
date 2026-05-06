@@ -12,6 +12,47 @@ func MustMarshal(v any) json.RawMessage {
 	return data
 }
 
+// legacyPersonaFromPhase translates a legacy phase verb to the corresponding
+// handler name for back-compat with events written before the phase-verb /
+// handler-name collapse (2026-05-05). Reads only — writers always emit handler
+// names.
+//
+// The map covers every built-in phase verb that differed from its handler
+// name. Phase verbs that already matched the handler name (architect, qa) and
+// shared verbs that fan out to multiple handlers (pr-category-review) pass
+// through unchanged — old events of the latter shape didn't carry handler-
+// name information at the AI-payload level anyway, so there's nothing to
+// recover.
+func legacyPersonaFromPhase(phase string) string {
+	switch phase {
+	case "develop":
+		return "developer"
+	case "research":
+		return "researcher"
+	case "commit":
+		return "committer"
+	case "review":
+		return "reviewer"
+	case "feedback-analyze":
+		return "feedback-analyzer"
+	case "pr-reply":
+		return "pr-replier"
+	case "qa-analyze":
+		return "qa-analyzer"
+	}
+	return phase
+}
+
+// pickPersona returns persona if non-empty, otherwise translates the legacy
+// phase verb. Used by tolerant UnmarshalJSON implementations to migrate old
+// stored events on read.
+func pickPersona(persona, legacyPhase string) string {
+	if persona != "" {
+		return persona
+	}
+	return legacyPersonaFromPhase(legacyPhase)
+}
+
 // WorkflowRequestedPayload is emitted when a user requests a workflow run.
 type WorkflowRequestedPayload struct {
 	Prompt     string `json:"prompt"`
@@ -58,10 +99,27 @@ type WorkflowCompletedPayload struct {
 // TokenBudgetExceeded or hint rejections leave them empty).
 type WorkflowFailedPayload struct {
 	Reason      string      `json:"reason"`
-	Phase       string      `json:"phase,omitempty"` // which phase caused failure
+	Persona     string      `json:"persona,omitempty"` // which handler caused failure
 	FailureKind FailureKind `json:"failure_kind,omitempty"`
 	Backend     string      `json:"backend,omitempty"`
 	Stderr      string      `json:"stderr,omitempty"`
+}
+
+// UnmarshalJSON tolerates the legacy `phase` field with verb values.
+func (p *WorkflowFailedPayload) UnmarshalJSON(data []byte) error {
+	type alias WorkflowFailedPayload
+	var raw struct {
+		alias
+		Phase string `json:"phase,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = WorkflowFailedPayload(raw.alias)
+	if p.Persona == "" && raw.Phase != "" {
+		p.Persona = legacyPersonaFromPhase(raw.Phase)
+	}
+	return nil
 }
 
 // WorkflowCancelledPayload is emitted when an operator cancels a workflow.
@@ -135,12 +193,12 @@ type Issue struct {
 // iterations on a non-regression. Advisory is ignored on pass/unknown
 // outcomes.
 type VerdictPayload struct {
-	Phase       string         `json:"phase"`        // phase being evaluated (e.g., "develop")
-	SourcePhase string         `json:"source_phase"` // phase that rendered the verdict (e.g., "review")
-	Outcome     VerdictOutcome `json:"outcome"`
-	Issues      []Issue        `json:"issues,omitempty"`
-	Summary     string         `json:"summary"`
-	Advisory    bool           `json:"advisory,omitempty"`
+	Persona       string         `json:"persona"`                  // target handler whose work is being evaluated (e.g., "developer")
+	SourcePersona string         `json:"source_persona,omitempty"` // handler that rendered the verdict (e.g., "reviewer", "qa")
+	Outcome       VerdictOutcome `json:"outcome"`
+	Issues        []Issue        `json:"issues,omitempty"`
+	Summary       string         `json:"summary"`
+	Advisory      bool           `json:"advisory,omitempty"`
 	// Source classifies HOW this verdict was produced (parser path), so
 	// operators can distinguish a real PASS from a defaulted PASS or a PASS
 	// demoted from FAIL. Forensics-only — engine ignores it. Empty zero value
@@ -154,6 +212,25 @@ type VerdictPayload struct {
 	// trimmed of Docker/multipass lifecycle noise. Empty when the verdict
 	// source did not capture a diagnostic stream.
 	RawDiagnostics string `json:"raw_diagnostics,omitempty"`
+}
+
+// UnmarshalJSON tolerates legacy events written with the `phase`/`source_phase`
+// fields and verb values ("develop"/"review"). New events use `persona`/
+// `source_persona` with handler names. See legacyPersonaFromPhase.
+func (v *VerdictPayload) UnmarshalJSON(data []byte) error {
+	type alias VerdictPayload
+	var raw struct {
+		alias
+		Phase       string `json:"phase,omitempty"`
+		SourcePhase string `json:"source_phase,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*v = VerdictPayload(raw.alias)
+	v.Persona = pickPersona(v.Persona, raw.Phase)
+	v.SourcePersona = pickPersona(v.SourcePersona, raw.SourcePhase)
+	return nil
 }
 
 // VerdictSource records which parser path produced a VerdictPayload. Used to
@@ -183,11 +260,11 @@ const (
 
 // FeedbackGeneratedPayload is emitted when feedback is prepared for a retry.
 type FeedbackGeneratedPayload struct {
-	TargetPhase string  `json:"target_phase"`           // phase to reschedule (e.g., "develop")
-	SourcePhase string  `json:"source_phase,omitempty"` // phase that generated feedback (e.g., "review")
-	Iteration   int     `json:"iteration"`
-	Issues      []Issue `json:"issues"`
-	Summary     string  `json:"summary"`
+	TargetPersona string  `json:"target_persona"`           // handler to reschedule (e.g., "developer")
+	SourcePersona string  `json:"source_persona,omitempty"` // handler that generated feedback (e.g., "reviewer", "qa")
+	Iteration     int     `json:"iteration"`
+	Issues        []Issue `json:"issues"`
+	Summary       string  `json:"summary"`
 	// RawDiagnostics is forwarded from the source VerdictPayload so the
 	// developer's iteration prompt has the unfiltered tail of the failure
 	// stream, even when Issue.Description has been trimmed for human
@@ -195,18 +272,75 @@ type FeedbackGeneratedPayload struct {
 	RawDiagnostics string `json:"raw_diagnostics,omitempty"`
 }
 
+// UnmarshalJSON tolerates legacy events. Note: the pre-collapse aggregate
+// already wrote the resolved handler name into target_phase/source_phase, so
+// no value translation is needed here — it's a pure key rename.
+func (p *FeedbackGeneratedPayload) UnmarshalJSON(data []byte) error {
+	type alias FeedbackGeneratedPayload
+	var raw struct {
+		alias
+		TargetPhase string `json:"target_phase,omitempty"`
+		SourcePhase string `json:"source_phase,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = FeedbackGeneratedPayload(raw.alias)
+	if p.TargetPersona == "" {
+		p.TargetPersona = raw.TargetPhase
+	}
+	if p.SourcePersona == "" {
+		p.SourcePersona = raw.SourcePhase
+	}
+	return nil
+}
+
 // FeedbackConsumedPayload is emitted when a handler acknowledges feedback.
 type FeedbackConsumedPayload struct {
-	Phase     string `json:"phase"`
+	Persona   string `json:"persona"`
 	Iteration int    `json:"iteration"`
+}
+
+// UnmarshalJSON tolerates the legacy `phase` field with verb values.
+func (p *FeedbackConsumedPayload) UnmarshalJSON(data []byte) error {
+	type alias FeedbackConsumedPayload
+	var raw struct {
+		alias
+		Phase string `json:"phase,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = FeedbackConsumedPayload(raw.alias)
+	p.Persona = pickPersona(p.Persona, raw.Phase)
+	return nil
 }
 
 // AIRequestPayload is emitted when an AI backend call is made.
 type AIRequestPayload struct {
-	Phase      string `json:"phase"`
-	Backend    string `json:"backend"` // "claude", "gemini"
 	Persona    string `json:"persona"`
+	Backend    string `json:"backend"` // "claude", "gemini"
 	PromptHash string `json:"prompt_hash"` // for dedup, not the full prompt
+}
+
+// UnmarshalJSON tolerates the legacy `phase` field with verb values. The
+// pre-collapse struct also carried a separate `persona` key set to the system-
+// prompt key (often the same string as the handler name), so we prefer the
+// new persona, fall back to the legacy phase verb, and translate.
+func (p *AIRequestPayload) UnmarshalJSON(data []byte) error {
+	type alias AIRequestPayload
+	var raw struct {
+		alias
+		Phase string `json:"phase,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = AIRequestPayload(raw.alias)
+	if p.Persona == "" && raw.Phase != "" {
+		p.Persona = legacyPersonaFromPhase(raw.Phase)
+	}
+	return nil
 }
 
 // AIRequestStartedPayload is emitted at the moment backend.Run is invoked —
@@ -216,11 +350,27 @@ type AIRequestPayload struct {
 // AIResponseReceived is the subprocess itself (stream read, extractor,
 // watchdog). Operators diagnose stalls by counting which gap dominates.
 type AIRequestStartedPayload struct {
-	Phase         string `json:"phase"`
-	Backend       string `json:"backend"`
 	Persona       string `json:"persona"`
+	Backend       string `json:"backend"`
 	PromptHash    string `json:"prompt_hash"`
 	SpawnUnixNano int64  `json:"spawn_unix_nano"` // time.Now().UnixNano() at spawn call
+}
+
+// UnmarshalJSON tolerates the legacy `phase` field with verb values.
+func (p *AIRequestStartedPayload) UnmarshalJSON(data []byte) error {
+	type alias AIRequestStartedPayload
+	var raw struct {
+		alias
+		Phase string `json:"phase,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = AIRequestStartedPayload(raw.alias)
+	if p.Persona == "" && raw.Phase != "" {
+		p.Persona = legacyPersonaFromPhase(raw.Phase)
+	}
+	return nil
 }
 
 // AIResponsePayload is emitted when an AI backend returns.
@@ -232,7 +382,7 @@ type AIRequestStartedPayload struct {
 // captured before rewrite, only populated when grounding mutated the output.
 // Future consumers MUST treat OutputRaw as optional.
 type AIResponsePayload struct {
-	Phase      string          `json:"phase"`
+	Persona    string          `json:"persona"`
 	Backend    string          `json:"backend"`
 	TokensUsed int             `json:"tokens_used,omitempty"`
 	DurationMS int64           `json:"duration_ms"`
@@ -242,17 +392,50 @@ type AIResponsePayload struct {
 	OutputRef  string          `json:"output_ref,omitempty"`    // blob storage ref for large outputs
 }
 
+// UnmarshalJSON tolerates the legacy `phase` field with verb values.
+func (p *AIResponsePayload) UnmarshalJSON(data []byte) error {
+	type alias AIResponsePayload
+	var raw struct {
+		alias
+		Phase string `json:"phase,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = AIResponsePayload(raw.alias)
+	if p.Persona == "" && raw.Phase != "" {
+		p.Persona = legacyPersonaFromPhase(raw.Phase)
+	}
+	return nil
+}
+
 // TokenBudgetExceededPayload is emitted when cumulative token usage exceeds the budget.
 type TokenBudgetExceededPayload struct {
-	TotalUsed int `json:"total_used"`
-	Budget    int `json:"budget"`
-	Phase     string `json:"phase"` // phase that triggered the breach
+	TotalUsed int    `json:"total_used"`
+	Budget    int    `json:"budget"`
+	Persona   string `json:"persona"` // handler that triggered the breach
+}
+
+// UnmarshalJSON tolerates the legacy `phase` field with verb values.
+func (p *TokenBudgetExceededPayload) UnmarshalJSON(data []byte) error {
+	type alias TokenBudgetExceededPayload
+	var raw struct {
+		alias
+		Phase string `json:"phase,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = TokenBudgetExceededPayload(raw.alias)
+	if p.Persona == "" && raw.Phase != "" {
+		p.Persona = legacyPersonaFromPhase(raw.Phase)
+	}
+	return nil
 }
 
 // PersonaCompletedPayload is emitted when a persona handler finishes successfully.
 type PersonaCompletedPayload struct {
-	Persona      string `json:"persona"`              // handler name: "developer", "documenter"
-	Phase        string `json:"phase,omitempty"`       // DAG phase, empty for reactive
+	Persona      string `json:"persona"`               // handler name: "developer", "documenter"
 	TriggerEvent string `json:"trigger_event"`         // event type that triggered this
 	TriggerID    string `json:"trigger_id"`            // ID of triggering event
 	Reactive     bool   `json:"reactive"`              // true=bus-triggered, false=DAG-triggered
@@ -316,7 +499,6 @@ const (
 // PersonaCompletedPayload because fleet drift questions only arise on failures.
 type PersonaFailedPayload struct {
 	Persona        string      `json:"persona"`
-	Phase          string      `json:"phase,omitempty"`
 	TriggerEvent   string      `json:"trigger_event"`
 	TriggerID      string      `json:"trigger_id"`
 	Reactive       bool        `json:"reactive"`
@@ -335,8 +517,25 @@ type PersonaFailedPayload struct {
 
 // CompensationPayload is emitted during rollback.
 type CompensationPayload struct {
-	Phase  string `json:"phase"`
-	Action string `json:"action"` // what compensation was performed
+	Persona string `json:"persona"`
+	Action  string `json:"action"` // what compensation was performed
+}
+
+// UnmarshalJSON tolerates the legacy `phase` field with verb values.
+func (p *CompensationPayload) UnmarshalJSON(data []byte) error {
+	type alias CompensationPayload
+	var raw struct {
+		alias
+		Phase string `json:"phase,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*p = CompensationPayload(raw.alias)
+	if p.Persona == "" && raw.Phase != "" {
+		p.Persona = legacyPersonaFromPhase(raw.Phase)
+	}
+	return nil
 }
 
 // --- Hint payloads ---
@@ -345,7 +544,6 @@ type CompensationPayload struct {
 // before full execution. The Engine auto-approves or pauses based on confidence.
 type HintEmittedPayload struct {
 	Persona       string          `json:"persona"`
-	Phase         string          `json:"phase"`
 	TriggerEvent  string          `json:"trigger_event"`          // original event type
 	TriggerID     string          `json:"trigger_id"`             // original event ID for replay
 	Confidence    float64         `json:"confidence"`             // 0.0-1.0

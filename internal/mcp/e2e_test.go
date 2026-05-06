@@ -664,7 +664,6 @@ func TestE2EHintApproveReject(t *testing.T) {
 	//    (simulates what a Hinter handler would do).
 	hintPayload := event.MustMarshal(event.HintEmittedPayload{
 		Persona:       "plan-architect",
-		Phase:         "plan-architect",
 		TriggerEvent:  string(event.PersonaCompleted),
 		TriggerID:     "trigger-123",
 		Confidence:    0.45, // below default threshold → engine will pause
@@ -790,7 +789,6 @@ func TestE2EHintRejectSkip(t *testing.T) {
 	// Inject HintEmitted with low confidence.
 	hintPayload := event.MustMarshal(event.HintEmittedPayload{
 		Persona:    "estimator",
-		Phase:      "estimator",
 		TriggerID:  "trigger-456",
 		Confidence: 0.30,
 		Plan:       "Estimate story points for 12 tasks",

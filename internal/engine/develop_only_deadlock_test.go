@@ -97,10 +97,10 @@ func TestDevelopOnlyDeadlockRegression(t *testing.T) {
 					// generates FeedbackGenerated and re-triggers the developer.
 					return []event.Envelope{
 						event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-							Phase:       "develop",
-							SourcePhase: "commit",
-							Outcome:     event.VerdictFail,
-							Summary:     "no code changes detected in workspace",
+							Persona:       "developer",
+							SourcePersona: "committer",
+							Outcome:       event.VerdictFail,
+							Summary:       "no code changes detected in workspace",
 						})),
 					}, nil
 				}

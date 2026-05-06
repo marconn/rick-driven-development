@@ -85,9 +85,6 @@ func TestQualityGateNameAndSubscribes(t *testing.T) {
 	if h.Name() != "quality-gate" {
 		t.Errorf("want name 'quality-gate', got %q", h.Name())
 	}
-	if h.Phase() != "quality-gate" {
-		t.Errorf("want phase 'quality-gate', got %q", h.Phase())
-	}
 	if subs := h.Subscribes(); subs != nil {
 		t.Errorf("want nil subscriptions for DAG-dispatched handler, got %v", subs)
 	}
@@ -364,11 +361,11 @@ func TestQualityGateLintFails(t *testing.T) {
 	if err := json.Unmarshal(got[0].Payload, &vp); err != nil {
 		t.Fatal(err)
 	}
-	if vp.Phase != "develop" {
-		t.Errorf("want target phase 'develop', got %q", vp.Phase)
+	if vp.Persona != "developer" {
+		t.Errorf("want target persona 'developer', got %q", vp.Persona)
 	}
-	if vp.SourcePhase != "quality-gate" {
-		t.Errorf("want source phase 'quality-gate', got %q", vp.SourcePhase)
+	if vp.SourcePersona != "quality-gate" {
+		t.Errorf("want source persona 'quality-gate', got %q", vp.SourcePersona)
 	}
 	if len(vp.Issues) == 0 {
 		t.Error("expected at least one issue for lint failure")

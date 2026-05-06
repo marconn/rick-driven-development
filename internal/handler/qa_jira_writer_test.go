@@ -50,7 +50,7 @@ func TestExtractInputsQAOutputFromAIResponse(t *testing.T) {
 			Ticket: "PROJ-100",
 		})),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:      "qa-analyze",
+			Persona:    "qa-analyzer",
 			Backend:    "claude",
 			Structured: false,
 			Output:     json.RawMessage(rawOutput),
@@ -76,7 +76,6 @@ func TestExtractInputsIgnoresOtherPhases(t *testing.T) {
 			Ticket: "PROJ-200",
 		})),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:  "research",
 			Output: json.RawMessage(otherOutput),
 		})),
 	}
@@ -103,7 +102,7 @@ func TestExtractInputsBothPresent(t *testing.T) {
 			Path: "/tmp/workspace",
 		})),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:      "qa-analyze",
+			Persona:    "qa-analyzer",
 			Structured: false,
 			Output:     json.RawMessage(rawOutput),
 		})),
@@ -256,7 +255,7 @@ func TestQAJiraWriterHandleSuccess(t *testing.T) {
 			WorkflowID: "jira-qa-steps",
 		})).WithCorrelation(corrID),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:      "qa-analyze",
+			Persona:    "qa-analyzer",
 			Structured: false,
 			Output:     json.RawMessage(rawOutput),
 		})).WithCorrelation(corrID),

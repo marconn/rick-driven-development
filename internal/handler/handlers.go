@@ -17,6 +17,25 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/pluginstore"
 )
 
+// isVerdictBearingReviewer returns true for handler names that emit prose
+// VERDICT lines (reviewer, qa, the 12 pr-category reviewers). These need
+// PlainText=true so ExtractJSON does not greedily steal an in-prose JSON
+// snippet and discard the VERDICT tail (the 2026-04-22 default-optimistic
+// pass class). pr-replier and pr-consolidator are intentionally excluded —
+// pr-replier writes plain text and is gated separately at its construction
+// site; pr-consolidator emits structured inline-comments JSON.
+func isVerdictBearingReviewer(name string) bool {
+	switch name {
+	case "reviewer", "qa",
+		"pr-security", "pr-concurrency", "pr-error-handling",
+		"pr-observability", "pr-api-contract", "pr-idempotency",
+		"pr-testing", "pr-integration", "pr-performance",
+		"pr-data", "pr-hygiene", "pr-vendor-resilience":
+		return true
+	}
+	return false
+}
+
 // Deps bundles the shared dependencies needed by all handlers.
 type Deps struct {
 	Backend    backend.Backend
@@ -99,10 +118,12 @@ func RegisterAll(reg *Registry, d Deps) error {
 
 	// aiCfg builds an AIHandlerConfig with the shared deps wired in once,
 	// so each handler registration only specifies what's actually different.
-	aiCfg := func(name, phase, personaName string) AIHandlerConfig {
+	// AIHandler resolves the prompt-template name from the handler name via
+	// defaultTemplate; callers that need a non-default mapping set Template
+	// explicitly on the returned config.
+	aiCfg := func(name, personaName string) AIHandlerConfig {
 		return AIHandlerConfig{
 			Name:           name,
-			Phase:          phase,
 			Persona:        personaName,
 			Backend:        d.Backend,
 			Store:          d.Store,
@@ -137,21 +158,20 @@ func RegisterAll(reg *Registry, d Deps) error {
 	// reviewAiCfg ensures the review backend is used for review-related
 	// handlers AND applies the shorter review timeout so wedged CLIs in
 	// the review phase don't block for the full developer budget.
-	reviewAiCfg := func(name, phase, personaName string) AIHandlerConfig {
-		cfg := aiCfg(name, phase, personaName)
+	reviewAiCfg := func(name, personaName string) AIHandlerConfig {
+		cfg := aiCfg(name, personaName)
 		cfg.Backend = reviewBackend
 		cfg.BackendTimeout = reviewTimeout
-		// VERDICT-bearing review phases produce prose, not JSON. Without
+		// VERDICT-bearing reviewers produce prose, not JSON. Without
 		// PlainText=true, ExtractJSON greedily captures the first JSON
 		// literal the LLM cites (e.g. a dashboard filter snippet) and
 		// discards the rest of the output — including the VERDICT line —
 		// causing ParseVerdict to default to VerdictSourceDefaultOptimistic
 		// and silently drop the real review findings.
-		// "feedback-analyze" and "consolidator" are intentionally excluded:
+		// feedback-analyzer and pr-consolidator are intentionally excluded:
 		// feedback-analyzer uses structured JSON for issue extraction, and
 		// pr-consolidator emits structured inline-comments JSON.
-		switch phase {
-		case "pr-category-review", "review", "qa":
+		if isVerdictBearingReviewer(name) {
 			cfg.PlainText = true
 		}
 		return cfg
@@ -160,27 +180,27 @@ func RegisterAll(reg *Registry, d Deps) error {
 	handlers := []Handler{
 		// Core AI handlers — used across default, workspace-dev, jira-dev, pr-review,
 		// pr-feedback, ci-fix workflows via DAG scoping.
-		NewAIHandler(aiCfg("researcher", "research", persona.Researcher)),
-		NewAIHandler(aiCfg("architect", "architect", persona.Architect)),
-		NewDeveloperHandler(aiCfg("developer", "develop", persona.Developer)),
+		NewAIHandler(aiCfg("researcher", persona.Researcher)),
+		NewAIHandler(aiCfg("architect", persona.Architect)),
+		NewDeveloperHandler(aiCfg("developer", persona.Developer)),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("reviewer", "review", persona.Reviewer),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("reviewer", persona.Reviewer),
+			TargetPersona: "developer",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("qa", "qa", persona.QA),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("qa", persona.QA),
+			TargetPersona: "developer",
 		}),
-		NewCommitterHandler(aiCfg("committer", "commit", persona.Committer)),
+		NewCommitterHandler(aiCfg("committer", persona.Committer)),
 
 		// Feedback-specific AI handler.
-		NewAIHandler(reviewAiCfg("feedback-analyzer", "feedback-analyze", persona.FeedbackAnalyzer)),
+		NewAIHandler(reviewAiCfg("feedback-analyzer", persona.FeedbackAnalyzer)),
 
 		// PR reply composer — text-only (PlainText, Yolo=false) so the LLM
 		// cannot run `gh pr comment` itself. The matching poster handler
 		// below is responsible for the actual GitHub side-effect.
 		func() Handler {
-			cfg := reviewAiCfg("pr-replier", "pr-reply", persona.PRReplier)
+			cfg := reviewAiCfg("pr-replier", persona.PRReplier)
 			cfg.PlainText = true
 			cfg.Yolo = false
 			return NewAIHandler(cfg)
@@ -201,52 +221,52 @@ func RegisterAll(reg *Registry, d Deps) error {
 
 		// PR category reviewers — dedicated single-concern reviewers for pr-review workflow.
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("pr-security", "pr-category-review", persona.PRSecurity),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("pr-security", persona.PRSecurity),
+			TargetPersona: "developer",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("pr-concurrency", "pr-category-review", persona.PRConcurrency),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("pr-concurrency", persona.PRConcurrency),
+			TargetPersona: "developer",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("pr-error-handling", "pr-category-review", persona.PRErrorHandling),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("pr-error-handling", persona.PRErrorHandling),
+			TargetPersona: "developer",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("pr-observability", "pr-category-review", persona.PRObservability),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("pr-observability", persona.PRObservability),
+			TargetPersona: "developer",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("pr-api-contract", "pr-category-review", persona.PRAPIContract),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("pr-api-contract", persona.PRAPIContract),
+			TargetPersona: "developer",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("pr-idempotency", "pr-category-review", persona.PRIdempotency),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("pr-idempotency", persona.PRIdempotency),
+			TargetPersona: "developer",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("pr-testing", "pr-category-review", persona.PRTesting),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("pr-testing", persona.PRTesting),
+			TargetPersona: "developer",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("pr-integration", "pr-category-review", persona.PRIntegration),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("pr-integration", persona.PRIntegration),
+			TargetPersona: "developer",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("pr-performance", "pr-category-review", persona.PRPerformance),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("pr-performance", persona.PRPerformance),
+			TargetPersona: "developer",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("pr-data", "pr-category-review", persona.PRData),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("pr-data", persona.PRData),
+			TargetPersona: "developer",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("pr-hygiene", "pr-category-review", persona.PRHygiene),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("pr-hygiene", persona.PRHygiene),
+			TargetPersona: "developer",
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
-			AIConfig:    reviewAiCfg("pr-vendor-resilience", "pr-category-review", persona.PRVendorResilience),
-			TargetPhase: "develop",
+			AIConfig:      reviewAiCfg("pr-vendor-resilience", persona.PRVendorResilience),
+			TargetPersona: "developer",
 		}),
 
 		// Jira context handler (jira-dev workflow).
@@ -258,7 +278,7 @@ func RegisterAll(reg *Registry, d Deps) error {
 		// QA-steps-specific handlers.
 		NewQAContext(d),
 		func() Handler {
-			cfg := reviewAiCfg("qa-analyzer", "qa-analyze", persona.QAAnalyzer)
+			cfg := reviewAiCfg("qa-analyzer", persona.QAAnalyzer)
 			cfg.PlainText = true
 			return NewAIHandler(cfg)
 		}(),

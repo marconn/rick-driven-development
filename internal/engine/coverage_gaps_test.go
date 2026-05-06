@@ -234,8 +234,8 @@ func fireWorkflowDirect(ctx context.Context, t *testing.T, store eventstore.Stor
 //  - Required must not be empty
 //  - MaxIterations must be > 0
 //  - No duplicate entries in Required
-//  - PhaseMap entries whose persona IS in Required must round-trip through ResolvePhase
-//  - ResolvePhase fallback: unmapped phases return the phase name itself
+//  - Every Graph predecessor must itself be a key in Graph (no dangling deps)
+//  - Every Graph key must be in Required (no orphan handlers)
 
 func TestWithoutHandler_RemovesAndRewires(t *testing.T) {
 	// workspace-dev: committer depends on quality-gate, quality-gate depends on [reviewer, qa].
@@ -316,38 +316,21 @@ func TestBuiltinWorkflowDefs_StructuralValidity(t *testing.T) {
 				seen[r] = true
 			}
 
-			// For entries in PhaseMap whose mapped persona IS in Required, the
-			// mapping must be consistent — i.e., ResolvePhase must return exactly
-			// that persona. (The shared corePhaseMap may contain entries for
-			// personas that are not in every workflow's Required; those are intentional
-			// and are fine — they won't be triggered for those workflows.)
+			// Every Graph key must be in Required (no orphan handlers in the
+			// DAG that the completion check ignores), and every predecessor
+			// must itself be a Graph key (no dangling edges).
 			requiredSet := make(map[string]bool, len(def.Required))
 			for _, r := range def.Required {
 				requiredSet[r] = true
 			}
-			for phase, persona := range def.PhaseMap {
-				if !requiredSet[persona] {
-					// Entry is in the shared map but doesn't apply to this workflow — skip.
-					continue
+			for h, preds := range def.Graph {
+				if !requiredSet[h] {
+					t.Errorf("def %q: handler %q in Graph is not in Required", def.ID, h)
 				}
-				resolved := def.ResolvePhase(phase)
-				if resolved != persona {
-					t.Errorf("def %q: ResolvePhase(%q) = %q, want %q", def.ID, phase, resolved, persona)
-				}
-			}
-
-			// ResolvePhase fallback: unmapped phases must return the phase name itself.
-			// This is critical for workflows where phase == persona (e.g., "qa" → "qa").
-			unmapped := "does-not-exist-in-map"
-			if got := def.ResolvePhase(unmapped); got != unmapped {
-				t.Errorf("def %q: ResolvePhase(%q) fallback = %q, want same value", def.ID, unmapped, got)
-			}
-
-			// For defs with a PhaseMap, verify that persona names in PhaseMap values
-			// that ARE in Required are all valid persona name strings (non-empty).
-			for phase, persona := range def.PhaseMap {
-				if persona == "" {
-					t.Errorf("def %q: PhaseMap[%q] has empty persona name", def.ID, phase)
+				for _, p := range preds {
+					if _, ok := def.Graph[p]; !ok {
+						t.Errorf("def %q: handler %q has predecessor %q absent from Graph", def.ID, h, p)
+					}
 				}
 			}
 		})
@@ -1061,7 +1044,6 @@ func TestCheckJoinCondition_FeedbackInvalidatesStale(t *testing.T) {
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
 		},
-		PhaseMap: corePhaseMap,
 	}
 	resolver.registerWorkflow(def)
 
@@ -1086,8 +1068,8 @@ func TestCheckJoinCondition_FeedbackInvalidatesStale(t *testing.T) {
 	// FeedbackGenerated targeting developer (e.g., quality-gate failed).
 	fbAgg := corrID
 	fbEvt := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "developer",
-		SourcePhase: "quality-gate",
+		TargetPersona: "developer",
+		SourcePersona: "quality-gate",
 		Iteration:   1,
 	})).WithAggregate(fbAgg, 1).WithCorrelation(corrID)
 	if err := store.Append(ctx, fbAgg, 0, []event.Envelope{fbEvt}); err != nil {
@@ -1124,7 +1106,6 @@ func TestCheckJoinCondition_FreshAfterFeedback(t *testing.T) {
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
 		},
-		PhaseMap: corePhaseMap,
 	}
 	resolver.registerWorkflow(def)
 
@@ -1154,7 +1135,7 @@ func TestCheckJoinCondition_FreshAfterFeedback(t *testing.T) {
 
 	// Feedback: quality-gate failed.
 	seedEvent("", event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "developer", SourcePhase: "quality-gate", Iteration: 1,
+		TargetPersona: "developer", SourcePersona: "quality-gate", Iteration: 1,
 	})))
 
 	// Round 2: developer, reviewer, qa all re-complete.
@@ -1190,7 +1171,6 @@ func TestCheckJoinCondition_MultipleIterations(t *testing.T) {
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
 		},
-		PhaseMap: corePhaseMap,
 	}
 	resolver.registerWorkflow(def)
 
@@ -1218,7 +1198,7 @@ func TestCheckJoinCondition_MultipleIterations(t *testing.T) {
 
 	// Feedback #1.
 	seedEvent("", event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "developer", Iteration: 1,
+		TargetPersona: "developer", Iteration: 1,
 	})))
 
 	// After feedback #1, stale reviewer must not satisfy join.
@@ -1233,7 +1213,7 @@ func TestCheckJoinCondition_MultipleIterations(t *testing.T) {
 
 	// Feedback #2.
 	seedEvent("", event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "developer", Iteration: 2,
+		TargetPersona: "developer", Iteration: 2,
 	})))
 
 	// After feedback #2, round 2 reviewer is stale again.
@@ -1275,7 +1255,6 @@ func TestCheckJoinCondition_PartialRefire(t *testing.T) {
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
 		},
-		PhaseMap: corePhaseMap,
 	}
 	resolver.registerWorkflow(def)
 
@@ -1304,7 +1283,7 @@ func TestCheckJoinCondition_PartialRefire(t *testing.T) {
 
 	// Feedback.
 	seedEvent("", event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "developer", Iteration: 1,
+		TargetPersona: "developer", Iteration: 1,
 	})))
 
 	// Round 2: only reviewer re-completes, qa hasn't yet.

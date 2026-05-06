@@ -46,19 +46,6 @@ const (
 	PRReplier = "pr-replier"
 )
 
-// PhasePersona maps a workflow phase name to its default persona.
-var PhasePersona = map[string]string{
-	"research":         Researcher,
-	"architect":        Architect,
-	"develop":          Developer,
-	"review":           Reviewer,
-	"qa":               QA,
-	"commit":           Committer,
-	"workspace":        Workspace,
-	"feedback-analyze": FeedbackAnalyzer,
-	"feedback-verify":  Reviewer,
-}
-
 // Persona defines an AI agent's identity.
 type Persona struct {
 	Name        string // unique identifier (e.g., "researcher")

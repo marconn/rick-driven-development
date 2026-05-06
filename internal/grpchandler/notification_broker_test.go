@@ -63,7 +63,7 @@ func seedWorkflowProjections(
 
 	// Seed AIResponseReceived for token tracking.
 	aiResp := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-		Phase:      "researcher",
+		Persona:    "researcher",
 		Backend:    "claude",
 		TokensUsed: 500,
 	})).WithAggregate(correlationID+":persona:researcher", 1).WithCorrelation(correlationID)
@@ -350,7 +350,7 @@ func TestBroker_FailedWorkflowNotification(t *testing.T) {
 
 	failed := event.New(event.WorkflowFailed, 1, event.MustMarshal(event.WorkflowFailedPayload{
 		Reason: "developer crashed",
-		Phase:  "developer",
+		Persona: "developer",
 	})).WithAggregate("wf-fail", 3).WithCorrelation("wf-fail")
 	_ = workflows.Handle(ctx, failed)
 
@@ -425,7 +425,7 @@ func TestBroker_FailedPhaseCarriesStderrAndFailureKind(t *testing.T) {
 
 	workflowFailed := event.New(event.WorkflowFailed, 1, event.MustMarshal(event.WorkflowFailedPayload{
 		Reason: "persona feedback-analyzer failed: " + wantError,
-		Phase:  "feedback-analyzer",
+		Persona: "feedback-analyzer",
 	})).WithAggregate("wf-idle", 3).WithCorrelation("wf-idle")
 	_ = workflows.Handle(ctx, workflowFailed)
 
@@ -493,8 +493,8 @@ func TestBroker_NotificationIncludesVerdicts(t *testing.T) {
 
 	// Seed verdicts into the projection.
 	reviewVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase:       "develop",
-		SourcePhase: "reviewer",
+		Persona:     "developer",
+		SourcePersona: "reviewer",
 		Outcome:     event.VerdictFail,
 		Summary:     "Missing error handling",
 		Issues: []event.Issue{
@@ -504,8 +504,8 @@ func TestBroker_NotificationIncludesVerdicts(t *testing.T) {
 	_ = verdicts.Handle(ctx, reviewVerdict)
 
 	qaVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase:       "develop",
-		SourcePhase: "qa",
+		Persona:     "developer",
+		SourcePersona: "qa",
 		Outcome:     event.VerdictPass,
 		Summary:     "All tests pass",
 	})).WithAggregate("wf-v:persona:qa", 1).WithCorrelation("wf-v")
@@ -624,8 +624,8 @@ func TestBroker_CatchUpIncludesVerdicts(t *testing.T) {
 
 	// Seed a verdict.
 	v := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase:       "develop",
-		SourcePhase: "reviewer",
+		Persona:     "developer",
+		SourcePersona: "reviewer",
 		Outcome:     event.VerdictPass,
 		Summary:     "All good",
 	})).WithAggregate("wf-catchup-v:persona:reviewer", 1).WithCorrelation("wf-catchup-v")

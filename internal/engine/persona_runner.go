@@ -987,8 +987,7 @@ func (r *PersonaRunner) frontRunAdvisoryPause(correlationID string, events []eve
 		if !ok {
 			return
 		}
-		target := def.ResolvePhase(v.Phase)
-		if !slices.Contains(def.Required, target) {
+		if !slices.Contains(def.Required, v.Persona) {
 			return
 		}
 		r.pauser.pause(correlationID)
@@ -1119,7 +1118,6 @@ func (r *PersonaRunner) subscribeWorkflowRetried() {
 			reason := "auto-retry dispatch failed: " + cause
 			failEvt := event.New(event.PersonaFailed, 1, event.MustMarshal(event.PersonaFailedPayload{
 				Persona:        p.FromPhase,
-				Phase:          p.FromPhase,
 				TriggerEvent:   string(env.Type),
 				TriggerID:      string(env.ID),
 				Reactive:       false,

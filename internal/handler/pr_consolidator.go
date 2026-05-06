@@ -195,7 +195,7 @@ func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequested
 			if err := json.Unmarshal(e.Payload, &p); err == nil {
 				key := strings.TrimPrefix(e.Source, "handler:")
 				if key == "" {
-					key = p.Phase // fallback for events without Source
+					key = p.Persona // fallback for events without Source
 				}
 				handlerOutputs[key] = unmarshalOutput(p.Output, p.Structured)
 			}

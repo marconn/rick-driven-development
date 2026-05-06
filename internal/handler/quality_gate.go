@@ -165,7 +165,6 @@ func resolveQualityGateDebugDir() string {
 }
 
 func (h *QualityGateHandler) Name() string             { return h.name }
-func (h *QualityGateHandler) Phase() string             { return "quality-gate" }
 func (h *QualityGateHandler) Subscribes() []event.Type { return nil }
 
 // Handle runs ./run.sh lint and ./run.sh test inside an isolated VM via
@@ -632,10 +631,10 @@ func parseStackNDJSON(data []byte) (stackRunResult, bool) {
 func (h *QualityGateHandler) passVerdict(summary string) []event.Envelope {
 	return []event.Envelope{
 		event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-			Phase:       "develop",
-			SourcePhase: "quality-gate",
-			Outcome:     event.VerdictPass,
-			Summary:     summary,
+			Persona:       "developer",
+			SourcePersona: "quality-gate",
+			Outcome:       event.VerdictPass,
+			Summary:       summary,
 		})).WithSource("handler:" + h.name),
 	}
 }
@@ -643,8 +642,8 @@ func (h *QualityGateHandler) passVerdict(summary string) []event.Envelope {
 func (h *QualityGateHandler) failVerdict(summary string, issues []event.Issue, rawDiagnostics string) []event.Envelope {
 	return []event.Envelope{
 		event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-			Phase:          "develop",
-			SourcePhase:    "quality-gate",
+			Persona:        "developer",
+			SourcePersona:  "quality-gate",
 			Outcome:        event.VerdictFail,
 			Issues:         issues,
 			Summary:        summary,
@@ -746,8 +745,8 @@ func reasonStackUnavailable(code, message string) string {
 func (h *QualityGateHandler) advisoryFailVerdict(summary string, issues []event.Issue, rawDiagnostics string) []event.Envelope {
 	return []event.Envelope{
 		event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-			Phase:          "develop",
-			SourcePhase:    "quality-gate",
+			Persona:        "developer",
+			SourcePersona:  "quality-gate",
 			Outcome:        event.VerdictFail,
 			Issues:         issues,
 			Summary:        summary,

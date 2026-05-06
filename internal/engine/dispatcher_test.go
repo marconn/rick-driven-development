@@ -28,7 +28,7 @@ func newDispatcherWithHandler(name string, fn func(context.Context, event.Envelo
 }
 
 func TestLocalDispatcher_Success(t *testing.T) {
-	outEvt := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{Phase: "develop"}))
+	outEvt := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{Persona: "developer"}))
 	d := newDispatcherWithHandler("worker", func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
 		return []event.Envelope{outEvt}, nil
 	})

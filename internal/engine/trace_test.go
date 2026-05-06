@@ -106,7 +106,7 @@ func summarize(env event.Envelope) string {
 	case event.WorkflowFailed:
 		var p event.WorkflowFailedPayload
 		_ = json.Unmarshal(env.Payload, &p)
-		return fmt.Sprintf("reason=%q phase=%s", truncate(p.Reason, 50), p.Phase)
+		return fmt.Sprintf("reason=%q phase=%s", truncate(p.Reason, 50), p.Persona)
 	case event.PersonaCompleted:
 		var p event.PersonaCompletedPayload
 		_ = json.Unmarshal(env.Payload, &p)
@@ -120,11 +120,11 @@ func summarize(env event.Envelope) string {
 		var p event.VerdictPayload
 		_ = json.Unmarshal(env.Payload, &p)
 		return fmt.Sprintf("outcome=%s phase=%s source=%s issues=%d",
-			p.Outcome, p.Phase, p.SourcePhase, len(p.Issues))
+			p.Outcome, p.Persona, p.SourcePersona, len(p.Issues))
 	case event.FeedbackGenerated:
 		var p event.FeedbackGeneratedPayload
 		_ = json.Unmarshal(env.Payload, &p)
-		return fmt.Sprintf("target=%s source=%s iter=%d", p.TargetPhase, p.SourcePhase, p.Iteration)
+		return fmt.Sprintf("target=%s source=%s iter=%d", p.TargetPersona, p.SourcePersona, p.Iteration)
 	case event.WorkflowPaused:
 		var p event.WorkflowPausedPayload
 		_ = json.Unmarshal(env.Payload, &p)
@@ -223,7 +223,6 @@ func TestTraceDefaultWorkflowWithFeedback(t *testing.T) {
 		ID:            "workspace-dev",
 		Required:      []string{"researcher", "architect", "developer", "reviewer", "qa", "committer"},
 		MaxIterations: 3,
-		PhaseMap:      corePhaseMap,
 		Graph: map[string][]string{
 			"researcher": {},
 			"architect":  {"researcher"},
@@ -259,8 +258,8 @@ func TestTraceDefaultWorkflowWithFeedback(t *testing.T) {
 			if n == 1 {
 				return []event.Envelope{
 					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-						Phase:       "develop",
-						SourcePhase: "review",
+						Persona:     "developer",
+						SourcePersona: "reviewer",
 						Outcome:     event.VerdictFail,
 						Summary:     "missing error handling in handler.go:42",
 						Issues: []event.Issue{
@@ -372,7 +371,6 @@ func TestTraceEscalation(t *testing.T) {
 		Required:          []string{"developer", "reviewer"},
 		MaxIterations:     1,
 		EscalateOnMaxIter: true,
-		PhaseMap:          corePhaseMap,
 		Graph:             map[string][]string{"developer": {}, "reviewer": {"developer"}},
 		RetriggeredBy:     map[string][]event.Type{"developer": {event.FeedbackGenerated}},
 	}
@@ -394,7 +392,7 @@ func TestTraceEscalation(t *testing.T) {
 		func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
 			return []event.Envelope{
 				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-					Phase: "develop", SourcePhase: "review",
+					Persona: "developer", SourcePersona: "reviewer",
 					Outcome: event.VerdictFail, Summary: "code quality insufficient",
 				})),
 			}, nil

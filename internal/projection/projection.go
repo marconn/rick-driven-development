@@ -132,20 +132,20 @@ func (r *Runner) Position() int64 {
 // aggregate-level failures (TokenBudgetExceeded, hint rejections) where the
 // fields are not meaningful.
 type WorkflowStatus struct {
-	AggregateID      string
-	WorkflowID       string
-	Status           string // requested, running, completed, failed, cancelled
-	Prompt           string
-	Source           string
-	Ticket           string
-	Phases           []string
-	StartedAt        time.Time
-	CompletedAt      time.Time
-	FailReason       string
-	FailureKind      string
-	FailBackend      string
-	FailStderr       string
-	FailPhase        string
+	AggregateID       string
+	WorkflowID        string
+	Status            string // requested, running, completed, failed, cancelled
+	Prompt            string
+	Source            string
+	Ticket            string
+	Phases            []string
+	StartedAt         time.Time
+	CompletedAt       time.Time
+	FailReason        string
+	FailureKind       string
+	FailBackend       string
+	FailStderr        string
+	FailPersona       string
 	PendingHintsCount int // count of HintEmitted without matching HintApproved/HintRejected
 }
 
@@ -153,11 +153,11 @@ type WorkflowStatus struct {
 type TokenUsage struct {
 	AggregateID string
 	Total       int
-	ByPhase     map[string]int
+	ByPersona   map[string]int
 	ByBackend   map[string]int
 }
 
-// PhaseTimeline tracks timing and iteration count for a phase execution.
+// PhaseTimeline tracks timing and iteration count for a persona's execution.
 // On failure (Status == "failed"), Error holds the PersonaFailedPayload.Error
 // message and FailureKind classifies the failure shape (idle_timeout,
 // wall_timeout, cancelled, backend_error, handler_error) so operators can
@@ -166,7 +166,7 @@ type TokenUsage struct {
 // subprocess stderr when the backend captured one.
 type PhaseTimeline struct {
 	AggregateID string
-	Phase       string
+	Persona     string
 	Iterations  int
 	StartedAt   time.Time
 	CompletedAt time.Time
@@ -177,13 +177,13 @@ type PhaseTimeline struct {
 	Stderr      string
 }
 
-// VerdictRecord captures a single review verdict for a workflow phase.
+// VerdictRecord captures a single review verdict for a workflow.
 type VerdictRecord struct {
-	Phase       string
-	SourcePhase string
-	Outcome     string // "pass", "fail", "unknown"
-	Summary     string
-	Issues      []VerdictIssue
+	Persona       string
+	SourcePersona string
+	Outcome       string // "pass", "fail", "unknown"
+	Summary       string
+	Issues        []VerdictIssue
 }
 
 // VerdictIssue is a single finding from a review verdict.

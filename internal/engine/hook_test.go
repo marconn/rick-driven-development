@@ -78,7 +78,7 @@ func TestE2EBeforeHookFrontendEnricher(t *testing.T) {
 		func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
 			return []event.Envelope{
 				event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-					Phase:   "architect",
+					Persona: "architect",
 					Backend: "claude",
 					Output:  json.RawMessage(`"Build a dashboard with data tables, charts, and a form wizard. Use React + TypeScript."`),
 				})),
@@ -99,7 +99,7 @@ func TestE2EBeforeHookFrontendEnricher(t *testing.T) {
 			for _, e := range events {
 				if e.Type == event.AIResponseReceived {
 					var p event.AIResponsePayload
-					if err := json.Unmarshal(e.Payload, &p); err == nil && p.Phase == "architect" {
+					if err := json.Unmarshal(e.Payload, &p); err == nil && p.Persona == "architect" {
 						enricherSawArchitect.Store(true)
 					}
 				}

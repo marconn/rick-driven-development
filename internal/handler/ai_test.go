@@ -97,7 +97,6 @@ func (s *mockStore) Close() error                                               
 func TestAIHandlerNameAndSubscribes(t *testing.T) {
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "researcher",
-		Phase:    "research",
 		Persona:  persona.Researcher,
 		Backend:  &mockBackend{name: "claude"},
 		Store:    newMockStore(),
@@ -141,7 +140,6 @@ func TestAIHandlerHandle(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "researcher",
-		Phase:    "research",
 		Persona:  persona.Researcher,
 		Backend:  mb,
 		Store:    store,
@@ -170,14 +168,11 @@ func TestAIHandlerHandle(t *testing.T) {
 	if err := json.Unmarshal(results[0].Payload, &reqPayload); err != nil {
 		t.Fatalf("unmarshal AIRequestPayload: %v", err)
 	}
-	if reqPayload.Phase != "research" {
-		t.Errorf("want phase %q, got %q", "research", reqPayload.Phase)
+	if reqPayload.Persona != "researcher" {
+		t.Errorf("want persona %q, got %q", "researcher", reqPayload.Persona)
 	}
 	if reqPayload.Backend != "claude" {
 		t.Errorf("want backend %q, got %q", "claude", reqPayload.Backend)
-	}
-	if reqPayload.Persona != persona.Researcher {
-		t.Errorf("want persona %q, got %q", persona.Researcher, reqPayload.Persona)
 	}
 	if reqPayload.PromptHash == "" {
 		t.Error("prompt hash should not be empty")
@@ -206,8 +201,8 @@ func TestAIHandlerHandle(t *testing.T) {
 	if err := json.Unmarshal(results[2].Payload, &respPayload); err != nil {
 		t.Fatalf("unmarshal AIResponsePayload: %v", err)
 	}
-	if respPayload.Phase != "research" {
-		t.Errorf("want phase %q, got %q", "research", respPayload.Phase)
+	if respPayload.Persona != "researcher" {
+		t.Errorf("want persona %q, got %q", "researcher", respPayload.Persona)
 	}
 	if respPayload.Backend != "claude" {
 		t.Errorf("want backend %q, got %q", "claude", respPayload.Backend)
@@ -251,7 +246,6 @@ func TestAIHandlerStructuredOutput(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "researcher",
-		Phase:    "research",
 		Persona:  persona.Researcher,
 		Backend:  mb,
 		Store:    store,
@@ -296,7 +290,7 @@ func TestAIHandlerWithPreviousOutputs(t *testing.T) {
 			Prompt: "Build user API",
 		})).WithCorrelation(corrID),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:   "research",
+			Persona: "researcher",
 			Backend: "claude",
 			Output:  json.RawMessage(researchOutput),
 		})).WithCorrelation(corrID),
@@ -312,7 +306,6 @@ func TestAIHandlerWithPreviousOutputs(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "architect",
-		Phase:    "architect",
 		Persona:  persona.Architect,
 		Backend:  mb,
 		Store:    store,
@@ -350,13 +343,20 @@ func TestAIHandlerWithFeedback(t *testing.T) {
 			Prompt: "Build API",
 		})).WithCorrelation(corrID),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:   "architect",
+			Persona: "architect",
 			Backend: "claude",
 			Output:  json.RawMessage(archOutput),
 		})).WithCorrelation(corrID),
+		// FeedbackGenerated as the aggregate actually emits it: TargetPersona is
+		// the handler name ("developer"), not the legacy phase verb. The 2026-05-05
+		// regression had the developer matching this against its phase verb and
+		// silently dropping every feedback iteration. This test pins the new
+		// contract: TargetPersona == h.Name() routes feedback to the developer
+		// prompt.
 		event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-			TargetPhase: "develop",
-			Iteration:   1,
+			TargetPersona: "developer",
+			SourcePersona: "reviewer",
+			Iteration:     1,
 			Issues: []event.Issue{
 				{Severity: "major", Category: "correctness", Description: "Missing error handling"},
 			},
@@ -374,8 +374,8 @@ func TestAIHandlerWithFeedback(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
+		Template: "develop",
 		Backend:  mb,
 		Store:    store,
 		Personas: persona.DefaultRegistry(),
@@ -383,8 +383,8 @@ func TestAIHandlerWithFeedback(t *testing.T) {
 	})
 
 	env := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "develop",
-		Iteration:   1,
+		TargetPersona: "developer",
+		Iteration:     1,
 	})).WithCorrelation(corrID)
 
 	_, err := h.Handle(context.Background(), env)
@@ -394,7 +394,99 @@ func TestAIHandlerWithFeedback(t *testing.T) {
 
 	// Verify the prompt includes feedback.
 	if !strings.Contains(mb.lastReq.UserPrompt, "Missing error handling") {
-		t.Error("user prompt should include feedback")
+		t.Errorf("user prompt should include feedback issue text, got:\n%s", mb.lastReq.UserPrompt)
+	}
+	// Belt-and-suspenders: the prompt must also surface the failing summary.
+	if !strings.Contains(mb.lastReq.UserPrompt, "Fix error handling") {
+		t.Errorf("user prompt should include feedback summary, got:\n%s", mb.lastReq.UserPrompt)
+	}
+}
+
+// TestAIHandler_FeedbackTargetPersonaMustMatchHandlerName regression-locks the
+// feedback-routing contract: the developer's prompt context only picks up a
+// FeedbackGenerated payload whose TargetPersona equals the handler's Name. A
+// payload addressed to a different persona must not bleed feedback into this
+// handler's prompt. Without this lock, a future rename or a stray legacy event
+// could re-introduce the silent feedback drop class.
+func TestAIHandler_FeedbackTargetPersonaMustMatchHandlerName(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-cross-persona"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "noop",
+		})).WithCorrelation(corrID),
+		// Feedback addressed to a sibling handler — must NOT reach the developer.
+		event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
+			TargetPersona: "reviewer",
+			SourcePersona: "qa",
+			Iteration:     1,
+			Issues: []event.Issue{{
+				Severity: "major", Category: "correctness",
+				Description: "DO NOT LEAK INTO DEVELOPER PROMPT",
+			}},
+			Summary: "review-targeted feedback",
+		})).WithCorrelation(corrID),
+	}
+
+	mb := &mockBackend{name: "claude", response: &backend.Response{Output: "ok", Duration: time.Millisecond}}
+	h := NewAIHandler(AIHandlerConfig{
+		Name: "developer", Persona: persona.Developer, Template: "develop",
+		Backend: mb, Store: store, Personas: persona.DefaultRegistry(), Builder: persona.NewPromptBuilder(),
+	})
+
+	env := event.New(event.WorkflowRequested, 1, []byte(`{}`)).WithCorrelation(corrID)
+	if _, err := h.Handle(context.Background(), env); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if strings.Contains(mb.lastReq.UserPrompt, "DO NOT LEAK") {
+		t.Errorf("developer prompt incorrectly absorbed reviewer-targeted feedback:\n%s", mb.lastReq.UserPrompt)
+	}
+}
+
+// TestAIHandler_OperatorGuidanceTargetMatchesHandlerName mirrors the feedback
+// test for the OperatorGuidance branch — both go through the same handler-name
+// match in buildPromptContext. Untargeted guidance applies to every persona;
+// guidance addressed to a sibling must be filtered out.
+func TestAIHandler_OperatorGuidanceTargetMatchesHandlerName(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-guidance"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "noop",
+		})).WithCorrelation(corrID),
+		event.New(event.OperatorGuidance, 1, event.MustMarshal(event.OperatorGuidancePayload{
+			Target:  "developer",
+			Content: "Focus on error handling",
+		})).WithCorrelation(corrID),
+		event.New(event.OperatorGuidance, 1, event.MustMarshal(event.OperatorGuidancePayload{
+			Content: "General guidance for everyone",
+		})).WithCorrelation(corrID),
+		event.New(event.OperatorGuidance, 1, event.MustMarshal(event.OperatorGuidancePayload{
+			Target:  "reviewer",
+			Content: "Ignore this for developer",
+		})).WithCorrelation(corrID),
+	}
+
+	mb := &mockBackend{name: "claude", response: &backend.Response{Output: "ok", Duration: time.Millisecond}}
+	h := NewAIHandler(AIHandlerConfig{
+		Name: "developer", Persona: persona.Developer, Template: "develop",
+		Backend: mb, Store: store, Personas: persona.DefaultRegistry(), Builder: persona.NewPromptBuilder(),
+	})
+
+	env := event.New(event.WorkflowRequested, 1, []byte(`{}`)).WithCorrelation(corrID)
+	if _, err := h.Handle(context.Background(), env); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	prompt := mb.lastReq.UserPrompt
+	if !strings.Contains(prompt, "Focus on error handling") {
+		t.Errorf("developer prompt missing targeted guidance:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "General guidance for everyone") {
+		t.Errorf("developer prompt missing untargeted guidance:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "Ignore this for developer") {
+		t.Errorf("developer prompt incorrectly absorbed reviewer-targeted guidance:\n%s", prompt)
 	}
 }
 
@@ -413,7 +505,6 @@ func TestAIHandlerBackendError(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:    "researcher",
-		Phase:   "research",
 		Persona: persona.Researcher,
 		Backend: &mockBackend{
 			name: "claude",
@@ -452,7 +543,6 @@ func TestAIHandlerEventSource(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:    "developer",
-		Phase:   "develop",
 		Persona: persona.Developer,
 		Backend: &mockBackend{
 			name:     "gemini",
@@ -506,7 +596,6 @@ func TestAIHandlerTokensUsedPropagated(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  mb,
 		Store:    store,
@@ -637,7 +726,6 @@ func TestBuildPromptContextWorkspaceReady(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  &mockBackend{name: "claude", response: &backend.Response{Output: "done"}},
 		Store:    store,
@@ -678,7 +766,6 @@ func TestBuildPromptContextCodebase(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  &mockBackend{name: "claude", response: &backend.Response{Output: "done"}},
 		Store:    store,
@@ -714,7 +801,6 @@ func TestBuildPromptContextSchema(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  &mockBackend{name: "claude", response: &backend.Response{Output: "done"}},
 		Store:    store,
@@ -750,7 +836,6 @@ func TestBuildPromptContextGit(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  &mockBackend{name: "claude", response: &backend.Response{Output: "done"}},
 		Store:    store,
@@ -797,7 +882,6 @@ func TestBuildPromptContextEnrichment(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  &mockBackend{name: "claude", response: &backend.Response{Output: "done"}},
 		Store:    store,
@@ -824,15 +908,15 @@ func TestBuildPromptContextOperatorGuidanceMatching(t *testing.T) {
 		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
 			Prompt: "build feature",
 		})).WithCorrelation(corrID),
-		// Guidance targeted at "develop" — should be included.
+		// Guidance targeted at "developer" — should be included.
 		event.New(event.OperatorGuidance, 1, event.MustMarshal(event.OperatorGuidancePayload{
 			Content: "Focus on error handling",
-			Target:  "develop",
+			Target:  "developer",
 		})).WithCorrelation(corrID),
-		// Guidance targeted at "review" — should NOT be included for developer.
+		// Guidance targeted at "reviewer" — should NOT be included for developer.
 		event.New(event.OperatorGuidance, 1, event.MustMarshal(event.OperatorGuidancePayload{
 			Content: "Ignore this for developer",
-			Target:  "review",
+			Target:  "reviewer",
 		})).WithCorrelation(corrID),
 		// Untargeted guidance — should be included for all.
 		event.New(event.OperatorGuidance, 1, event.MustMarshal(event.OperatorGuidancePayload{
@@ -843,7 +927,6 @@ func TestBuildPromptContextOperatorGuidanceMatching(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  &mockBackend{name: "claude", response: &backend.Response{Output: "done"}},
 		Store:    store,
@@ -904,7 +987,6 @@ func TestBuildPromptContextAutoRetryAttempt(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  &mockBackend{name: "claude", response: &backend.Response{Output: "ok"}},
 		Store:    store,
@@ -943,7 +1025,6 @@ func TestAIHandler_AutoRetryFlipsBackendStickyOffset(t *testing.T) {
 	mb := &mockBackend{name: "claude", response: &backend.Response{Output: "ok"}}
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  mb,
 		Store:    store,
@@ -1029,7 +1110,6 @@ func TestAIHandlerWorkspacePathOverridesWorkDir(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:    "developer",
-		Phase:   "develop",
 		Persona: persona.Developer,
 		Backend: mb,
 		Store:   store,
@@ -1068,7 +1148,6 @@ func TestAIHandlerPlainTextOutput(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:      "qa-analyzer",
-		Phase:     "qa-analyze",
 		Persona:   persona.Developer,
 		Backend:   mb,
 		Store:     store,
@@ -1176,7 +1255,6 @@ func TestAIHandlerEmitsRequestBeforeBackend(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:           "developer",
-		Phase:          "develop",
 		Persona:        persona.Developer,
 		Backend:        be,
 		Store:          store,
@@ -1274,7 +1352,6 @@ func TestAIRequestStartedEmittedEvenOnBackendError(t *testing.T) {
 	bus := &recordingBus{}
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  &mockBackend{name: "claude", err: errors.New("simulated idle_timeout")},
 		Store:    store,
@@ -1347,7 +1424,6 @@ VERDICT: FAIL
 	// PlainText=true path: full output must be preserved.
 	h := NewAIHandler(AIHandlerConfig{
 		Name:      "pr-observability",
-		Phase:     "pr-category-review",
 		Persona:   persona.PRObservability,
 		Backend:   mb,
 		Store:     store,
@@ -1401,7 +1477,6 @@ VERDICT: FAIL
 	// fragment, discarding the VERDICT line.
 	hDefault := NewAIHandler(AIHandlerConfig{
 		Name:      "pr-observability",
-		Phase:     "pr-category-review",
 		Persona:   persona.PRObservability,
 		Backend:   mb,
 		Store:     store,
@@ -1456,7 +1531,6 @@ func TestAIHandlerOmitsRequestEventWhenBusWired(t *testing.T) {
 
 	h := NewAIHandler(AIHandlerConfig{
 		Name:     "researcher",
-		Phase:    "research",
 		Persona:  persona.Researcher,
 		Backend:  mb,
 		Store:    store,

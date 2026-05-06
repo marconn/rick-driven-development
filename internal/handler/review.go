@@ -15,27 +15,40 @@ import (
 // After calling the AI backend, it parses VERDICT: PASS/FAIL from the response
 // and emits a VerdictRendered event alongside the standard AI events.
 type ReviewHandler struct {
-	ai          *AIHandler
-	targetPhase string // phase to send feedback to on failure (e.g., "develop")
+	ai            *AIHandler
+	targetPersona string // persona to send feedback to on failure (e.g., "developer")
 }
 
 // ReviewHandlerConfig configures a review handler.
 type ReviewHandlerConfig struct {
-	AIConfig    AIHandlerConfig
-	TargetPhase string // phase that should be rescheduled on fail (e.g., "develop")
+	AIConfig      AIHandlerConfig
+	TargetPersona string // handler that should be rescheduled on fail (e.g., "developer")
 }
 
 // NewReviewHandler creates a handler that parses verdicts from AI responses.
 func NewReviewHandler(cfg ReviewHandlerConfig) *ReviewHandler {
 	return &ReviewHandler{
-		ai:          NewAIHandler(cfg.AIConfig),
-		targetPhase: cfg.TargetPhase,
+		ai:            NewAIHandler(cfg.AIConfig),
+		targetPersona: cfg.TargetPersona,
 	}
 }
 
 func (h *ReviewHandler) Name() string             { return h.ai.Name() }
-func (h *ReviewHandler) Phase() string            { return h.ai.Phase() }
 func (h *ReviewHandler) Subscribes() []event.Type { return nil }
+
+// isPRCategoryReviewer reports whether this reviewer participates in the
+// pr-review fan-out and therefore needs the diff-grounding pass over its
+// findings before a verdict is emitted.
+func (h *ReviewHandler) isPRCategoryReviewer() bool {
+	switch h.ai.name {
+	case "pr-security", "pr-concurrency", "pr-error-handling",
+		"pr-observability", "pr-api-contract", "pr-idempotency",
+		"pr-testing", "pr-integration", "pr-performance",
+		"pr-data", "pr-hygiene", "pr-vendor-resilience":
+		return true
+	}
+	return false
+}
 
 // Handle calls the AI backend, parses the verdict, and returns AI events
 // plus a VerdictRendered event. For pr-category-review handlers, also captures
@@ -57,18 +70,18 @@ func (h *ReviewHandler) Handle(ctx context.Context, env event.Envelope) ([]event
 	verdict := ParseVerdict(responseText)
 	issues := ParseIssues(responseText, verdict.Outcome)
 	var summaryEvt *event.Envelope
-	if h.ai.phase == "pr-category-review" {
+	if h.isPRCategoryReviewer() {
 		responseText, verdict, issues, summaryEvt = h.groundPRCategoryReview(ctx, env, responseText, verdict, issues)
 		aiEvents = rewriteAIResponseText(aiEvents, responseText, rawText)
 	}
 
 	verdictEvt := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase:       h.targetPhase,
-		SourcePhase: h.ai.phase,
-		Outcome:     verdict.Outcome,
-		Issues:      issues,
-		Summary:     verdict.Summary,
-		Source:      verdict.Source,
+		Persona:       h.targetPersona,
+		SourcePersona: h.ai.name,
+		Outcome:       verdict.Outcome,
+		Issues:        issues,
+		Summary:       verdict.Summary,
+		Source:        verdict.Source,
 	})).WithSource("handler:" + h.ai.name)
 
 	out := append(aiEvents, verdictEvt)

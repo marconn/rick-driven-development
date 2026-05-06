@@ -67,7 +67,6 @@ func committerHandler(t *testing.T, store *mockStore) *CommitterHandler {
 	t.Helper()
 	return NewCommitterHandler(AIHandlerConfig{
 		Name:     "committer",
-		Phase:    "commit",
 		Persona:  persona.Committer,
 		Backend:  &mockBackend{name: "claude", response: &backend.Response{Output: "committed", Duration: time.Second}},
 		Store:    store,
@@ -76,13 +75,10 @@ func committerHandler(t *testing.T, store *mockStore) *CommitterHandler {
 	})
 }
 
-func TestCommitterNameAndPhase(t *testing.T) {
+func TestCommitterName(t *testing.T) {
 	h := committerHandler(t, newMockStore())
 	if h.Name() != "committer" {
 		t.Errorf("want name 'committer', got %q", h.Name())
-	}
-	if h.Phase() != "commit" {
-		t.Errorf("want phase 'commit', got %q", h.Phase())
 	}
 	if subs := h.Subscribes(); subs != nil {
 		t.Errorf("want nil subscriptions for DAG-dispatched handler, got %v", subs)
@@ -127,11 +123,11 @@ func TestCommitterNoChangesEmitsVerdictFail(t *testing.T) {
 	if vp.Outcome != event.VerdictFail {
 		t.Errorf("want VerdictFail, got %q", vp.Outcome)
 	}
-	if vp.Phase != "develop" {
-		t.Errorf("want target phase 'develop', got %q", vp.Phase)
+	if vp.Persona != "developer" {
+		t.Errorf("want target persona 'developer', got %q", vp.Persona)
 	}
-	if vp.SourcePhase != "commit" {
-		t.Errorf("want source phase 'commit', got %q", vp.SourcePhase)
+	if vp.SourcePersona != "committer" {
+		t.Errorf("want source persona 'committer', got %q", vp.SourcePersona)
 	}
 	if !strings.Contains(vp.Summary, "no code changes") {
 		t.Errorf("summary should mention no code changes, got: %s", vp.Summary)

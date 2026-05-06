@@ -40,7 +40,6 @@ func TestAggregate_HintEmitted_AutoApprove(t *testing.T) {
 
 	hintEvt := event.New(event.HintEmitted, 1, event.MustMarshal(event.HintEmittedPayload{
 		Persona:    "developer",
-		Phase:      "develop",
 		TriggerID:  "trigger-1",
 		Confidence: 0.8,
 	})).WithAggregate("wf-hint", 2).WithCorrelation("wf-hint")
@@ -226,7 +225,6 @@ func TestPersonaRunner_HintThenApprove(t *testing.T) {
 			return []event.Envelope{
 				event.New(event.HintEmitted, 1, event.MustMarshal(event.HintEmittedPayload{
 					Persona:    "hinting-dev",
-					Phase:      "develop",
 					TriggerID:  string(env.ID),
 					Confidence: 0.9,
 				})),
@@ -305,7 +303,6 @@ func TestPersonaRunner_HintLowConfidence_Pauses(t *testing.T) {
 			return []event.Envelope{
 				event.New(event.HintEmitted, 1, event.MustMarshal(event.HintEmittedPayload{
 					Persona:    "cautious-dev",
-					Phase:      "develop",
 					TriggerID:  string(env.ID),
 					Confidence: 0.2,
 					Blockers:   []string{"missing requirements"},
@@ -399,7 +396,6 @@ func TestPersonaRunner_HintApproved_ErrIncomplete(t *testing.T) {
 			return []event.Envelope{
 				event.New(event.HintEmitted, 1, event.MustMarshal(event.HintEmittedPayload{
 					Persona:    "task-dispatcher",
-					Phase:      "dispatch",
 					TriggerID:  string(env.ID),
 					Confidence: 0.9,
 				})),

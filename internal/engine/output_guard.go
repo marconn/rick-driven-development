@@ -43,19 +43,9 @@ func aiResponseTextLen(payload []byte) int {
 	return len(text)
 }
 
-// isDeveloperHandler reports whether h is the developer persona — either by
-// explicit name or via the optional Phased interface returning "develop".
+// isDeveloperHandler reports whether h is the developer persona.
 func isDeveloperHandler(h handler.Handler) bool {
-	if h == nil {
-		return false
-	}
-	if h.Name() == "developer" {
-		return true
-	}
-	if phased, ok := h.(handler.Phased); ok {
-		return phased.Phase() == "develop"
-	}
-	return false
+	return h != nil && h.Name() == "developer"
 }
 
 // developerOutputGuardTrips returns true when the dispatch should be reported

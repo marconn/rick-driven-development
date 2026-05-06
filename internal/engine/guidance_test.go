@@ -82,8 +82,8 @@ func TestE2EOperatorGuidanceFullFlow(t *testing.T) {
 				if n <= 2 {
 					return []event.Envelope{
 						event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-							Phase:       "developer",
-							SourcePhase: "reviewer",
+							Persona:     "developer",
+							SourcePersona: "reviewer",
 							Outcome:     event.VerdictFail,
 							Summary:     "needs server components",
 						})),
@@ -231,7 +231,7 @@ func TestE2EOperatorGuidanceDispatchPriority(t *testing.T) {
 
 	// Fire FeedbackGenerated first (priority 10).
 	fbEvt := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "developer", Iteration: 1,
+		TargetPersona: "developer", Iteration: 1,
 	})).WithCorrelation(corrID).WithSource("test")
 
 	// Fire OperatorGuidance second (priority 0 — should process first).

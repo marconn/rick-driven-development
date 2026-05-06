@@ -250,7 +250,7 @@ func (s *Server) toolSearchWorkflows(ctx context.Context, raw json.RawMessage) (
 				Source:      ws.Source,
 				Ticket:      ws.Ticket,
 				FailReason:  ws.FailReason,
-				FailPhase:   ws.FailPhase,
+				FailPhase:   ws.FailPersona,
 				FailureKind: ws.FailureKind,
 				FailBackend: ws.FailBackend,
 			}
@@ -422,17 +422,14 @@ func (s *Server) toolWorkflowOutput(ctx context.Context, raw json.RawMessage) (a
 		return nil, fmt.Errorf("load correlation events: %w", err)
 	}
 
-	// Collect PersonaCompleted → OutputRef mappings. We track both the handler
-	// name (Persona) and the phase verb (Phase) so the "phases" filter can
-	// match whichever label the operator supplied. Prior to this the filter
-	// only matched Persona, which quietly returned zero results whenever a
-	// caller passed a phase verb ("develop") instead of a persona name
-	// ("developer") — and the tool's JSON schema explicitly names the
-	// parameter "phases", so phase verbs are the natural thing to pass.
+	// Collect PersonaCompleted → OutputRef mappings keyed by handler name.
+	// The "phases" filter parameter is kept for back-compat with callers; values
+	// are matched case-insensitively against handler names plus the legacy
+	// phase verbs that map to those handlers (so "develop" still resolves to
+	// "developer", etc).
 	type outputSlot struct {
 		ref     string
 		persona string
-		phase   string
 	}
 	outputRefs := make(map[string]outputSlot) // persona → slot
 	for _, env := range allEvents {
@@ -444,28 +441,32 @@ func (s *Server) toolWorkflowOutput(ctx context.Context, raw json.RawMessage) (a
 			continue
 		}
 		if p.OutputRef != "" {
-			outputRefs[p.Persona] = outputSlot{ref: p.OutputRef, persona: p.Persona, phase: p.Phase}
+			outputRefs[p.Persona] = outputSlot{ref: p.OutputRef, persona: p.Persona}
 		}
 	}
 
-	// Filter to requested phases. Accept both phase verbs and persona names;
-	// case-insensitive so operators don't have to remember which form the
-	// payload used. An empty filter means "return every slot".
+	// Filter to requested phases. Accept both handler names and the legacy
+	// phase-verb aliases; case-insensitive so operators don't have to remember
+	// which form they prefer. An empty filter means "return every slot".
+	legacyAliases := map[string]string{
+		"develop":  "developer",
+		"research": "researcher",
+		"commit":   "committer",
+		"review":   "reviewer",
+	}
 	phaseFilter := make(map[string]bool, len(args.Phases))
 	for _, p := range args.Phases {
-		phaseFilter[strings.ToLower(strings.TrimSpace(p))] = true
+		key := strings.ToLower(strings.TrimSpace(p))
+		phaseFilter[key] = true
+		if alias, ok := legacyAliases[key]; ok {
+			phaseFilter[alias] = true
+		}
 	}
 	matchesFilter := func(slot outputSlot) bool {
 		if len(phaseFilter) == 0 {
 			return true
 		}
-		if phaseFilter[strings.ToLower(slot.persona)] {
-			return true
-		}
-		if slot.phase != "" && phaseFilter[strings.ToLower(slot.phase)] {
-			return true
-		}
-		return false
+		return phaseFilter[strings.ToLower(slot.persona)]
 	}
 
 	const maxOutputLen = 10000

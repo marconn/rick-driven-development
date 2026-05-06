@@ -137,7 +137,6 @@ func TestPersonaRunner_AdvisoryPause_DownstreamHandlerBlocked(t *testing.T) {
 			"gate":      nil, // root, fires on workflow.started
 			"committer": {"gate"},
 		},
-		PhaseMap:      map[string]string{"develop": "developer"},
 		MaxIterations: 3,
 	}
 	env := newE2EEnv(t, def)
@@ -162,8 +161,8 @@ func TestPersonaRunner_AdvisoryPause_DownstreamHandlerBlocked(t *testing.T) {
 		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
 			return []event.Envelope{
 				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-					Phase:       "develop",
-					SourcePhase: "gate",
+					Persona:     "developer",
+					SourcePersona: "gate",
 					Outcome:     event.VerdictFail,
 					Advisory:    true,
 					Summary:     "gate cannot run — escalating",

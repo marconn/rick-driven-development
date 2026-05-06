@@ -129,7 +129,7 @@ func (e *recoveryEnv) seedFeedbackGenerated(t *testing.T, corrID, targetPhase st
 	t.Helper()
 	ctx := context.Background()
 	env := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: targetPhase,
+		TargetPersona: targetPhase,
 		Iteration:   iteration,
 		Summary:     "test feedback",
 	})).WithAggregate(corrID, version).WithCorrelation(corrID).WithSource("engine")

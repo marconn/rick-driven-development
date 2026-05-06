@@ -332,7 +332,7 @@ func TestToolPersonaOutput_CompletedSupersedesEarlierFailure(t *testing.T) {
 
 	// AI response the retry produced, referenced by PersonaCompleted.OutputRef.
 	aiEvt := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-		Phase:      "develop",
+		Persona:    "developer",
 		Backend:    "claude",
 		TokensUsed: 4200,
 		DurationMS: 60_000,
@@ -582,7 +582,7 @@ func TestToolWorkflowOutput_FiltersByPhaseVerb(t *testing.T) {
 
 	// Seed AIResponseReceived + PersonaCompleted so the output-ref path resolves.
 	aiEvt := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-		Phase:      "develop",
+		Persona:    "developer",
 		Backend:    "claude",
 		TokensUsed: 1000,
 		DurationMS: 500,
@@ -595,7 +595,6 @@ func TestToolWorkflowOutput_FiltersByPhaseVerb(t *testing.T) {
 
 	completed := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
 		Persona:   "developer",
-		Phase:     "develop",
 		OutputRef: string(aiEvt.ID),
 	})).WithAggregate(personaAgg, 2).WithCorrelation(corrID)
 

@@ -11,15 +11,6 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/event"
 )
 
-// phasedDeveloperHandler is a stubHandler that also implements handler.Phased
-// returning "develop" — exercises the Phased-based detection branch.
-type phasedDeveloperHandler struct {
-	stubHandler
-	phase string
-}
-
-func (p *phasedDeveloperHandler) Phase() string { return p.phase }
-
 // gitInitWith prepares a fresh git repo in a temp dir, makes one initial
 // commit, and optionally stages a file to leave the working tree dirty.
 func gitInitWith(t *testing.T, dirty bool) string {
@@ -124,19 +115,19 @@ func TestDeveloperOutputGuard_QuietOnNonDeveloperHandler(t *testing.T) {
 	}
 }
 
-// TestDeveloperOutputGuard_DetectsDeveloperViaPhased asserts handler.Phased
-// returning "develop" enables the guard even when the handler name differs.
-func TestDeveloperOutputGuard_DetectsDeveloperViaPhased(t *testing.T) {
+// TestDeveloperOutputGuard_OnlyTripsOnExactName confirms the guard's gate is
+// strictly on Handler.Name() == "developer" after the phase-verb / handler-
+// name collapse. A handler with a custom name (e.g. a downstream variant) is
+// NOT a developer for guard purposes, even with a tiny output and a dirty
+// workspace — operators using a renamed handler must opt in deliberately.
+func TestDeveloperOutputGuard_OnlyTripsOnExactName(t *testing.T) {
 	runner, _, _, _ := newTestPersonaRunner(t)
 	dir := gitInitWith(t, true /* dirty */)
-	seedWorkspaceReady(t, runner, "corr-phased", dir)
+	seedWorkspaceReady(t, runner, "corr-renamed", dir)
 
-	h := &phasedDeveloperHandler{
-		stubHandler: stubHandler{name: "custom-developer-name"},
-		phase:       "develop",
-	}
-	if !runner.developerOutputGuardTrips(h, "corr-phased", 7) {
-		t.Error("guard must trip when handler.Phased reports develop phase")
+	h := &stubHandler{name: "custom-developer-variant"}
+	if runner.developerOutputGuardTrips(h, "corr-renamed", 7) {
+		t.Error("guard must not trip on a non-canonical developer name; only Name()==\"developer\" qualifies")
 	}
 }
 

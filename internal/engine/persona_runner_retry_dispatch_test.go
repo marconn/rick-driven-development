@@ -231,18 +231,18 @@ func TestAutoRetry_FailLoud_WedgedDispatch(t *testing.T) {
 		if err := json.Unmarshal(got.Payload, &fp); err != nil {
 			t.Fatalf("unmarshal WorkflowFailedPayload: %v", err)
 		}
-		// Phase must be "developer" — the aggregate resolves it from the
+		// Persona must be "developer" — the aggregate copies it from the
 		// PersonaFailed.Persona field via decidePersonaFailed.
-		if fp.Phase != "developer" {
-			t.Errorf("Phase=%q; want developer", fp.Phase)
+		if fp.Persona != "developer" {
+			t.Errorf("Persona=%q; want developer", fp.Persona)
 		}
 		// Reason must call out the failure — not necessarily "auto-retry dispatch failed"
 		// since it comes from the aggregate, but must mention developer failure.
 		if fp.Reason == "" {
 			t.Error("Reason is empty; want non-empty failure description")
 		}
-		t.Logf("wedge test OK: WorkflowFailed reason=%q phase=%q devCalls=%d",
-			fp.Reason, fp.Phase, devCalls.Load())
+		t.Logf("wedge test OK: WorkflowFailed reason=%q persona=%q devCalls=%d",
+			fp.Reason, fp.Persona, devCalls.Load())
 
 	case <-time.After(10 * time.Second):
 		events, _ := env.store.Load(ctx, wfID)

@@ -32,8 +32,8 @@ func TestDecideVerdictRendered_PropagatesRawDiagnostics(t *testing.T) {
 		AggregateID:   "wf-raw",
 		CorrelationID: "corr-raw",
 		Payload: event.MustMarshal(event.VerdictPayload{
-			Phase:          "develop",
-			SourcePhase:    "quality-gate",
+			Persona:        "developer",
+			SourcePersona:    "quality-gate",
 			Outcome:        event.VerdictFail,
 			Summary:        "tests failing",
 			Issues:         []event.Issue{{Severity: "major", Description: "TestUnableToExtract"}},
@@ -73,8 +73,8 @@ func TestDecideVerdictRendered_CleanVerdictHasNoFeedback(t *testing.T) {
 	verdictEnv := event.Envelope{
 		Type: event.VerdictRendered,
 		Payload: event.MustMarshal(event.VerdictPayload{
-			Phase:       "develop",
-			SourcePhase: "quality-gate",
+			Persona:     "developer",
+			SourcePersona: "quality-gate",
 			Outcome:     event.VerdictPass,
 			Summary:     "ok",
 		}),
@@ -111,8 +111,8 @@ func TestDecideWorkflowResumed_RehydratesRawDiagnostics(t *testing.T) {
 	// VerdictTracked lands on the workflow aggregate, so that's the event
 	// Apply consumes for fingerprint/cache state.
 	failVerdict := event.New(event.VerdictTracked, 1, event.MustMarshal(event.VerdictPayload{
-		Phase:          "develop",
-		SourcePhase:    "quality-gate",
+		Persona:        "developer",
+		SourcePersona:    "quality-gate",
 		Outcome:        event.VerdictFail,
 		Summary:        "x",
 		RawDiagnostics: raw,
@@ -120,8 +120,8 @@ func TestDecideWorkflowResumed_RehydratesRawDiagnostics(t *testing.T) {
 	agg.Apply(failVerdict)
 
 	feedback := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase:    "developer",
-		SourcePhase:    "quality-gate",
+		TargetPersona:    "developer",
+		SourcePersona:    "quality-gate",
 		Iteration:      1,
 		RawDiagnostics: raw,
 	})).WithAggregate("wf-resume", 2)
@@ -150,11 +150,11 @@ func TestDecideWorkflowResumed_RehydratesRawDiagnostics(t *testing.T) {
 	if fb.RawDiagnostics != raw {
 		t.Errorf("RawDiagnostics not rehydrated on resume:\n got=%q\nwant=%q", fb.RawDiagnostics, raw)
 	}
-	if fb.SourcePhase != "quality-gate" {
-		t.Errorf("SourcePhase not rehydrated on resume: got=%q want=quality-gate", fb.SourcePhase)
+	if fb.SourcePersona != "quality-gate" {
+		t.Errorf("SourcePhase not rehydrated on resume: got=%q want=quality-gate", fb.SourcePersona)
 	}
-	if fb.TargetPhase != "developer" {
-		t.Errorf("TargetPhase = %q; want developer", fb.TargetPhase)
+	if fb.TargetPersona != "developer" {
+		t.Errorf("TargetPhase = %q; want developer", fb.TargetPersona)
 	}
 }
 
@@ -173,8 +173,8 @@ func TestDecideWorkflowResumed_NoPriorFailureLeavesEmpty(t *testing.T) {
 	// Drive FeedbackCount via a FeedbackGenerated with empty RawDiagnostics,
 	// no preceding VerdictRendered to populate the cache.
 	feedback := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "developer",
-		SourcePhase: "quality-gate",
+		TargetPersona: "developer",
+		SourcePersona: "quality-gate",
 		Iteration:   1,
 	})).WithAggregate("wf-resume-clean", 1)
 	agg.Apply(feedback)

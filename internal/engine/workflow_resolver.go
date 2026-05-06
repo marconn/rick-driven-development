@@ -359,12 +359,8 @@ func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPerso
 			}
 		case event.VerdictRendered:
 			var v event.VerdictPayload
-			if err := json.Unmarshal(e.Payload, &v); err == nil {
-				sourcePersona := v.SourcePhase
-				if wfDef != nil {
-					sourcePersona = wfDef.ResolvePhase(v.SourcePhase)
-				}
-				verdicts[sourcePersona] = &verdictTracker{
+			if err := json.Unmarshal(e.Payload, &v); err == nil && v.SourcePersona != "" {
+				verdicts[v.SourcePersona] = &verdictTracker{
 					active: v.Outcome == event.VerdictFail,
 				}
 			}
@@ -376,11 +372,8 @@ func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPerso
 			// as pending until the retrigger target re-completes.
 			if wfDef != nil {
 				var fb event.FeedbackGeneratedPayload
-				if err := json.Unmarshal(e.Payload, &fb); err == nil {
-					// The aggregate already resolves phase → persona before
-					// emitting, but apply ResolvePhase defensively in case a
-					// producer emits the phase verb form.
-					target := wfDef.ResolvePhase(fb.TargetPhase)
+				if err := json.Unmarshal(e.Payload, &fb); err == nil && fb.TargetPersona != "" {
+					target := fb.TargetPersona
 					for _, stale := range wfDef.DownstreamOf(target) {
 						if stale == target {
 							continue

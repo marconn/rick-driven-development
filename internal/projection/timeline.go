@@ -103,7 +103,7 @@ func (p *PhaseTimelineProjection) getOrCreate(key personaKey, corrID string) *Ph
 	if !ok {
 		pt = &PhaseTimeline{
 			AggregateID: corrID,
-			Phase:       key.Persona,
+			Persona:     key.Persona,
 		}
 		p.timelines[key] = pt
 	}

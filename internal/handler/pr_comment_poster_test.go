@@ -111,7 +111,6 @@ func seedPosterChain(store *mockStore, corr, source, upstream, body string) even
 	// production means Structured=false and Output is a JSON string.
 	outputJSON := event.MustMarshal(body)
 	aiResp := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-		Phase:      "pr-reply",
 		Backend:    "gemini",
 		Structured: false,
 		Output:     outputJSON,
@@ -287,7 +286,6 @@ func TestPRCommentPoster_NoWorkflowRequestedInChain(t *testing.T) {
 	corr := "corr-nosource"
 	store.correlationEvents[corr] = []event.Envelope{
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:      "pr-reply",
 			Backend:    "gemini",
 			Structured: false,
 			Output:     event.MustMarshal("body"),
@@ -336,14 +334,12 @@ func TestPRCommentPoster_IgnoresOtherUpstreams(t *testing.T) {
 
 		// Developer AI output — must NOT be posted.
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:      "develop",
 			Structured: false,
 			Output:     event.MustMarshal("developer code"),
 		})).WithCorrelation(corr).WithSource("handler:developer"),
 
 		// pr-replier AI output — this is what must be posted.
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:      "pr-reply",
 			Structured: false,
 			Output:     event.MustMarshal("reply body"),
 		})).WithCorrelation(corr).WithSource("handler:pr-replier"),

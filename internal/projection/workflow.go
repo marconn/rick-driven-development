@@ -93,7 +93,7 @@ func (p *WorkflowStatusProjection) Handle(_ context.Context, env event.Envelope)
 		ws.Status = "failed"
 		ws.CompletedAt = env.Timestamp
 		ws.FailReason = payload.Reason
-		ws.FailPhase = payload.Phase
+		ws.FailPersona = payload.Persona
 		ws.FailureKind = string(payload.FailureKind)
 		ws.FailBackend = payload.Backend
 		ws.FailStderr = payload.Stderr

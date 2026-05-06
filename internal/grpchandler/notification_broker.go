@@ -255,7 +255,7 @@ func (b *NotificationBroker) buildNotification(correlationID string, env event.E
 		var p event.WorkflowFailedPayload
 		if err := json.Unmarshal(env.Payload, &p); err == nil {
 			notif.Result = p.Reason
-			notif.FailedPhase = p.Phase
+			notif.FailedPhase = p.Persona
 		}
 	case event.WorkflowCancelled:
 		notif.Status = "cancelled"
@@ -317,9 +317,9 @@ func (b *NotificationBroker) enrichTokens(notif *pb.WorkflowNotification, correl
 		return
 	}
 	notif.TotalTokens = int32(tu.Total)
-	if len(tu.ByPhase) > 0 {
-		notif.TokensByPhase = make(map[string]int32, len(tu.ByPhase))
-		for k, v := range tu.ByPhase {
+	if len(tu.ByPersona) > 0 {
+		notif.TokensByPhase = make(map[string]int32, len(tu.ByPersona))
+		for k, v := range tu.ByPersona {
 			notif.TokensByPhase[k] = int32(v)
 		}
 	}
@@ -339,7 +339,7 @@ func (b *NotificationBroker) enrichPhases(notif *pb.WorkflowNotification, correl
 	notif.Phases = make([]*pb.PhaseSummary, len(phases))
 	for i, pt := range phases {
 		summary := &pb.PhaseSummary{
-			Phase:      pt.Phase,
+			Phase:      pt.Persona,
 			Status:     pt.Status,
 			Iterations: int32(pt.Iterations),
 			DurationMs: pt.Duration.Milliseconds(),
@@ -366,8 +366,8 @@ func (b *NotificationBroker) enrichVerdicts(notif *pb.WorkflowNotification, corr
 	notif.Verdicts = make([]*pb.VerdictDetail, len(records))
 	for i, r := range records {
 		detail := &pb.VerdictDetail{
-			Phase:       r.Phase,
-			SourcePhase: r.SourcePhase,
+			Phase:       r.Persona,
+			SourcePhase: r.SourcePersona,
 			Outcome:     r.Outcome,
 			Summary:     r.Summary,
 		}

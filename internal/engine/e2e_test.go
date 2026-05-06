@@ -248,8 +248,8 @@ func TestE2EHandlerFailure(t *testing.T) {
 		}
 		var p event.WorkflowFailedPayload
 		_ = json.Unmarshal(got.Payload, &p)
-		if p.Phase != "alpha" {
-			t.Errorf("expected phase=alpha, got %s", p.Phase)
+		if p.Persona != "alpha" {
+			t.Errorf("expected persona=alpha, got %s", p.Persona)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout: WorkflowFailed never arrived")
@@ -396,7 +396,7 @@ func TestE2EJoinGate(t *testing.T) {
 
 func TestE2EFeedbackLoop(t *testing.T) {
 	def := WorkflowDef{
-		ID: "e2e-feedback", Required: []string{"developer", "reviewer"}, MaxIterations: 3, PhaseMap: corePhaseMap,
+		ID: "e2e-feedback", Required: []string{"developer", "reviewer"}, MaxIterations: 3,
 		Graph: map[string][]string{"developer": {}, "reviewer": {"developer"}},
 		RetriggeredBy: map[string][]event.Type{"developer": {event.FeedbackGenerated}},
 	}
@@ -425,8 +425,8 @@ func TestE2EFeedbackLoop(t *testing.T) {
 					// Uses phase verbs ("develop", not "developer") to match real handler behavior.
 					return []event.Envelope{
 						event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-							Phase:       "develop",
-							SourcePhase: "review",
+							Persona:     "developer",
+							SourcePersona: "reviewer",
 							Outcome:     event.VerdictFail,
 							Summary:     "needs work",
 						})),
@@ -1225,7 +1225,6 @@ func TestE2EFeedbackLoopRetriggersDeveloper(t *testing.T) {
 		},
 		MaxIterations:     3,
 		EscalateOnMaxIter: true,
-		PhaseMap:          map[string]string{"develop": "developer", "review": "reviewer"},
 	}
 
 	env := newE2EEnv(t, def)
@@ -1268,7 +1267,7 @@ func TestE2EFeedbackLoopRetriggersDeveloper(t *testing.T) {
 		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
 			return []event.Envelope{
 				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-					Phase: "develop", SourcePhase: "review", Outcome: event.VerdictPass,
+					Persona: "developer", SourcePersona: "reviewer", Outcome: event.VerdictPass,
 					Summary: "looks good",
 				})),
 			}, nil
@@ -1282,7 +1281,7 @@ func TestE2EFeedbackLoopRetriggersDeveloper(t *testing.T) {
 		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
 			return []event.Envelope{
 				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-					Phase: "develop", SourcePhase: "qa", Outcome: event.VerdictPass,
+					Persona: "developer", SourcePersona: "qa", Outcome: event.VerdictPass,
 					Summary: "tests pass",
 				})),
 			}, nil
@@ -1300,7 +1299,7 @@ func TestE2EFeedbackLoopRetriggersDeveloper(t *testing.T) {
 				t.Logf("quality-gate: FAIL (iteration %d)", call)
 				return []event.Envelope{
 					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-						Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+						Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictFail,
 						Summary: "test failed",
 						Issues: []event.Issue{{
 							Severity: "major", Category: "correctness",
@@ -1312,7 +1311,7 @@ func TestE2EFeedbackLoopRetriggersDeveloper(t *testing.T) {
 			t.Logf("quality-gate: PASS (iteration %d)", call)
 			return []event.Envelope{
 				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-					Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictPass,
+					Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictPass,
 					Summary: "lint and test passed",
 				})),
 			}, nil
@@ -1394,7 +1393,6 @@ func TestE2EDualFeedbackStuck(t *testing.T) {
 		},
 		MaxIterations:     3,
 		EscalateOnMaxIter: true,
-		PhaseMap:          map[string]string{"develop": "developer", "review": "reviewer"},
 	}
 
 	env := newE2EEnv(t, def)
@@ -1434,7 +1432,7 @@ func TestE2EDualFeedbackStuck(t *testing.T) {
 				t.Logf("reviewer: FAIL (call %d)", call)
 				return []event.Envelope{
 					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-						Phase: "develop", SourcePhase: "review", Outcome: event.VerdictFail,
+						Persona: "developer", SourcePersona: "reviewer", Outcome: event.VerdictFail,
 						Summary: "missing auth check",
 						Issues:  []event.Issue{{Severity: "critical", Category: "security", Description: "no auth"}},
 					})),
@@ -1443,7 +1441,7 @@ func TestE2EDualFeedbackStuck(t *testing.T) {
 			t.Logf("reviewer: PASS (call %d)", call)
 			return []event.Envelope{
 				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-					Phase: "develop", SourcePhase: "review", Outcome: event.VerdictPass, Summary: "ok",
+					Persona: "developer", SourcePersona: "reviewer", Outcome: event.VerdictPass, Summary: "ok",
 				})),
 			}, nil
 		},
@@ -1460,7 +1458,7 @@ func TestE2EDualFeedbackStuck(t *testing.T) {
 				t.Logf("qa: FAIL (call %d)", call)
 				return []event.Envelope{
 					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-						Phase: "develop", SourcePhase: "qa", Outcome: event.VerdictFail,
+						Persona: "developer", SourcePersona: "qa", Outcome: event.VerdictFail,
 						Summary: "no size limit",
 						Issues:  []event.Issue{{Severity: "minor", Category: "correctness", Description: "body size"}},
 					})),
@@ -1469,7 +1467,7 @@ func TestE2EDualFeedbackStuck(t *testing.T) {
 			t.Logf("qa: PASS (call %d)", call)
 			return []event.Envelope{
 				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-					Phase: "develop", SourcePhase: "qa", Outcome: event.VerdictPass, Summary: "ok",
+					Persona: "developer", SourcePersona: "qa", Outcome: event.VerdictPass, Summary: "ok",
 				})),
 			}, nil
 		},
@@ -1485,7 +1483,7 @@ func TestE2EDualFeedbackStuck(t *testing.T) {
 				t.Logf("quality-gate: FAIL (call %d)", n)
 				return []event.Envelope{
 					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-						Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+						Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictFail,
 						Summary: "test failed",
 						Issues:  []event.Issue{{Severity: "major", Category: "correctness", Description: "tests failed"}},
 					})),
@@ -1494,7 +1492,7 @@ func TestE2EDualFeedbackStuck(t *testing.T) {
 			t.Logf("quality-gate: PASS (call %d)", n)
 			return []event.Envelope{
 				event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-					Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictPass,
+					Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictPass,
 					Summary: "all checks passed",
 				})),
 			}, nil

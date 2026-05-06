@@ -197,7 +197,7 @@ func TestGRPCExternalHandlerE2E(t *testing.T) {
 		handleFn: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
 			return []event.Envelope{
 				event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-					Phase:   "architect",
+					Persona: "architect",
 					Backend: "claude",
 					Output:  json.RawMessage(`"Build a dashboard with React"`),
 				})),

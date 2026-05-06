@@ -63,7 +63,7 @@ type WorkflowAggregate struct {
 	// failure, and vice versa.
 	LastVerdictFingerprint map[string]string
 	// LastFailingVerdict caches the most recent failing VerdictPayload's
-	// SourcePhase + RawDiagnostics per resolved target persona, so
+	// SourcePersona + RawDiagnostics per target persona, so
 	// decideWorkflowResumed can rehydrate them into the FeedbackGenerated it
 	// re-emits after operator guidance. Without this, every operator resume
 	// strips the developer's iteration prompt of the unfiltered failure tail
@@ -78,7 +78,7 @@ type WorkflowAggregate struct {
 // pause. Kept narrow on purpose — caching the full payload would bloat the
 // aggregate snapshot for fields the resume path doesn't read.
 type cachedVerdict struct {
-	SourcePhase    string
+	SourcePersona  string
 	RawDiagnostics string
 }
 
@@ -200,15 +200,15 @@ func (w *WorkflowAggregate) Apply(env event.Envelope) {
 	case event.FeedbackGenerated:
 		var p event.FeedbackGeneratedPayload
 		_ = json.Unmarshal(env.Payload, &p)
-		w.FeedbackCount[p.TargetPhase]++
+		w.FeedbackCount[p.TargetPersona]++
 		// Reset completed status — personas need to re-run after feedback.
-		delete(w.CompletedPersonas, p.TargetPhase)
-		if p.SourcePhase != "" {
-			delete(w.CompletedPersonas, p.SourcePhase)
+		delete(w.CompletedPersonas, p.TargetPersona)
+		if p.SourcePersona != "" {
+			delete(w.CompletedPersonas, p.SourcePersona)
 			// Gate: source persona can't be re-tracked until target re-completes.
 			// This prevents stale PersonaCompleted events (already in the FIFO)
 			// from prematurely re-tracking after feedback clears them.
-			w.FeedbackPending[p.SourcePhase] = p.TargetPhase
+			w.FeedbackPending[p.SourcePersona] = p.TargetPersona
 		}
 
 	case event.VerdictTracked:
@@ -222,15 +222,10 @@ func (w *WorkflowAggregate) Apply(env event.Envelope) {
 		// doesn't trigger dedup on an unrelated later regression.
 		var vp event.VerdictPayload
 		_ = json.Unmarshal(env.Payload, &vp)
-		if w.WorkflowDef == nil {
+		if vp.SourcePersona == "" || vp.Persona == "" {
 			break
 		}
-		target := w.WorkflowDef.ResolvePhase(vp.Phase)
-		source := w.WorkflowDef.ResolvePhase(vp.SourcePhase)
-		if source == "" || target == "" {
-			break
-		}
-		key := source + "|" + target
+		key := vp.SourcePersona + "|" + vp.Persona
 		if w.LastVerdictFingerprint == nil {
 			w.LastVerdictFingerprint = make(map[string]string)
 		}
@@ -239,13 +234,13 @@ func (w *WorkflowAggregate) Apply(env event.Envelope) {
 		}
 		if vp.Outcome == event.VerdictFail {
 			w.LastVerdictFingerprint[key] = verdictFingerprint(vp)
-			w.LastFailingVerdict[target] = cachedVerdict{
-				SourcePhase:    source,
+			w.LastFailingVerdict[vp.Persona] = cachedVerdict{
+				SourcePersona:  vp.SourcePersona,
 				RawDiagnostics: vp.RawDiagnostics,
 			}
 		} else {
 			delete(w.LastVerdictFingerprint, key)
-			delete(w.LastFailingVerdict, target)
+			delete(w.LastFailingVerdict, vp.Persona)
 		}
 
 	default:
@@ -440,7 +435,7 @@ func (w *WorkflowAggregate) decidePersonaFailed(env event.Envelope) ([]event.Env
 	// machine-parsable, and the stderr tail was lost entirely.
 	payload := event.MustMarshal(event.WorkflowFailedPayload{
 		Reason:      fmt.Sprintf("persona %s failed: %s", p.Persona, p.Error),
-		Phase:       p.Persona,
+		Persona:     p.Persona,
 		FailureKind: p.FailureKind,
 		Backend:     p.Backend,
 		Stderr:      p.Stderr,
@@ -506,21 +501,14 @@ func (w *WorkflowAggregate) decideVerdictRendered(env event.Envelope) ([]event.E
 		return nil, nil
 	}
 
-	// Resolve verdict phase name to persona name. Handlers use phase verbs
-	// ("develop", "review") in verdicts while workflow defs use handler names
-	// ("developer", "reviewer") in their Required list.
-	targetPersona := v.Phase
-	sourcePersona := v.SourcePhase
-	if w.WorkflowDef != nil {
-		targetPersona = w.WorkflowDef.ResolvePhase(v.Phase)
-		sourcePersona = w.WorkflowDef.ResolvePhase(v.SourcePhase)
-	}
+	targetPersona := v.Persona
+	sourcePersona := v.SourcePersona
 
-	// Only generate feedback if the target phase is a required persona in
-	// this workflow. Review-only workflows (pr-review) emit verdicts as
-	// output, not as feedback gates — generating FeedbackGenerated for a
-	// non-existent phase permanently corrupts CompletedPersonas because
-	// the FeedbackPending gate can never be cleared.
+	// Only generate feedback if the target persona is required in this
+	// workflow. Review-only workflows (pr-review) emit verdicts as output,
+	// not as feedback gates — generating FeedbackGenerated for a non-existent
+	// persona permanently corrupts CompletedPersonas because the
+	// FeedbackPending gate can never be cleared.
 	if !w.isRequiredPersona(targetPersona) {
 		return nil, nil
 	}
@@ -559,8 +547,8 @@ func (w *WorkflowAggregate) decideVerdictRendered(env event.Envelope) ([]event.E
 				"max iterations (%d) reached for %s — escalated to operator", w.MaxIterations, targetPersona)), nil
 		}
 		payload := event.MustMarshal(event.WorkflowFailedPayload{
-			Reason: fmt.Sprintf("max iterations (%d) reached for %s", w.MaxIterations, targetPersona),
-			Phase:  targetPersona,
+			Reason:  fmt.Sprintf("max iterations (%d) reached for %s", w.MaxIterations, targetPersona),
+			Persona: targetPersona,
 		})
 		return []event.Envelope{
 			event.New(event.WorkflowFailed, 1, payload).
@@ -572,8 +560,8 @@ func (w *WorkflowAggregate) decideVerdictRendered(env event.Envelope) ([]event.E
 	}
 
 	fbPayload := event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase:    targetPersona,
-		SourcePhase:    sourcePersona,
+		TargetPersona:  targetPersona,
+		SourcePersona:  sourcePersona,
 		Iteration:      iteration,
 		Issues:         v.Issues,
 		Summary:        v.Summary,
@@ -645,25 +633,25 @@ func (w *WorkflowAggregate) decideTokenBudgetExceeded(env event.Envelope) ([]eve
 // decideWorkflowResumed handles resume after auto-escalation. When the
 // workflow was paused because MaxIterations was reached, resuming means
 // the operator has provided guidance and wants to continue. We re-emit
-// FeedbackGenerated for the phase that hit the limit, allowing the
+// FeedbackGenerated for the persona that hit the limit, allowing the
 // developer to re-run with the new guidance context.
 func (w *WorkflowAggregate) decideWorkflowResumed(env event.Envelope) ([]event.Envelope, error) {
-	// Find the phase that hit the iteration limit — it needs re-triggering.
-	for phase, count := range w.FeedbackCount {
+	// Find the persona that hit the iteration limit — it needs re-triggering.
+	for persona, count := range w.FeedbackCount {
 		if count >= w.MaxIterations {
 			// Grant one additional iteration so the re-triggered feedback
 			// doesn't immediately hit the limit again.
 			w.MaxIterations = count + 1
 
-			// Rehydrate the last failing verdict's SourcePhase + RawDiagnostics
+			// Rehydrate the last failing verdict's SourcePersona + RawDiagnostics
 			// (cached during Apply(VerdictRendered)) so the developer's next
 			// iteration prompt isn't stripped of the unfiltered failure tail.
 			// Empty cache (e.g., resume from a non-failure pause) leaves the
 			// fields zero — formatFeedback skips the section, no error.
-			cached := w.LastFailingVerdict[phase]
+			cached := w.LastFailingVerdict[persona]
 			fbPayload := event.MustMarshal(event.FeedbackGeneratedPayload{
-				TargetPhase:    phase,
-				SourcePhase:    cached.SourcePhase,
+				TargetPersona:  persona,
+				SourcePersona:  cached.SourcePersona,
 				Iteration:      count + 1,
 				Summary:        "re-triggered after operator guidance",
 				RawDiagnostics: cached.RawDiagnostics,
@@ -750,8 +738,8 @@ func (w *WorkflowAggregate) decideHintRejected(env event.Envelope) ([]event.Enve
 		}, nil
 	case "fail":
 		payload := event.MustMarshal(event.WorkflowFailedPayload{
-			Reason: fmt.Sprintf("hint rejected for %s: %s", h.Persona, h.Reason),
-			Phase:  h.Persona,
+			Reason:  fmt.Sprintf("hint rejected for %s: %s", h.Persona, h.Reason),
+			Persona: h.Persona,
 		})
 		return []event.Envelope{
 			event.New(event.WorkflowFailed, 1, payload).

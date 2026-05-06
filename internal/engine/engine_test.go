@@ -304,8 +304,8 @@ func TestAggregateApplyFeedbackResetsPersonas(t *testing.T) {
 	agg.Apply(event.Envelope{
 		Version: 1, Type: event.FeedbackGenerated,
 		Payload: event.MustMarshal(event.FeedbackGeneratedPayload{
-			TargetPhase: "developer",
-			SourcePhase: "reviewer",
+			TargetPersona: "developer",
+			SourcePersona: "reviewer",
 			Iteration:   1,
 		}),
 	})
@@ -495,8 +495,8 @@ func TestAggregateDecidePersonaFailed(t *testing.T) {
 	}
 	var p event.WorkflowFailedPayload
 	_ = json.Unmarshal(events[0].Payload, &p)
-	if p.Phase != "developer" {
-		t.Errorf("expected phase=developer, got %s", p.Phase)
+	if p.Persona != "developer" {
+		t.Errorf("expected persona=developer, got %s", p.Persona)
 	}
 }
 
@@ -547,7 +547,7 @@ func TestAggregateDecideVerdictFailNonRequiredPhase(t *testing.T) {
 	events, err := agg.Decide(event.Envelope{
 		Type: event.VerdictRendered,
 		Payload: event.MustMarshal(event.VerdictPayload{
-			Phase: "developer", SourcePhase: "pr-reviewer", Outcome: event.VerdictFail,
+			Persona: "developer", SourcePersona: "pr-reviewer", Outcome: event.VerdictFail,
 		}),
 	})
 	if err != nil {
@@ -565,14 +565,13 @@ func TestAggregateDecideVerdictFail(t *testing.T) {
 	agg.WorkflowDef = &WorkflowDef{
 		Required:      []string{"developer", "reviewer"},
 		MaxIterations: 3,
-		PhaseMap:       corePhaseMap,
 	}
 
 	env := event.Envelope{
 		ID: "verdict-1", Type: event.VerdictRendered,
 		AggregateID: "wf-1", CorrelationID: "corr-1",
 		Payload: event.MustMarshal(event.VerdictPayload{
-			Phase: "develop", SourcePhase: "review",
+			Persona: "developer", SourcePersona: "reviewer",
 			Outcome: event.VerdictFail, Summary: "needs work",
 			Issues: []event.Issue{{Severity: "major", Description: "missing error handling"}},
 		}),
@@ -589,11 +588,11 @@ func TestAggregateDecideVerdictFail(t *testing.T) {
 	var fb event.FeedbackGeneratedPayload
 	_ = json.Unmarshal(events[0].Payload, &fb)
 	// FeedbackGenerated should use persona names, not phase verbs.
-	if fb.TargetPhase != "developer" {
-		t.Errorf("expected target=developer, got %s", fb.TargetPhase)
+	if fb.TargetPersona != "developer" {
+		t.Errorf("expected target=developer, got %s", fb.TargetPersona)
 	}
-	if fb.SourcePhase != "reviewer" {
-		t.Errorf("expected source=reviewer, got %s", fb.SourcePhase)
+	if fb.SourcePersona != "reviewer" {
+		t.Errorf("expected source=reviewer, got %s", fb.SourcePersona)
 	}
 }
 
@@ -601,13 +600,13 @@ func TestAggregateDecideVerdictFailMaxIterations(t *testing.T) {
 	agg := NewWorkflowAggregate("wf-1")
 	agg.Status = StatusRunning
 	agg.MaxIterations = 2
-	agg.WorkflowDef = &WorkflowDef{Required: []string{"developer"}, MaxIterations: 2, PhaseMap: corePhaseMap}
+	agg.WorkflowDef = &WorkflowDef{Required: []string{"developer"}, MaxIterations: 2}
 	agg.FeedbackCount["developer"] = 2 // already at max
 
 	env := event.Envelope{
 		Type: event.VerdictRendered, AggregateID: "wf-1", CorrelationID: "corr-1",
 		Payload: event.MustMarshal(event.VerdictPayload{
-			Phase: "develop", Outcome: event.VerdictFail, Summary: "still bad",
+			Persona: "developer", Outcome: event.VerdictFail, Summary: "still bad",
 		}),
 	}
 
@@ -625,7 +624,7 @@ func TestAggregateDecideVerdictPass(t *testing.T) {
 	events, err := agg.Decide(event.Envelope{
 		Type: event.VerdictRendered,
 		Payload: event.MustMarshal(event.VerdictPayload{
-			Phase: "develop", Outcome: event.VerdictPass,
+			Persona: "developer", Outcome: event.VerdictPass,
 		}),
 	})
 	if err != nil {
@@ -844,7 +843,7 @@ func TestEngineVerdictFromPersonaScopedAggregate(t *testing.T) {
 
 	// VerdictRendered from reviewer's persona-scoped aggregate
 	verdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase: "developer", SourcePhase: "reviewer", Outcome: event.VerdictFail, Summary: "needs work",
+		Persona: "developer", SourcePersona: "reviewer", Outcome: event.VerdictFail, Summary: "needs work",
 	})).
 		WithAggregate(wfID+":persona:reviewer", 5).
 		WithCorrelation(wfID)

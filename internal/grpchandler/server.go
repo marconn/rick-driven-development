@@ -221,7 +221,6 @@ func (s *Server) handleRegisterWorkflow(handlerName string, req *pb.RegisterWork
 		def.Graph = existing.Graph
 		def.RetriggeredBy = existing.RetriggeredBy
 		def.HintThreshold = existing.HintThreshold
-		def.PhaseMap = existing.PhaseMap
 		s.logger.Info("grpc server: merging workflow with existing Graph",
 			slog.String("workflow_id", def.ID),
 			slog.Int("graph_size", len(def.Graph)),

@@ -358,8 +358,8 @@ func feedbackGeneratedEnv(target, source string, iteration int) event.Envelope {
 	return event.Envelope{
 		Type: event.FeedbackGenerated,
 		Payload: event.MustMarshal(event.FeedbackGeneratedPayload{
-			TargetPhase: target,
-			SourcePhase: source,
+			TargetPersona: target,
+			SourcePersona: source,
 			Iteration:   iteration,
 		}),
 	}

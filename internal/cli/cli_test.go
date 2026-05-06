@@ -280,12 +280,6 @@ func TestPRFeedbackWorkflowDef_RickOwnedCommentPosters(t *testing.T) {
 		}
 	}
 
-	// PhaseMap must resolve the reply phase so verdict-to-handler lookups work
-	// if a reviewer ever targets pr-reply. Absent entry would silently fall
-	// through to handler==phase which doesn't match.
-	if got := def.PhaseMap["pr-reply"]; got != "pr-replier" {
-		t.Errorf("PhaseMap[pr-reply] = %q, want pr-replier", got)
-	}
 }
 
 // Regression test for the hulilabs/huli#689 duplicate-comment incident.

@@ -20,7 +20,7 @@ func testDeps() Deps {
 func TestAIHandlerResearcher(t *testing.T) {
 	d := testDeps()
 	h := NewAIHandler(AIHandlerConfig{
-		Name: "researcher", Phase: "research", Persona: "researcher",
+		Name: "researcher", Persona: "researcher",
 		Backend: d.Backend, Store: d.Store, Personas: d.Personas, Builder: d.Builder,
 	})
 	if h.Name() != "researcher" {
@@ -31,7 +31,7 @@ func TestAIHandlerResearcher(t *testing.T) {
 func TestAIHandlerArchitect(t *testing.T) {
 	d := testDeps()
 	h := NewAIHandler(AIHandlerConfig{
-		Name: "architect", Phase: "architect", Persona: "architect",
+		Name: "architect", Persona: "architect",
 		Backend: d.Backend, Store: d.Store, Personas: d.Personas, Builder: d.Builder,
 	})
 	if h.Name() != "architect" {
@@ -42,7 +42,7 @@ func TestAIHandlerArchitect(t *testing.T) {
 func TestAIHandlerDeveloper(t *testing.T) {
 	d := testDeps()
 	h := NewAIHandler(AIHandlerConfig{
-		Name: "developer", Phase: "develop", Persona: "developer",
+		Name: "developer", Persona: "developer",
 		Backend: d.Backend, Store: d.Store, Personas: d.Personas, Builder: d.Builder,
 	})
 	if h.Name() != "developer" {
@@ -54,10 +54,10 @@ func TestReviewHandlerReviewer(t *testing.T) {
 	d := testDeps()
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
-			Name: "reviewer", Phase: "review", Persona: "reviewer",
+			Name: "reviewer", Persona: "reviewer",
 			Backend: d.Backend, Store: d.Store, Personas: d.Personas, Builder: d.Builder,
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 	if h.Name() != "reviewer" {
 		t.Errorf("want name 'reviewer', got %q", h.Name())
@@ -68,10 +68,10 @@ func TestReviewHandlerQA(t *testing.T) {
 	d := testDeps()
 	h := NewReviewHandler(ReviewHandlerConfig{
 		AIConfig: AIHandlerConfig{
-			Name: "qa", Phase: "qa", Persona: "qa",
+			Name: "qa", Persona: "qa",
 			Backend: d.Backend, Store: d.Store, Personas: d.Personas, Builder: d.Builder,
 		},
-		TargetPhase: "develop",
+		TargetPersona: "developer",
 	})
 	if h.Name() != "qa" {
 		t.Errorf("want name 'qa', got %q", h.Name())
@@ -81,7 +81,7 @@ func TestReviewHandlerQA(t *testing.T) {
 func TestAIHandlerCommitter(t *testing.T) {
 	d := testDeps()
 	h := NewAIHandler(AIHandlerConfig{
-		Name: "committer", Phase: "commit", Persona: "committer",
+		Name: "committer", Persona: "committer",
 		Backend: d.Backend, Store: d.Store, Personas: d.Personas, Builder: d.Builder,
 	})
 	if h.Name() != "committer" {

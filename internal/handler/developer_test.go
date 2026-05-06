@@ -50,7 +50,6 @@ func newDeveloperHandlerForTest(t *testing.T, store *mockStore) *DeveloperHandle
 	t.Helper()
 	return NewDeveloperHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  &mockBackend{name: "claude", response: &backend.Response{Output: "implemented", Duration: time.Second}},
 		Store:    store,
@@ -65,7 +64,6 @@ func newDeveloperHandlerWithErrStore(t *testing.T, store *mockStoreError) *Devel
 	t.Helper()
 	return NewDeveloperHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  &mockBackend{name: "claude", response: &backend.Response{Output: "implemented", Duration: time.Second}},
 		Store:    store,
@@ -78,13 +76,10 @@ func newDeveloperHandlerWithErrStore(t *testing.T, store *mockStoreError) *Devel
 // Interface compliance
 // ---------------------------------------------------------------------------
 
-func TestDeveloperHandlerNameAndPhase(t *testing.T) {
+func TestDeveloperHandlerName(t *testing.T) {
 	h := newDeveloperHandlerForTest(t, newMockStore())
 	if h.Name() != "developer" {
 		t.Errorf("want name 'developer', got %q", h.Name())
-	}
-	if h.Phase() != "develop" {
-		t.Errorf("want phase 'develop', got %q", h.Phase())
 	}
 	if subs := h.Subscribes(); subs != nil {
 		t.Errorf("want nil subscriptions for DAG-dispatched handler, got %v", subs)
@@ -244,11 +239,11 @@ func TestDeveloperCleanWorkspaceEmitsVerdictFail(t *testing.T) {
 	if vp.Outcome != event.VerdictFail {
 		t.Errorf("want VerdictFail, got %q", vp.Outcome)
 	}
-	if vp.Phase != "develop" {
-		t.Errorf("want target phase 'develop', got %q", vp.Phase)
+	if vp.Persona != "developer" {
+		t.Errorf("want target persona 'developer', got %q", vp.Persona)
 	}
-	if vp.SourcePhase != "develop" {
-		t.Errorf("want source phase 'develop', got %q", vp.SourcePhase)
+	if vp.SourcePersona != "developer" {
+		t.Errorf("want source persona 'developer', got %q", vp.SourcePersona)
 	}
 	if len(vp.Issues) == 0 {
 		t.Error("expected at least one issue in verdict")
@@ -276,7 +271,6 @@ func TestDeveloperAIErrorPropagated(t *testing.T) {
 	aiErr := errors.New("backend timeout")
 	h := NewDeveloperHandler(AIHandlerConfig{
 		Name:     "developer",
-		Phase:    "develop",
 		Persona:  persona.Developer,
 		Backend:  &mockBackend{name: "claude", err: aiErr},
 		Store:    store,

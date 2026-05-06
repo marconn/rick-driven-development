@@ -134,7 +134,7 @@ func TestE2EPriorityFeedbackBeforePersonaCompleted(t *testing.T) {
 
 	// Fire FeedbackGenerated second (higher priority = should process first).
 	fbEvt := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "developer", Iteration: 1, Summary: "needs work",
+		TargetPersona: "developer", Iteration: 1, Summary: "needs work",
 	})).
 		WithAggregate(corrID, 5).
 		WithCorrelation(corrID).
@@ -230,7 +230,7 @@ func TestE2ESerialExecutionPerHandlerCorrelation(t *testing.T) {
 			})).WithCorrelation(corrID).WithSource("test")
 		} else {
 			evt = event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-				TargetPhase: "developer", Iteration: i,
+				TargetPersona: "developer", Iteration: i,
 			})).WithCorrelation(corrID).WithSource("test")
 		}
 		if err := env.bus.Publish(ctx, evt); err != nil {

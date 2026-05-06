@@ -23,7 +23,7 @@ import (
 func TestE2EFeedbackLoopMaxIterationsTerminates(t *testing.T) {
 	maxIter := 2
 	def := WorkflowDef{
-		ID: "e2e-maxiter", Required: []string{"developer", "reviewer"}, MaxIterations: maxIter, PhaseMap: corePhaseMap,
+		ID: "e2e-maxiter", Required: []string{"developer", "reviewer"}, MaxIterations: maxIter,
 		Graph:         map[string][]string{"developer": {}, "reviewer": {"developer"}},
 		RetriggeredBy: map[string][]event.Type{"developer": {event.FeedbackGenerated}},
 	}
@@ -56,8 +56,8 @@ func TestE2EFeedbackLoopMaxIterationsTerminates(t *testing.T) {
 				// Uses phase verbs ("develop", not "developer") to match real handler behavior.
 				return []event.Envelope{
 					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-						Phase:       "develop",
-						SourcePhase: "review",
+						Persona:     "developer",
+						SourcePersona: "reviewer",
 						Outcome:     event.VerdictFail,
 						Summary:     fmt.Sprintf("code is bad (iter %d)", n),
 					})),
@@ -98,7 +98,7 @@ func TestE2EFeedbackLoopMaxIterationsTerminates(t *testing.T) {
 // then passes produces WorkflowCompleted.
 func TestE2EFeedbackLoopConverges(t *testing.T) {
 	def := WorkflowDef{
-		ID: "e2e-converge", Required: []string{"developer", "reviewer"}, MaxIterations: 5, PhaseMap: corePhaseMap,
+		ID: "e2e-converge", Required: []string{"developer", "reviewer"}, MaxIterations: 5,
 		Graph:         map[string][]string{"developer": {}, "reviewer": {"developer"}},
 		RetriggeredBy: map[string][]event.Type{"developer": {event.FeedbackGenerated}},
 	}
@@ -128,8 +128,8 @@ func TestE2EFeedbackLoopConverges(t *testing.T) {
 				if n <= 2 {
 					return []event.Envelope{
 						event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-							Phase:       "develop",
-							SourcePhase: "review",
+							Persona:     "developer",
+							SourcePersona: "reviewer",
 							Outcome:     event.VerdictFail,
 							Summary:     fmt.Sprintf("iteration %d: needs work", n),
 						})),
@@ -184,13 +184,13 @@ func TestAggregateMaxIterationsEnforced(t *testing.T) {
 	agg := NewWorkflowAggregate("wf-1")
 	agg.Status = StatusRunning
 	agg.MaxIterations = 1
-	agg.WorkflowDef = &WorkflowDef{Required: []string{"developer"}, MaxIterations: 1, PhaseMap: corePhaseMap}
+	agg.WorkflowDef = &WorkflowDef{Required: []string{"developer"}, MaxIterations: 1}
 	agg.FeedbackCount["developer"] = 1 // already at max
 
 	events, err := agg.Decide(event.Envelope{
 		Type: event.VerdictRendered, AggregateID: "wf-1", CorrelationID: "corr-1",
 		Payload: event.MustMarshal(event.VerdictPayload{
-			Phase: "develop", Outcome: event.VerdictFail, Summary: "still bad",
+			Persona: "developer", Outcome: event.VerdictFail, Summary: "still bad",
 		}),
 	})
 	if err != nil {
@@ -219,8 +219,8 @@ func TestAggregateFeedbackCountTrackingAcrossIterations(t *testing.T) {
 		agg.Apply(event.Envelope{
 			Version: i + 1, Type: event.FeedbackGenerated,
 			Payload: event.MustMarshal(event.FeedbackGeneratedPayload{
-				TargetPhase: "developer",
-				SourcePhase: "reviewer",
+				TargetPersona: "developer",
+				SourcePersona: "reviewer",
 				Iteration:   i + 1,
 			}),
 		})
@@ -242,8 +242,8 @@ func TestAggregateFeedbackPendingGatesStaleEvents(t *testing.T) {
 	agg.Apply(event.Envelope{
 		Version: 1, Type: event.FeedbackGenerated,
 		Payload: event.MustMarshal(event.FeedbackGeneratedPayload{
-			TargetPhase: "developer",
-			SourcePhase: "reviewer",
+			TargetPersona: "developer",
+			SourcePersona: "reviewer",
 		}),
 	})
 
@@ -531,8 +531,8 @@ func TestE2EContextSnapshotWithFeedbackLoop(t *testing.T) {
 				if n == 1 {
 					return []event.Envelope{
 						event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-							Phase:       "developer",
-							SourcePhase: "reviewer",
+							Persona:     "developer",
+							SourcePersona: "reviewer",
 							Outcome:     event.VerdictFail,
 							Summary:     "needs work",
 						})),
@@ -926,7 +926,7 @@ func TestAggregateDecideNoFeedbackWhilePaused(t *testing.T) {
 	events, err := agg.Decide(event.Envelope{
 		Type: event.VerdictRendered,
 		Payload: event.MustMarshal(event.VerdictPayload{
-			Phase: "develop", Outcome: event.VerdictFail, Summary: "bad",
+			Persona: "developer", Outcome: event.VerdictFail, Summary: "bad",
 		}),
 	})
 	if err != nil {
@@ -971,13 +971,12 @@ func TestAggregateEscalateOnMaxIterPausesInsteadOfFail(t *testing.T) {
 		Required:          []string{"developer", "reviewer"},
 		MaxIterations:     1,
 		EscalateOnMaxIter: true,
-		PhaseMap:          corePhaseMap,
 	}
 
 	events, err := agg.Decide(event.Envelope{
 		Type: event.VerdictRendered, AggregateID: "wf-1", CorrelationID: "corr-1",
 		Payload: event.MustMarshal(event.VerdictPayload{
-			Phase: "develop", Outcome: event.VerdictFail, Summary: "still bad",
+			Persona: "developer", Outcome: event.VerdictFail, Summary: "still bad",
 		}),
 	})
 	if err != nil {
@@ -1011,13 +1010,12 @@ func TestAggregateEscalateOffStillFails(t *testing.T) {
 		Required:          []string{"developer", "reviewer"},
 		MaxIterations:     1,
 		EscalateOnMaxIter: false,
-		PhaseMap:          corePhaseMap,
 	}
 
 	events, err := agg.Decide(event.Envelope{
 		Type: event.VerdictRendered, AggregateID: "wf-1", CorrelationID: "corr-1",
 		Payload: event.MustMarshal(event.VerdictPayload{
-			Phase: "develop", Outcome: event.VerdictFail, Summary: "still bad",
+			Persona: "developer", Outcome: event.VerdictFail, Summary: "still bad",
 		}),
 	})
 	if err != nil {
@@ -1036,7 +1034,6 @@ func TestE2EAutoEscalationPausesThenResumes(t *testing.T) {
 		Required:          []string{"developer", "reviewer"},
 		MaxIterations:     1,
 		EscalateOnMaxIter: true,
-		PhaseMap:          corePhaseMap,
 		Graph:             map[string][]string{"developer": {}, "reviewer": {"developer"}},
 		RetriggeredBy:     map[string][]event.Type{"developer": {event.FeedbackGenerated}},
 	}
@@ -1069,8 +1066,8 @@ func TestE2EAutoEscalationPausesThenResumes(t *testing.T) {
 					// Uses phase verbs ("develop", not "developer") to match real handler behavior.
 					return []event.Envelope{
 						event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-							Phase:       "develop",
-							SourcePhase: "review",
+							Persona:     "developer",
+							SourcePersona: "reviewer",
 							Outcome:     event.VerdictFail,
 							Summary:     fmt.Sprintf("iteration %d: bad", n),
 						})),
@@ -1228,8 +1225,8 @@ func TestE2EFeedbackParallelRefire(t *testing.T) {
 				if n == 1 {
 					return []event.Envelope{
 						event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-							Phase:       "developer",
-							SourcePhase: "reviewer",
+							Persona:     "developer",
+							SourcePersona: "reviewer",
 							Outcome:     event.VerdictFail,
 							Summary:     "needs error handling",
 							Issues:      []event.Issue{{Severity: "major", Category: "correctness", Description: "missing error handling"}},
@@ -1402,7 +1399,6 @@ func TestE2EFeedbackLoopParallelReviewersRefire(t *testing.T) {
 		},
 		MaxIterations:     3,
 		EscalateOnMaxIter: true,
-		PhaseMap:          corePhaseMap,
 	}
 	env := newE2EEnv(t, def)
 
@@ -1432,7 +1428,7 @@ func TestE2EFeedbackLoopParallelReviewersRefire(t *testing.T) {
 				reviewerRuns.Add(1)
 				return []event.Envelope{
 					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-						Phase: "develop", SourcePhase: "review", Outcome: event.VerdictPass,
+						Persona: "developer", SourcePersona: "reviewer", Outcome: event.VerdictPass,
 						Summary: "looks good",
 					})),
 				}, nil
@@ -1451,7 +1447,7 @@ func TestE2EFeedbackLoopParallelReviewersRefire(t *testing.T) {
 				qaRuns.Add(1)
 				return []event.Envelope{
 					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-						Phase: "develop", SourcePhase: "qa", Outcome: event.VerdictPass,
+						Persona: "developer", SourcePersona: "qa", Outcome: event.VerdictPass,
 						Summary: "tests pass",
 					})),
 				}, nil
@@ -1471,7 +1467,7 @@ func TestE2EFeedbackLoopParallelReviewersRefire(t *testing.T) {
 				if run == 1 {
 					return []event.Envelope{
 						event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-							Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+							Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictFail,
 							Summary: "lint failed",
 							Issues: []event.Issue{{Severity: "major", Category: "correctness", Description: "lint error"}},
 						})),
@@ -1479,7 +1475,7 @@ func TestE2EFeedbackLoopParallelReviewersRefire(t *testing.T) {
 				}
 				return []event.Envelope{
 					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-						Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictPass,
+						Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictPass,
 						Summary: "all checks pass",
 					})),
 				}, nil
@@ -1552,15 +1548,14 @@ func TestAggregate_AdvisoryFailEscalatesImmediately(t *testing.T) {
 	agg.MaxIterations = 3
 	agg.WorkflowDef = &WorkflowDef{
 		Required: []string{"developer"}, MaxIterations: 3,
-		PhaseMap:          corePhaseMap,
 		EscalateOnMaxIter: true,
 	}
 
 	events, err := agg.Decide(event.Envelope{
 		Type: event.VerdictRendered, AggregateID: "wf-adv", CorrelationID: "corr-adv",
 		Payload: event.MustMarshal(event.VerdictPayload{
-			Phase:       "develop",
-			SourcePhase: "quality-gate",
+			Persona:     "developer",
+			SourcePersona: "quality-gate",
 			Outcome:     event.VerdictFail,
 			Summary:     "local test failed (GitHub CI green on same SHA)",
 			Advisory:    true,
@@ -1595,13 +1590,12 @@ func TestAggregate_IdenticalVerdictDedupePauses(t *testing.T) {
 	agg.MaxIterations = 3
 	agg.WorkflowDef = &WorkflowDef{
 		Required: []string{"developer"}, MaxIterations: 3,
-		PhaseMap:          corePhaseMap,
 		EscalateOnMaxIter: true,
 	}
 
 	// First failing verdict — allowed. Emits FeedbackGenerated.
 	verdict := event.VerdictPayload{
-		Phase: "develop", SourcePhase: "quality-gate",
+		Persona: "developer", SourcePersona: "quality-gate",
 		Outcome: event.VerdictFail,
 		Issues:  []event.Issue{{Severity: "major", Category: "correctness", Description: "./run.sh test failed:\n"}},
 		Summary: "test failed",
@@ -1634,7 +1628,7 @@ func TestAggregate_IdenticalVerdictDedupePauses(t *testing.T) {
 	agg.Apply(event.Envelope{
 		Version: 3, Type: event.FeedbackGenerated,
 		Payload: event.MustMarshal(event.FeedbackGeneratedPayload{
-			TargetPhase: "developer", SourcePhase: "quality-gate", Iteration: 1,
+			TargetPersona: "developer", SourcePersona: "quality-gate", Iteration: 1,
 		}),
 	})
 
@@ -1669,11 +1663,11 @@ func TestAggregate_DifferentVerdictsDoNotDedup(t *testing.T) {
 	agg.Status = StatusRunning
 	agg.MaxIterations = 3
 	agg.WorkflowDef = &WorkflowDef{
-		Required: []string{"developer"}, MaxIterations: 3, PhaseMap: corePhaseMap,
+		Required: []string{"developer"}, MaxIterations: 3,
 	}
 
 	first := event.VerdictPayload{
-		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictFail,
 		Issues:  []event.Issue{{Description: "lint error: unused var"}},
 		Summary: "lint failed",
 	}
@@ -1695,11 +1689,11 @@ func TestAggregate_DifferentVerdictsDoNotDedup(t *testing.T) {
 	})
 	agg.Apply(event.Envelope{
 		Version: 3, Type: event.FeedbackGenerated,
-		Payload: event.MustMarshal(event.FeedbackGeneratedPayload{TargetPhase: "developer", SourcePhase: "quality-gate"}),
+		Payload: event.MustMarshal(event.FeedbackGeneratedPayload{TargetPersona: "developer", SourcePersona: "quality-gate"}),
 	})
 
 	second := event.VerdictPayload{
-		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictFail,
 		Issues:  []event.Issue{{Description: "test failed: TestFoo"}}, // different
 		Summary: "test failed",
 	}
@@ -1722,15 +1716,15 @@ func TestAggregate_DifferentVerdictsDoNotDedup(t *testing.T) {
 func TestAggregate_PassClearsFingerprint(t *testing.T) {
 	agg := NewWorkflowAggregate("wf-clear")
 	agg.Status = StatusRunning
-	agg.WorkflowDef = &WorkflowDef{Required: []string{"developer"}, PhaseMap: corePhaseMap}
+	agg.WorkflowDef = &WorkflowDef{Required: []string{"developer"}}
 
 	failVerdict := event.VerdictPayload{
-		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictFail,
 		Issues:  []event.Issue{{Description: "flake"}},
 		Summary: "test failed",
 	}
 	passVerdict := event.VerdictPayload{
-		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictPass,
+		Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictPass,
 		Summary: "ok",
 	}
 
@@ -1773,7 +1767,6 @@ func TestE2E_IdenticalVerdictDedupePauses_ProductionFlow(t *testing.T) {
 		Required:          []string{"developer", "committer"},
 		MaxIterations:     5,
 		EscalateOnMaxIter: true,
-		PhaseMap:          corePhaseMap,
 		Graph: map[string][]string{
 			"developer": {},
 			"committer": {"developer"}, // never completes — see committer handler below
@@ -1847,8 +1840,8 @@ func TestE2E_IdenticalVerdictDedupePauses_ProductionFlow(t *testing.T) {
 	// The fingerprint hashes summary + sorted issue descriptions, so we use
 	// fixed strings.
 	verdict := event.MustMarshal(event.VerdictPayload{
-		Phase:       "develop",
-		SourcePhase: "quality-gate",
+		Persona:     "developer",
+		SourcePersona: "quality-gate",
 		Outcome:     event.VerdictFail,
 		Issues: []event.Issue{{
 			Severity:    "major",

@@ -89,7 +89,7 @@ func TestAIResponsePayloadOutputRawRoundTrip(t *testing.T) {
 	groundedText, _ := json.Marshal("No grounded issues found in the changed lines for this review category.\n\nVERDICT: PASS")
 
 	original := event.AIResponsePayload{
-		Phase:      "pr-category-review",
+		Persona:    "pr-data",
 		Backend:    "claude",
 		DurationMS: 12345,
 		Output:     groundedText,

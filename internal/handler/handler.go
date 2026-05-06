@@ -29,13 +29,6 @@ type Handler interface {
 	Handle(ctx context.Context, env event.Envelope) ([]event.Envelope, error)
 }
 
-// Phased is optionally implemented by handlers that use a phase name different
-// from their handler name (e.g., handler "developer" uses phase "develop").
-// The engine uses this to build a phase→persona mapping for verdict resolution.
-type Phased interface {
-	Phase() string
-}
-
 // Hinter is optionally implemented by handlers that support pre-check hints.
 // When a handler implements Hinter, PersonaRunner calls Hint() first. Full
 // Handle() dispatch is gated on HintApproved for that persona+correlation.

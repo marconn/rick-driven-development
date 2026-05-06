@@ -56,7 +56,6 @@ func TestPersonaRunnerReactiveDispatch(t *testing.T) {
 	// Publish a PersonaCompleted event from "developer"
 	triggerEvt := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
 		Persona:      "developer",
-		Phase:        "develop",
 		TriggerEvent: "phase.scheduled",
 		TriggerID:    "evt-1",
 		Reactive:     false,
@@ -446,7 +445,7 @@ func TestPersonaRunnerEmitsPersonaCompleted(t *testing.T) {
 
 	// Reactive handler returns an AIResponseReceived event
 	aiRespEvt := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-		Phase: "docs", TokensUsed: 100,
+		Persona: "documenter", TokensUsed: 100,
 	}))
 	h := &stubHandler{
 		name: "documenter",
@@ -1248,7 +1247,6 @@ func TestJoinConditionBlockedByFailVerdict(t *testing.T) {
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
 		},
-		PhaseMap: map[string]string{"develop": "developer"},
 	})
 
 	committerFired := make(chan struct{}, 1)
@@ -1287,8 +1285,8 @@ func TestJoinConditionBlockedByFailVerdict(t *testing.T) {
 	// This mimics what executeDispatch does for a handler that returns a fail verdict.
 	qgAgg := corrID + ":persona:quality-gate"
 	verdictEvt := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase:       "develop",
-		SourcePhase: "quality-gate",
+		Persona:     "developer",
+		SourcePersona: "quality-gate",
 		Outcome:     event.VerdictFail,
 		Summary:     "lint failed",
 	})).WithAggregate(qgAgg, 1).WithCorrelation(corrID)
@@ -1373,8 +1371,8 @@ func TestJoinConditionNotBlockedWithoutFeedbackLoop(t *testing.T) {
 	// Seed qa: fail verdict + PersonaCompleted.
 	qaAgg := corrID + ":persona:qa"
 	qaVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase:       "develop",
-		SourcePhase: "qa",
+		Persona:     "developer",
+		SourcePersona: "qa",
 		Outcome:     event.VerdictFail,
 		Summary:     "missing tests",
 	})).WithAggregate(qaAgg, 1).WithCorrelation(corrID)
@@ -1412,7 +1410,6 @@ func TestJoinConditionAllowedAfterPassVerdict(t *testing.T) {
 			"quality-gate": {"developer"},
 			"committer":    {"quality-gate"},
 		},
-		PhaseMap: map[string]string{"develop": "developer"},
 	})
 
 	committerFired := make(chan struct{}, 1)
@@ -1448,14 +1445,14 @@ func TestJoinConditionAllowedAfterPassVerdict(t *testing.T) {
 	// Seed: first run fail, then re-run pass (simulating completed feedback loop).
 	qgAgg := corrID + ":persona:quality-gate"
 	failVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictFail,
 	})).WithAggregate(qgAgg, 1).WithCorrelation(corrID)
 	failPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
 		Persona: "quality-gate", ChainDepth: 2,
 	})).WithAggregate(qgAgg, 2).WithCorrelation(corrID)
 	// After feedback loop, quality-gate re-runs and passes.
 	passVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictPass,
+		Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictPass,
 	})).WithAggregate(qgAgg, 3).WithCorrelation(corrID)
 	passPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
 		Persona: "quality-gate", ChainDepth: 2,
@@ -1706,7 +1703,7 @@ func TestPRCategoryJoinWithFailVerdict_PRReview(t *testing.T) {
 		// Give pr-security a FAIL verdict to test that fail doesn't block the join.
 		if reviewer == "pr-security" {
 			verdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-				Phase: "develop", SourcePhase: "pr-category-review", Outcome: event.VerdictFail,
+				Persona: "developer", SourcePersona: "pr-category-review", Outcome: event.VerdictFail,
 				Summary: "SQL injection risk",
 				Issues:  []event.Issue{{Severity: "critical", Category: "security", Description: "SQL injection"}},
 			})).WithAggregate(agg, 1).WithCorrelation(corrID)
@@ -1780,7 +1777,6 @@ func TestFeedbackLoopParallelRefire(t *testing.T) {
 		},
 		MaxIterations:     2,
 		EscalateOnMaxIter: true,
-		PhaseMap:          map[string]string{"develop": "developer"},
 	})
 
 	var mu sync.Mutex
@@ -1852,7 +1848,7 @@ func TestFeedbackLoopParallelRefire(t *testing.T) {
 
 	qgAgg := corrID + ":persona:quality-gate"
 	qgVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictFail,
 		Summary: "lint failed",
 	})).WithAggregate(qgAgg, 1).WithCorrelation(corrID)
 	qgPC1 := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -1863,7 +1859,7 @@ func TestFeedbackLoopParallelRefire(t *testing.T) {
 	}
 
 	fbEvt := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "developer", SourcePhase: "quality-gate", Iteration: 1,
+		TargetPersona: "developer", SourcePersona: "quality-gate", Iteration: 1,
 	})).WithAggregate(corrID, 2).WithCorrelation(corrID)
 	if err := store.Append(ctx, corrID, 1, []event.Envelope{fbEvt}); err != nil {
 		t.Fatalf("append feedback: %v", err)
@@ -1919,7 +1915,6 @@ func TestDuplicateQualityGatePrevention(t *testing.T) {
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
 		},
-		PhaseMap: map[string]string{"develop": "developer"},
 	})
 
 	var mu sync.Mutex
@@ -2015,7 +2010,7 @@ func TestDuplicateQualityGatePrevention(t *testing.T) {
 
 	// Seed quality-gate's fail verdict on its existing aggregate.
 	qgVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictFail,
 		Summary: "lint failed",
 	})).WithAggregate(qgAgg, qgVersion+1).WithCorrelation(corrID)
 	if err := store.Append(ctx, qgAgg, qgVersion, []event.Envelope{qgVerdict}); err != nil {
@@ -2023,7 +2018,7 @@ func TestDuplicateQualityGatePrevention(t *testing.T) {
 	}
 
 	fbEvt := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "developer", SourcePhase: "quality-gate", Iteration: 1,
+		TargetPersona: "developer", SourcePersona: "quality-gate", Iteration: 1,
 	})).WithAggregate(corrID, 2).WithCorrelation(corrID)
 	if err := store.Append(ctx, corrID, 1, []event.Envelope{fbEvt}); err != nil {
 		t.Fatalf("append fb: %v", err)
@@ -2128,7 +2123,6 @@ func TestLateArrivingStaleCompletionDuplicateQualityGate(t *testing.T) {
 		},
 		MaxIterations:     3,
 		EscalateOnMaxIter: true,
-		PhaseMap:          map[string]string{"develop": "developer", "review": "reviewer"},
 	})
 
 	var mu sync.Mutex
@@ -2177,7 +2171,7 @@ func TestLateArrivingStaleCompletionDuplicateQualityGate(t *testing.T) {
 
 	// Reviewer completes with a fail verdict (rendered on reviewer's aggregate).
 	revVerdict1 := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase: "develop", SourcePhase: "reviewer", Outcome: event.VerdictFail,
+		Persona: "developer", SourcePersona: "reviewer", Outcome: event.VerdictFail,
 		Summary: "4 issues", Issues: []event.Issue{{Severity: "major", Description: "x"}},
 	})).WithAggregate(revAgg, 1).WithCorrelation(corrID)
 	if err := store.Append(ctx, revAgg, 0, []event.Envelope{revVerdict1}); err != nil {
@@ -2194,7 +2188,7 @@ func TestLateArrivingStaleCompletionDuplicateQualityGate(t *testing.T) {
 	// developer. Seeded directly on the workflow aggregate to simulate what
 	// WorkflowAggregate.decideVerdictRendered would produce.
 	fbEvt := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "developer", SourcePhase: "reviewer", Iteration: 1,
+		TargetPersona: "developer", SourcePersona: "reviewer", Iteration: 1,
 	})).WithAggregate(corrID, 2).WithCorrelation(corrID)
 	if err := store.Append(ctx, corrID, 1, []event.Envelope{fbEvt}); err != nil {
 		t.Fatalf("append feedback: %v", err)
@@ -2295,7 +2289,6 @@ func TestFeedbackGeneratedRetriggersDeveloper(t *testing.T) {
 		},
 		MaxIterations:     3,
 		EscalateOnMaxIter: true,
-		PhaseMap:          map[string]string{"develop": "developer", "review": "reviewer"},
 	})
 
 	devFired := make(chan event.Envelope, 5)
@@ -2360,7 +2353,7 @@ func TestFeedbackGeneratedRetriggersDeveloper(t *testing.T) {
 	// Seed: quality-gate verdict fail + completed
 	qgAgg := corrID + ":persona:quality-gate"
 	qgVerdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase: "develop", SourcePhase: "quality-gate", Outcome: event.VerdictFail,
+		Persona: "developer", SourcePersona: "quality-gate", Outcome: event.VerdictFail,
 		Summary: "test failed",
 	})).WithAggregate(qgAgg, 1).WithCorrelation(corrID)
 	qgPC := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
@@ -2372,7 +2365,7 @@ func TestFeedbackGeneratedRetriggersDeveloper(t *testing.T) {
 
 	// Seed: FeedbackGenerated on workflow aggregate (as Engine would emit)
 	fbEvt := event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
-		TargetPhase: "developer", SourcePhase: "quality-gate", Iteration: 1,
+		TargetPersona: "developer", SourcePersona: "quality-gate", Iteration: 1,
 		Summary: "test failed",
 	})).WithAggregate(corrID, 2).WithCorrelation(corrID)
 	if err := store.Append(ctx, corrID, 1, []event.Envelope{fbEvt}); err != nil {

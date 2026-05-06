@@ -66,17 +66,14 @@ func TestExtractConsolidatorInputs(t *testing.T) {
 			Source:     "gh:owner/repo#42",
 		})).WithCorrelation(corrID),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:   "pr-category-review",
 			Backend: "claude",
 			Output:  json.RawMessage(securityOutput),
 		})).WithCorrelation(corrID).WithSource("handler:pr-security"),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:   "pr-category-review",
 			Backend: "claude",
 			Output:  json.RawMessage(testingOutput),
 		})).WithCorrelation(corrID).WithSource("handler:pr-testing"),
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:   "pr-category-review",
 			Backend: "claude",
 			Output:  json.RawMessage(perfOutput),
 		})).WithCorrelation(corrID).WithSource("handler:pr-performance"),
@@ -152,20 +149,20 @@ func TestExtractConsolidatorInputs_DetectsTruncatedDiff(t *testing.T) {
 	}
 }
 
-func TestExtractConsolidatorInputsFallbackToPhase(t *testing.T) {
-	// Events without Source fall back to Phase as key.
+func TestExtractConsolidatorInputsFallbackToPersona(t *testing.T) {
+	// Events without Source fall back to AIResponsePayload.Persona as key.
 	output, _ := json.Marshal("fallback output")
 	events := []event.Envelope{
 		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
-			Phase:   "review",
+			Persona: "reviewer",
 			Backend: "claude",
 			Output:  json.RawMessage(output),
 		})),
 	}
 
 	_, handlerOutputs, _, _, _, _ := extractConsolidatorInputs(events)
-	if handlerOutputs["review"] != "fallback output" {
-		t.Errorf("fallback: want 'fallback output', got %q", handlerOutputs["review"])
+	if handlerOutputs["reviewer"] != "fallback output" {
+		t.Errorf("fallback: want 'fallback output' under reviewer, got %q", handlerOutputs["reviewer"])
 	}
 }
 

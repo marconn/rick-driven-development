@@ -310,7 +310,7 @@ func subscribeForResult(bus eventbus.Bus, aggregateID string, ch chan<- workflow
 			logger.Error("unmarshal workflow failed", slog.String("error", err.Error()))
 			return nil
 		}
-		send(workflowResult{reason: p.Reason, phase: p.Phase, err: fmt.Errorf("workflow failed: %s", p.Reason)})
+		send(workflowResult{reason: p.Reason, phase: p.Persona, err: fmt.Errorf("workflow failed: %s", p.Reason)})
 		return nil
 	}, eventbus.WithName("cli:failure"))
 
@@ -332,9 +332,9 @@ func subscribeForResult(bus eventbus.Bus, aggregateID string, ch chan<- workflow
 		}
 		var p event.VerdictPayload
 		if err := unmarshalPayload(env.Payload, &p); err == nil {
-			fmt.Fprintf(os.Stderr, "  ← verdict: %s for %s", p.Outcome, p.Phase)
-			if p.SourcePhase != "" {
-				fmt.Fprintf(os.Stderr, " (from %s)", p.SourcePhase)
+			fmt.Fprintf(os.Stderr, "  ← verdict: %s for %s", p.Outcome, p.Persona)
+			if p.SourcePersona != "" {
+				fmt.Fprintf(os.Stderr, " (from %s)", p.SourcePersona)
 			}
 			fmt.Fprintln(os.Stderr)
 		}

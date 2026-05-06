@@ -38,7 +38,6 @@ type WorkflowDef struct {
 	MaxIterations     int                           // max feedback loop iterations (default: 3)
 	EscalateOnMaxIter bool                          // pause instead of fail when max iterations reached
 	HintThreshold     float64                       // auto-approve hints above this confidence (0 = always ask, 1 = never ask, default: 0.7)
-	PhaseMap          map[string]string             // phase verb → handler name (e.g., "develop" → "developer")
 	RetriggeredBy     map[string][]event.Type       // handler → extra event types that re-trigger it (e.g., developer → [FeedbackGenerated])
 	// MaxChainDepth caps the reactive chain depth for dispatches in this
 	// workflow. Zero means "auto": len(Required) + 5, matching the old
@@ -102,27 +101,6 @@ func (d *WorkflowDef) DownstreamOf(persona string) []string {
 	return result
 }
 
-// ResolvePhase maps a verdict phase name to the corresponding required persona
-// name. Falls back to the phase name itself if no mapping exists (handles cases
-// where phase == persona, e.g., "qa" → "qa").
-func (d *WorkflowDef) ResolvePhase(phase string) string {
-	if d.PhaseMap != nil {
-		if persona, ok := d.PhaseMap[phase]; ok {
-			return persona
-		}
-	}
-	return phase
-}
-
-// corePhaseMap maps phase verbs used by built-in AI handlers to their
-// persona (handler) names. Only includes entries where the two differ.
-var corePhaseMap = map[string]string{
-	"research": "researcher",
-	"develop":  "developer",
-	"review":   "reviewer",
-	"commit":   "committer",
-}
-
 // DevelopOnlyWorkflowDef returns a minimal workflow for quick dev tasks.
 // Provisions a workspace first, then developer → reviewer → committer.
 // RetriggeredBy enables the feedback loop: a VerdictRendered{fail} from the
@@ -142,7 +120,6 @@ func DevelopOnlyWorkflowDef() WorkflowDef {
 			"developer": {event.FeedbackGenerated},
 		},
 		MaxIterations: 3,
-		PhaseMap:      corePhaseMap,
 	}
 }
 
@@ -166,7 +143,6 @@ func WorkspaceDevWorkflowDef() WorkflowDef {
 		},
 		MaxIterations:     3,
 		EscalateOnMaxIter: true,
-		PhaseMap:          corePhaseMap,
 	}
 }
 
@@ -256,13 +232,6 @@ func PRFeedbackWorkflowDef() WorkflowDef {
 		},
 		MaxIterations:     3,
 		EscalateOnMaxIter: true,
-		PhaseMap: map[string]string{
-			"feedback-analyze": "feedback-analyzer",
-			"develop":          "developer",
-			"feedback-verify":  "reviewer",
-			"commit":           "committer",
-			"pr-reply":         "pr-replier",
-		},
 	}
 }
 
@@ -293,7 +262,6 @@ func JiraDevWorkflowDef() WorkflowDef {
 		},
 		MaxIterations:     3,
 		EscalateOnMaxIter: true,
-		PhaseMap:          corePhaseMap,
 	}
 }
 
@@ -325,7 +293,6 @@ func GithubDevWorkflowDef() WorkflowDef {
 		},
 		MaxIterations:     3,
 		EscalateOnMaxIter: true,
-		PhaseMap:          corePhaseMap,
 	}
 }
 
@@ -361,9 +328,6 @@ func JiraQAStepsWorkflowDef() WorkflowDef {
 			"qa-jira-writer": {"qa-analyzer"},
 		},
 		MaxIterations: 1,
-		PhaseMap: map[string]string{
-			"qa-analyze": "qa-analyzer",
-		},
 	}
 }
 
@@ -471,6 +435,5 @@ func CIFixWorkflowDef() WorkflowDef {
 		},
 		MaxIterations:     2,
 		EscalateOnMaxIter: true,
-		PhaseMap:          corePhaseMap,
 	}
 }

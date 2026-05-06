@@ -38,7 +38,6 @@ func NewCommitterHandler(cfg AIHandlerConfig) *CommitterHandler {
 }
 
 func (h *CommitterHandler) Name() string             { return h.ai.Name() }
-func (h *CommitterHandler) Phase() string             { return h.ai.Phase() }
 func (h *CommitterHandler) Subscribes() []event.Type { return nil }
 
 // Handle checks workspace for changes, then delegates to the AI handler.
@@ -63,15 +62,15 @@ func (h *CommitterHandler) Handle(ctx context.Context, env event.Envelope) ([]ev
 	return h.ai.Handle(ctx, env)
 }
 
-// noChangesVerdict emits VerdictFail targeting the develop phase so the
+// noChangesVerdict emits VerdictFail targeting the developer so the
 // aggregate generates feedback and the developer retries.
 func (h *CommitterHandler) noChangesVerdict() []event.Envelope {
 	return []event.Envelope{
 		event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-			Phase:       "develop",
-			SourcePhase: h.ai.phase,
-			Outcome:     event.VerdictFail,
-			Summary:     "no code changes detected in workspace — developer must produce changes before commit",
+			Persona:       "developer",
+			SourcePersona: h.ai.name,
+			Outcome:       event.VerdictFail,
+			Summary:       "no code changes detected in workspace — developer must produce changes before commit",
 			Issues: []event.Issue{
 				{
 					Severity:    "critical",

@@ -34,7 +34,6 @@ func NewDeveloperHandler(cfg AIHandlerConfig) *DeveloperHandler {
 }
 
 func (h *DeveloperHandler) Name() string             { return h.ai.Name() }
-func (h *DeveloperHandler) Phase() string            { return h.ai.Phase() }
 func (h *DeveloperHandler) Subscribes() []event.Type { return nil }
 
 // Handle delegates to the AI handler and then post-checks the workspace.
@@ -75,10 +74,10 @@ func (h *DeveloperHandler) Handle(ctx context.Context, env event.Envelope) ([]ev
 	// workspace. This is the hallucination signature: the LLM produced plausible
 	// prose ("I created the file…") without invoking file-editing tools.
 	verdict := event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
-		Phase:       "develop",
-		SourcePhase: h.ai.phase,
-		Outcome:     event.VerdictFail,
-		Summary:     "developer produced no workspace changes — likely hallucinated output (no uncommitted files, no unpushed commits, no branch divergence)",
+		Persona:       "developer",
+		SourcePersona: h.ai.name,
+		Outcome:       event.VerdictFail,
+		Summary:       "developer produced no workspace changes — likely hallucinated output (no uncommitted files, no unpushed commits, no branch divergence)",
 		Issues: []event.Issue{
 			{
 				Severity: "critical",

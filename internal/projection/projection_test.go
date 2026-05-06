@@ -83,7 +83,7 @@ func TestWorkflowStatusProjection_Failed(t *testing.T) {
 		makeEnvelope(event.WorkflowRequested, "wf-2", 1,
 			event.WorkflowRequestedPayload{Prompt: "fail", WorkflowID: "bad"}),
 		makeEnvelope(event.WorkflowFailed, "wf-2", 2,
-			event.WorkflowFailedPayload{Reason: "phase exploded", Phase: "develop"}),
+			event.WorkflowFailedPayload{Reason: "phase exploded", Persona: "developer"}),
 	}
 
 	for _, env := range steps {
@@ -147,11 +147,11 @@ func TestTokenUsageProjection_AggregatesTokens(t *testing.T) {
 
 	events := []event.Envelope{
 		makeEnvelope(event.AIResponseReceived, "wf-1", 1,
-			event.AIResponsePayload{Phase: "research", Backend: "claude", TokensUsed: 1000, DurationMS: 500}),
+			event.AIResponsePayload{Persona: "researcher", Backend: "claude", TokensUsed: 1000, DurationMS: 500}),
 		makeEnvelope(event.AIResponseReceived, "wf-1", 2,
-			event.AIResponsePayload{Phase: "develop", Backend: "gemini", TokensUsed: 2000, DurationMS: 1000}),
+			event.AIResponsePayload{Persona: "developer", Backend: "gemini", TokensUsed: 2000, DurationMS: 1000}),
 		makeEnvelope(event.AIResponseReceived, "wf-1", 3,
-			event.AIResponsePayload{Phase: "research", Backend: "claude", TokensUsed: 500, DurationMS: 300}),
+			event.AIResponsePayload{Persona: "researcher", Backend: "claude", TokensUsed: 500, DurationMS: 300}),
 	}
 
 	for _, env := range events {
@@ -167,11 +167,11 @@ func TestTokenUsageProjection_AggregatesTokens(t *testing.T) {
 	if tu.Total != 3500 {
 		t.Errorf("expected total 3500, got %d", tu.Total)
 	}
-	if tu.ByPhase["research"] != 1500 {
-		t.Errorf("expected research 1500, got %d", tu.ByPhase["research"])
+	if tu.ByPersona["researcher"] != 1500 {
+		t.Errorf("expected research 1500, got %d", tu.ByPersona["researcher"])
 	}
-	if tu.ByPhase["develop"] != 2000 {
-		t.Errorf("expected develop 2000, got %d", tu.ByPhase["develop"])
+	if tu.ByPersona["developer"] != 2000 {
+		t.Errorf("expected develop 2000, got %d", tu.ByPersona["developer"])
 	}
 	if tu.ByBackend["claude"] != 1500 {
 		t.Errorf("expected claude 1500, got %d", tu.ByBackend["claude"])
@@ -186,7 +186,7 @@ func TestTokenUsageProjection_IgnoresZeroTokens(t *testing.T) {
 	ctx := context.Background()
 
 	env := makeEnvelope(event.AIResponseReceived, "wf-1", 1,
-		event.AIResponsePayload{Phase: "research", Backend: "claude", TokensUsed: 0, DurationMS: 100})
+		event.AIResponsePayload{Persona: "researcher", Backend: "claude", TokensUsed: 0, DurationMS: 100})
 	if err := proj.Handle(ctx, env); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
@@ -218,16 +218,16 @@ func TestTokenUsageProjection_GetReturnsCopy(t *testing.T) {
 	ctx := context.Background()
 
 	env := makeEnvelope(event.AIResponseReceived, "wf-1", 1,
-		event.AIResponsePayload{Phase: "research", Backend: "claude", TokensUsed: 100, DurationMS: 50})
+		event.AIResponsePayload{Persona: "researcher", Backend: "claude", TokensUsed: 100, DurationMS: 50})
 	if err := proj.Handle(ctx, env); err != nil {
 		t.Fatalf("handle: %v", err)
 	}
 
 	tu, _ := proj.Get("wf-1")
-	tu.ByPhase["research"] = 999 // mutate the copy
+	tu.ByPersona["researcher"] = 999 // mutate the copy
 
 	tu2, _ := proj.Get("wf-1")
-	if tu2.ByPhase["research"] != 100 {
+	if tu2.ByPersona["researcher"] != 100 {
 		t.Error("Get should return a copy, not a reference")
 	}
 }
@@ -378,7 +378,7 @@ func TestPhaseTimelineProjection_AIRequestSentSetsRunning(t *testing.T) {
 
 	// Emit AIRequestSent — should set status to "running" with StartedAt.
 	reqEnv := makeEnvelope(event.AIRequestSent, "wf-1:persona:developer", 1,
-		event.AIRequestPayload{Phase: "develop", Backend: "claude", Persona: "developer"})
+		event.AIRequestPayload{Persona: "developer", Backend: "claude"})
 	reqEnv.CorrelationID = "wf-1"
 	if err := proj.Handle(ctx, reqEnv); err != nil {
 		t.Fatalf("handle AIRequestSent: %v", err)
@@ -421,7 +421,7 @@ func TestPhaseTimelineProjection_AIRequestSentNoOverwriteRunning(t *testing.T) {
 
 	// First request
 	reqEnv := makeEnvelope(event.AIRequestSent, "wf-1:persona:developer", 1,
-		event.AIRequestPayload{Phase: "develop", Backend: "claude", Persona: "developer"})
+		event.AIRequestPayload{Persona: "developer", Backend: "claude"})
 	reqEnv.CorrelationID = "wf-1"
 	_ = proj.Handle(ctx, reqEnv)
 
@@ -435,7 +435,7 @@ func TestPhaseTimelineProjection_AIRequestSentNoOverwriteRunning(t *testing.T) {
 
 	// Second request — should NOT overwrite StartedAt (status is "done" now, not "")
 	reqEnv2 := makeEnvelope(event.AIRequestSent, "wf-1:persona:developer", 3,
-		event.AIRequestPayload{Phase: "develop", Backend: "claude", Persona: "developer"})
+		event.AIRequestPayload{Persona: "developer", Backend: "claude"})
 	reqEnv2.CorrelationID = "wf-1"
 	_ = proj.Handle(ctx, reqEnv2)
 
@@ -540,8 +540,8 @@ func TestVerdictProjection_AccumulatesVerdicts(t *testing.T) {
 	events := []event.Envelope{
 		makeEnvelope(event.VerdictRendered, "wf-1:persona:reviewer", 1,
 			event.VerdictPayload{
-				Phase:       "develop",
-				SourcePhase: "reviewer",
+				Persona:     "developer",
+				SourcePersona: "reviewer",
 				Outcome:     event.VerdictFail,
 				Summary:     "Missing error handling",
 				Issues: []event.Issue{
@@ -550,8 +550,8 @@ func TestVerdictProjection_AccumulatesVerdicts(t *testing.T) {
 			}),
 		makeEnvelope(event.VerdictRendered, "wf-1:persona:qa", 2,
 			event.VerdictPayload{
-				Phase:       "develop",
-				SourcePhase: "qa",
+				Persona:     "developer",
+				SourcePersona: "qa",
 				Outcome:     event.VerdictPass,
 				Summary:     "All tests pass",
 			}),
@@ -569,8 +569,8 @@ func TestVerdictProjection_AccumulatesVerdicts(t *testing.T) {
 	}
 
 	// First verdict: reviewer fail.
-	if records[0].SourcePhase != "reviewer" {
-		t.Errorf("expected source_phase reviewer, got %s", records[0].SourcePhase)
+	if records[0].SourcePersona != "reviewer" {
+		t.Errorf("expected source_phase reviewer, got %s", records[0].SourcePersona)
 	}
 	if records[0].Outcome != "fail" {
 		t.Errorf("expected outcome fail, got %s", records[0].Outcome)
@@ -586,8 +586,8 @@ func TestVerdictProjection_AccumulatesVerdicts(t *testing.T) {
 	}
 
 	// Second verdict: qa pass.
-	if records[1].SourcePhase != "qa" {
-		t.Errorf("expected source_phase qa, got %s", records[1].SourcePhase)
+	if records[1].SourcePersona != "qa" {
+		t.Errorf("expected source_phase qa, got %s", records[1].SourcePersona)
 	}
 	if records[1].Outcome != "pass" {
 		t.Errorf("expected outcome pass, got %s", records[1].Outcome)
@@ -616,8 +616,8 @@ func TestVerdictProjection_ForWorkflowReturnsCopy(t *testing.T) {
 
 	env := makeEnvelope(event.VerdictRendered, "wf-1:persona:reviewer", 1,
 		event.VerdictPayload{
-			Phase:       "develop",
-			SourcePhase: "reviewer",
+			Persona:     "developer",
+			SourcePersona: "reviewer",
 			Outcome:     event.VerdictPass,
 			Summary:     "looks good",
 			Issues: []event.Issue{
@@ -655,11 +655,11 @@ func TestVerdictProjection_MultipleCorrelations(t *testing.T) {
 	ctx := context.Background()
 
 	env1 := makeEnvelope(event.VerdictRendered, "wf-a:persona:reviewer", 1,
-		event.VerdictPayload{Phase: "develop", SourcePhase: "reviewer", Outcome: event.VerdictPass, Summary: "ok"})
+		event.VerdictPayload{Persona: "developer", SourcePersona: "reviewer", Outcome: event.VerdictPass, Summary: "ok"})
 	env1.CorrelationID = "wf-a"
 
 	env2 := makeEnvelope(event.VerdictRendered, "wf-b:persona:qa", 1,
-		event.VerdictPayload{Phase: "develop", SourcePhase: "qa", Outcome: event.VerdictFail, Summary: "bad"})
+		event.VerdictPayload{Persona: "developer", SourcePersona: "qa", Outcome: event.VerdictFail, Summary: "bad"})
 	env2.CorrelationID = "wf-b"
 
 	for _, env := range []event.Envelope{env1, env2} {
@@ -686,7 +686,7 @@ func TestVerdictProjection_AccumulatesRetries(t *testing.T) {
 	// Simulate a retry loop: reviewer fails twice then passes.
 	for i, outcome := range []event.VerdictOutcome{event.VerdictFail, event.VerdictFail, event.VerdictPass} {
 		env := makeEnvelope(event.VerdictRendered, "wf-1:persona:reviewer", i+1,
-			event.VerdictPayload{Phase: "develop", SourcePhase: "reviewer", Outcome: outcome, Summary: "iter"})
+			event.VerdictPayload{Persona: "developer", SourcePersona: "reviewer", Outcome: outcome, Summary: "iter"})
 		if err := proj.Handle(ctx, env); err != nil {
 			t.Fatalf("handle: %v", err)
 		}
@@ -782,13 +782,13 @@ func TestTokenUsageProjection_ForWorkflow_AggregatesPersonaScopes(t *testing.T) 
 
 	// Three different persona-scoped aggregates for the same correlation.
 	personaEvents := []struct {
-		aggID  string
-		phase  string
-		tokens int
+		aggID   string
+		persona string
+		tokens  int
 	}{
-		{"corr1:persona:researcher", "research", 1000},
-		{"corr1:persona:developer", "develop", 2000},
-		{"corr1:persona:reviewer", "review", 500},
+		{"corr1:persona:researcher", "researcher", 1000},
+		{"corr1:persona:developer", "developer", 2000},
+		{"corr1:persona:reviewer", "reviewer", 500},
 	}
 
 	for i, pe := range personaEvents {
@@ -803,7 +803,7 @@ func TestTokenUsageProjection_ForWorkflow_AggregatesPersonaScopes(t *testing.T) 
 			Source:        "test",
 		}
 		data, _ := json.Marshal(event.AIResponsePayload{
-			Phase:      pe.phase,
+			Persona:    pe.persona,
 			Backend:    "claude",
 			TokensUsed: pe.tokens,
 			DurationMS: 100,
@@ -822,14 +822,14 @@ func TestTokenUsageProjection_ForWorkflow_AggregatesPersonaScopes(t *testing.T) 
 	if tu.Total != 3500 {
 		t.Errorf("expected total 3500 across all personas, got %d", tu.Total)
 	}
-	if tu.ByPhase["research"] != 1000 {
-		t.Errorf("expected research=1000, got %d", tu.ByPhase["research"])
+	if tu.ByPersona["researcher"] != 1000 {
+		t.Errorf("expected research=1000, got %d", tu.ByPersona["researcher"])
 	}
-	if tu.ByPhase["develop"] != 2000 {
-		t.Errorf("expected develop=2000, got %d", tu.ByPhase["develop"])
+	if tu.ByPersona["developer"] != 2000 {
+		t.Errorf("expected develop=2000, got %d", tu.ByPersona["developer"])
 	}
-	if tu.ByPhase["review"] != 500 {
-		t.Errorf("expected review=500, got %d", tu.ByPhase["review"])
+	if tu.ByPersona["reviewer"] != 500 {
+		t.Errorf("expected review=500, got %d", tu.ByPersona["reviewer"])
 	}
 	if tu.ByBackend["claude"] != 3500 {
 		t.Errorf("expected claude=3500, got %d", tu.ByBackend["claude"])
@@ -869,7 +869,7 @@ func TestTokenUsageProjection_ForWorkflow_MultipleCorrelations(t *testing.T) {
 			Source:        "test",
 		}
 		data, _ := json.Marshal(event.AIResponsePayload{
-			Phase:      "develop",
+			Persona:    "developer",
 			Backend:    "claude",
 			TokensUsed: 100,
 			DurationMS: 50,

@@ -815,8 +815,8 @@ func TestToolRetryWorkflow_FromPhase_EmitsRetryEvent(t *testing.T) {
 		WithCorrelation(corrID).
 		WithSource("test")
 	failEvt := event.New(event.WorkflowFailed, 1, event.MustMarshal(event.WorkflowFailedPayload{
-		Reason: "simulated failure",
-		Phase:  "developer",
+		Reason:  "simulated failure",
+		Persona: "developer",
 	})).
 		WithAggregate(corrID, 2).
 		WithCorrelation(corrID).
