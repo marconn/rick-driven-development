@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -22,24 +23,36 @@ const (
 	runtimeHost  runtimeKind = "host"
 )
 
-// quality.yaml lives under .rick/ at the workspace root. The path is fixed,
-// not configurable — repo teams own a single canonical contract.
-const qualityManifestRelPath = ".rick/quality.yaml"
+// Manifests live in an operator-local config directory, NOT in the consumer
+// repo. Rationale: the consumer repos (huli-api, ehr, practice-api, huli) are
+// owned by other teams and shouldn't carry rick-specific config; rick owns
+// the contract for how it drives them. Lookup precedence:
+//
+//  1. $RICK_QUALITY_MANIFESTS_DIR (operator override)
+//  2. $XDG_CONFIG_HOME/rick/quality-manifests
+//  3. $HOME/.config/rick/quality-manifests
+//
+// Within that directory, file lookup tries owner/name first, then bare name:
+//
+//  1. <dir>/<owner>/<name>.yaml — when git origin gives us both
+//  2. <dir>/<name>.yaml         — fallback when only the workspace basename
+//                                 is derivable, or as a cross-org alias
+const (
+	qualityManifestsEnv = "RICK_QUALITY_MANIFESTS_DIR"
+	qualityManifestsRel = "rick/quality-manifests"
+)
 
-// QualityManifest is the on-disk schema for `.rick/quality.yaml`. The repo
-// declares which runtime to use and the exact commands to drive lint/test;
-// rick does not infer them. Fields use snake_case to match standard yaml/CI
-// idioms.
+// QualityManifest is the on-disk schema for a per-repo manifest. The file
+// declares which runtime to use and the exact commands rick will run; rick
+// does not infer them.
 type QualityManifest struct {
 	// Runtime selects "stack" (default) or "host". A host-runtime manifest
-	// is rejected at load time when RICK_ALLOW_HOST_RUNTIME=1 is not set —
-	// see validateManifest.
+	// is gated at execution time on RICK_ALLOW_HOST_RUNTIME=1 — see
+	// hostRuntimeAllowed.
 	Runtime runtimeKind `yaml:"runtime"`
 
-	// Checks lists the commands rick will invoke, in order. Each check's
-	// failure stops further checks for that runtime invocation only when
-	// the runtime is set up that way; today we run them sequentially and
-	// collect all failures before emitting the verdict.
+	// Checks lists the commands rick will invoke, in order. They run
+	// sequentially; failures collect and feed a single verdict.
 	Checks []ManifestCheck `yaml:"checks"`
 }
 
@@ -53,7 +66,7 @@ type ManifestCheck struct {
 	Name string `yaml:"name"`
 
 	// Label is the human-readable command form shown in operator-facing
-	// failure descriptions. When omitted, falls back to strings.Join(Command, " ").
+	// failure descriptions. When omitted, falls back to a space-joined Command.
 	Label string `yaml:"label,omitempty"`
 
 	// Command is the argv passed to the runtime. First element is the
@@ -61,32 +74,190 @@ type ManifestCheck struct {
 	Command []string `yaml:"command"`
 }
 
-// loadQualityManifest reads .rick/quality.yaml from the workspace root.
+// repoIdentity is the (owner, name) pair extracted from a workspace's git
+// origin URL, with a workspace-basename fallback for the no-remote case.
+// owner can be empty when only the basename is derivable.
+type repoIdentity struct {
+	owner string
+	name  string
+}
+
+// resolveQualityManifestsDir returns the local config directory rick reads
+// quality manifests from. Empty string means rick can't locate a config dir
+// (HOME and XDG_CONFIG_HOME both unset, override unset) — caller treats that
+// the same as "no manifest", falling through to legacy probing.
+func resolveQualityManifestsDir() string {
+	if d := os.Getenv(qualityManifestsEnv); d != "" {
+		return d
+	}
+	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
+		return filepath.Join(x, qualityManifestsRel)
+	}
+	if h := os.Getenv("HOME"); h != "" {
+		return filepath.Join(h, ".config", qualityManifestsRel)
+	}
+	return ""
+}
+
+// detectRepoIdentity resolves (owner, name) for the workspace. Strategy:
 //
-// Three return shapes:
+//  1. Read the workspace's git origin URL — works for any rick-cloned
+//     workspace because internal/workspace always sets up origin. Yields
+//     both owner and name.
+//  2. Fall back to the workspace directory's basename, stripped of the
+//     `-rick-ws-<corrid>` suffix that internal/workspace appends in
+//     isolated mode. Yields name only.
+//
+// Returns the zero repoIdentity when neither path produces a name. Callers
+// treat that as "no manifest possible", same as a missing-file lookup.
+func detectRepoIdentity(wsPath string) repoIdentity {
+	if id, ok := repoFromGitOrigin(wsPath); ok {
+		return id
+	}
+	if name := nameFromWorkspaceBasename(wsPath); name != "" {
+		return repoIdentity{name: name}
+	}
+	return repoIdentity{}
+}
+
+// repoFromGitOrigin shells out to `git -C <wsPath> config --local
+// remote.origin.url` and parses the result. Returns ok=false when git is
+// missing, the workspace has no origin, or the URL has no parseable owner/name
+// — every failure mode falls through to nameFromWorkspaceBasename.
+//
+// Why shell out instead of reading .git/config directly? git's URL handling
+// (insteadOf rewrites, includeIf, worktrees) is more nuanced than a flat
+// regex over the file; reusing the binary keeps us aligned with the same
+// resolution any operator would see from their shell.
+func repoFromGitOrigin(wsPath string) (repoIdentity, bool) {
+	cmd := exec.Command("git", "-C", wsPath, "config", "--local", "remote.origin.url")
+	out, err := cmd.Output()
+	if err != nil {
+		return repoIdentity{}, false
+	}
+	owner, name, ok := parseGitOriginURL(strings.TrimSpace(string(out)))
+	if !ok {
+		return repoIdentity{}, false
+	}
+	return repoIdentity{owner: owner, name: name}, true
+}
+
+// parseGitOriginURL extracts (owner, name) from a git remote URL. Handles
+// the common forms:
+//
+//	git@github.com:owner/name.git
+//	https://github.com/owner/name.git
+//	ssh://git@github.com/owner/name.git
+//	ssh://git@github.com:22/owner/name.git
+//
+// Strategy: strip a trailing .git, normalize ":" to "/" (handles SSH form
+// and port-bearing ssh:// URLs uniformly), split on "/", take the last two
+// non-empty segments. Returns ok=false when fewer than two segments survive.
+func parseGitOriginURL(url string) (owner, name string, ok bool) {
+	url = strings.TrimSpace(url)
+	url = strings.TrimSuffix(url, ".git")
+	if url == "" {
+		return "", "", false
+	}
+	url = strings.ReplaceAll(url, ":", "/")
+	var parts []string
+	for _, p := range strings.Split(url, "/") {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	owner = parts[len(parts)-2]
+	name = parts[len(parts)-1]
+	if owner == "" || name == "" {
+		return "", "", false
+	}
+	return owner, name, true
+}
+
+// workspaceSuffix marks the boundary between the repo name and the
+// correlation-derived suffix that internal/workspace appends in isolated
+// mode (e.g. "huli-api-rick-ws-8ec9b848"). Stripping at this token recovers
+// the repo name when no git remote is available.
+const workspaceSuffix = "-rick-ws-"
+
+// nameFromWorkspaceBasename returns the workspace basename with a trailing
+// `-rick-ws-<corrid>` chunk removed. For non-isolated workspaces (no suffix),
+// returns the basename unchanged. Empty input → empty output.
+func nameFromWorkspaceBasename(wsPath string) string {
+	base := filepath.Base(strings.TrimRight(wsPath, "/"))
+	if base == "" || base == "." || base == "/" {
+		return ""
+	}
+	if i := strings.Index(base, workspaceSuffix); i > 0 {
+		return base[:i]
+	}
+	return base
+}
+
+// loadLocalQualityManifest looks up the manifest for the workspace's repo in
+// the operator's local config dir. Lookup precedence:
+//
+//  1. <dir>/<owner>/<name>.yaml  (when owner is known via git origin)
+//  2. <dir>/<name>.yaml          (always tried as a fallback / cross-org alias)
+//
+// First file that exists wins; later candidates are not consulted. Empty
+// manifestsDir or undetectable repo identity → (nil, nil), letting the caller
+// fall through to legacy probing. A file that exists but fails to parse or
+// validate returns (nil, err) so detectQualityPlan can escalate as advisory
+// rather than silently picking the next candidate.
+func loadLocalQualityManifest(wsPath, manifestsDir string) (*QualityManifest, error) {
+	if manifestsDir == "" {
+		return nil, nil
+	}
+	id := detectRepoIdentity(wsPath)
+	if id.name == "" {
+		return nil, nil
+	}
+
+	var candidates []string
+	if id.owner != "" {
+		candidates = append(candidates, filepath.Join(manifestsDir, id.owner, id.name+".yaml"))
+	}
+	candidates = append(candidates, filepath.Join(manifestsDir, id.name+".yaml"))
+
+	for _, p := range candidates {
+		mf, err := loadManifestFile(p)
+		if err != nil {
+			return nil, err
+		}
+		if mf != nil {
+			return mf, nil
+		}
+	}
+	return nil, nil
+}
+
+// loadManifestFile reads, parses, and validates a manifest at the given
+// absolute path. Three return shapes:
+//
 //   - (manifest, nil) — file exists, parses cleanly, validates.
-//   - (nil, nil) — file does not exist; caller falls back to legacy probing
-//     (run.sh, Makefile). Backward-compatible default.
-//   - (nil, err) — file exists but is malformed or fails validation. The
-//     caller MUST surface this loudly (advisory verdict) rather than silently
-//     fall back to probing — a broken manifest in a repo that has one is a
-//     misconfiguration the operator must fix, not a missing-file scenario.
-func loadQualityManifest(wsPath string) (*QualityManifest, error) {
-	path := filepath.Join(wsPath, qualityManifestRelPath)
+//   - (nil, nil) — file does not exist (ENOENT). Not an error.
+//   - (nil, err) — file exists but malformed/invalid; caller MUST surface
+//     loudly rather than fall back, since a broken manifest is a
+//     misconfiguration the operator must fix.
+func loadManifestFile(path string) (*QualityManifest, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", qualityManifestRelPath, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
 	var mf QualityManifest
 	if err := yaml.Unmarshal(data, &mf); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", qualityManifestRelPath, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if err := validateManifest(&mf); err != nil {
-		return nil, fmt.Errorf("validate %s: %w", qualityManifestRelPath, err)
+		return nil, fmt.Errorf("validate %s: %w", path, err)
 	}
 	return &mf, nil
 }

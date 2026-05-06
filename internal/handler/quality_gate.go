@@ -109,18 +109,23 @@ func makefileHasCheckTarget(wsPath string) bool {
 // detectQualityPlan resolves the workspace's quality-check contract. Probe
 // order is manifest-first, legacy-fallback:
 //
-//  1. .rick/quality.yaml present → use it (declarative, repo-owned).
+//  1. operator-local manifest at <manifestsDir>/<owner>/<name>.yaml (or
+//     <manifestsDir>/<name>.yaml fallback) → use it. The manifest is the
+//     source of truth; it is NOT committed to the consumer repo.
 //  2. else run.sh present → legacy heuristic (./run.sh lint + ./run.sh test
 //     wrapped in `bash -c "./run.sh up && ./run.sh test"`), runtime=stack.
 //  3. else Makefile with `check:` target → `make check`, runtime=stack.
 //  4. else → no plan; caller emits advisory.
 //
 // Returns the plan plus a load error. The error is non-nil only when a
-// manifest was present but failed to parse/validate — that case must NOT
-// silently fall back to probing because a misconfigured manifest is a
-// repo-team bug, not a missing-file scenario.
-func detectQualityPlan(wsPath string) (qualityPlan, error) {
-	mf, err := loadQualityManifest(wsPath)
+// manifest file was found but failed to parse/validate — that case must
+// NOT silently fall back to probing because a misconfigured manifest is a
+// rick-operator bug, not a missing-file scenario.
+//
+// manifestsDir empty disables manifest lookup entirely (effectively reverts
+// to legacy probing). Tests use this to isolate the legacy-fallback path.
+func detectQualityPlan(wsPath, manifestsDir string) (qualityPlan, error) {
+	mf, err := loadLocalQualityManifest(wsPath, manifestsDir)
 	if err != nil {
 		return qualityPlan{}, err
 	}
@@ -137,7 +142,7 @@ func detectQualityPlan(wsPath string) (qualityPlan, error) {
 	}
 	// Legacy probing has always implied stack runtime — Multipass + docker-compose
 	// is the assumption baked into ./run.sh up && ./run.sh test and into make check.
-	// Repos that need host runtime must opt in via manifest.
+	// Repos that need host runtime must use a manifest to opt in.
 	return qualityPlan{runner: runner, runtime: runtimeStack, checks: checks}, nil
 }
 
@@ -147,13 +152,14 @@ func detectQualityPlan(wsPath string) (qualityPlan, error) {
 // then tears down the VM. Fires after developer, emits VerdictRendered so the
 // engine can feed failures back to the developer via the feedback loop.
 type QualityGateHandler struct {
-	store    eventstore.Store
-	name     string
-	stackBin string         // path to stack binary, defaults to "stack"
-	timeout  int            // stack run --timeout in seconds, defaults to 300
-	debugDir string         // directory for full debug output; resolved by resolveQualityGateDebugDir
-	gh       *github.Client // optional — used to cross-check local fails against GitHub CI
-	logger   *slog.Logger
+	store        eventstore.Store
+	name         string
+	stackBin     string         // path to stack binary, defaults to "stack"
+	timeout      int            // stack run --timeout in seconds, defaults to 300
+	debugDir     string         // directory for full debug output; resolved by resolveQualityGateDebugDir
+	manifestsDir string         // operator-local config dir for per-repo manifests; resolved by resolveQualityManifestsDir
+	gh           *github.Client // optional — used to cross-check local fails against GitHub CI
+	logger       *slog.Logger
 }
 
 // docsOnlyExts lists file suffixes that are purely documentation and carry
@@ -183,13 +189,14 @@ var docsOnlyFilenames = map[string]bool{
 // collapses to an empty string.
 func NewQualityGate(d Deps) *QualityGateHandler {
 	h := &QualityGateHandler{
-		store:    d.Store,
-		name:     "quality-gate",
-		stackBin: "stack",
-		timeout:  300,
-		debugDir: resolveQualityGateDebugDir(),
-		gh:       d.GitHub,
-		logger:   slog.Default(),
+		store:        d.Store,
+		name:         "quality-gate",
+		stackBin:     "stack",
+		timeout:      300,
+		debugDir:     resolveQualityGateDebugDir(),
+		manifestsDir: resolveQualityManifestsDir(),
+		gh:           d.GitHub,
+		logger:       slog.Default(),
 	}
 	return h
 }
@@ -242,14 +249,14 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 		return nil, fmt.Errorf("quality-gate: no workspace found in correlation chain — workflow requires a provisioned workspace")
 	}
 
-	plan, err := detectQualityPlan(wsPath)
+	plan, err := detectQualityPlan(wsPath, h.manifestsDir)
 	if err != nil {
-		// Manifest is present but malformed/invalid. Loud failure — do NOT
-		// fall back to legacy probing. A broken manifest is a repo-team bug
-		// the operator must fix; silently probing would mask the typo and run
+		// A manifest file was found but malformed/invalid. Loud failure — do
+		// NOT fall back to legacy probing. A broken manifest is a rick-operator
+		// bug they must fix; silently probing would mask the typo and run
 		// whatever heuristic happens to match, which is almost never what the
-		// repo team intended.
-		return h.unverifiableVerdict(env.CorrelationID, wsPath, "manifest_invalid", "Rick's quality manifest at .rick/quality.yaml could not be loaded: "+err.Error()), nil
+		// operator intended.
+		return h.unverifiableVerdict(env.CorrelationID, wsPath, "manifest_invalid", "Rick's quality manifest could not be loaded: "+err.Error()), nil
 	}
 	if plan.runner == runnerNone {
 		// We cannot drive this repo's build system. Escalate as advisory
