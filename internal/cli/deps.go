@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/marconn/rick-event-driven-development/internal/backend"
+	"github.com/marconn/rick-event-driven-development/internal/engine"
 	"github.com/marconn/rick-event-driven-development/internal/estimation"
 	"github.com/marconn/rick-event-driven-development/internal/eventbus"
 	gh "github.com/marconn/rick-event-driven-development/internal/github"
@@ -202,7 +203,7 @@ func openPluginStore(logger *slog.Logger) *pluginstore.Store {
 // startOptionalServices starts background services if their env vars are configured.
 // ghClient is accepted for API compatibility with the serve wiring; it is
 // currently unused here because no GitHub-driven background service is wired.
-func startOptionalServices(ctx context.Context, bus eventbus.Bus, jiraClient *jira.Client, _ *gh.Client, pstore *pluginstore.Store, logger *slog.Logger) {
+func startOptionalServices(ctx context.Context, bus eventbus.Bus, eng *engine.Engine, jiraClient *jira.Client, _ *gh.Client, pstore *pluginstore.Store, logger *slog.Logger) {
 	// Jira poller: polls Jira for new tickets and injects workflows.
 	if jql := os.Getenv("JIRA_JQL"); jql != "" && jiraClient != nil && pstore != nil {
 		interval := 60 * time.Second
@@ -215,7 +216,7 @@ func startOptionalServices(ctx context.Context, bus eventbus.Bus, jiraClient *ji
 		if workflowID == "" {
 			workflowID = "jira-dev"
 		}
-		poller := jirapoller.NewPoller(jiraClient, pstore, bus, jirapoller.Config{
+		poller := jirapoller.NewPoller(jiraClient, pstore, bus, eng, jirapoller.Config{
 			JQL:          jql,
 			PollInterval: interval,
 			WorkflowID:   workflowID,

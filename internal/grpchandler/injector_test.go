@@ -9,10 +9,31 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marconn/rick-event-driven-development/internal/engine"
 	"github.com/marconn/rick-event-driven-development/internal/event"
 	"github.com/marconn/rick-event-driven-development/internal/eventbus"
 	"github.com/marconn/rick-event-driven-development/internal/eventstore"
 )
+
+// stubRegistry implements grpchandler.WorkflowRegistry for tests. It accepts
+// a list of known workflow IDs at construction; any other id triggers the
+// injector's "not registered" rejection.
+type stubRegistry struct {
+	known map[string]engine.WorkflowDef
+}
+
+func newStubRegistry(ids ...string) *stubRegistry {
+	known := make(map[string]engine.WorkflowDef, len(ids))
+	for _, id := range ids {
+		known[id] = engine.WorkflowDef{ID: id, Required: []string{"developer"}, MaxIterations: 1}
+	}
+	return &stubRegistry{known: known}
+}
+
+func (s *stubRegistry) GetWorkflowDef(id string) (engine.WorkflowDef, bool) {
+	def, ok := s.known[id]
+	return def, ok
+}
 
 func newInjectorTestEnv(t *testing.T) (*EventInjector, eventstore.Store, *eventbus.ChannelBus) {
 	t.Helper()
@@ -22,7 +43,9 @@ func newInjectorTestEnv(t *testing.T) (*EventInjector, eventstore.Store, *eventb
 	}
 	bus := eventbus.NewChannelBus()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	inj := NewEventInjector(store, bus, logger)
+	// Default registry knows the seed-workflow IDs used across the file
+	// ("workspace-dev" via seedWorkflow, "new-wf" via TestInjector_NewWorkflow_WorkflowRequested).
+	inj := NewEventInjector(store, bus, newStubRegistry("workspace-dev", "new-wf"), logger)
 	t.Cleanup(func() {
 		_ = bus.Close()
 		_ = store.Close()
@@ -191,6 +214,69 @@ func TestInjector_NewWorkflow_WorkflowRequested(t *testing.T) {
 	}
 	if events[0].Version != 1 {
 		t.Errorf("expected version 1, got %d", events[0].Version)
+	}
+}
+
+// TestInjector_WorkflowRequested_UnknownDAG_Rejected verifies that the
+// injector refuses to persist a WorkflowRequested whose WorkflowID is not
+// in the registry. Without this guard, gRPC clients (CI bots, plugins)
+// could publish workflows the engine can't act on; the engine fail-fast
+// turns those into WorkflowFailed but the right place to catch
+// configuration drift is at the publisher boundary, where the caller
+// gets a synchronous error.
+// docs/bugs/jira-dev-stuck-in-requested.md.
+func TestInjector_WorkflowRequested_UnknownDAG_Rejected(t *testing.T) {
+	inj, store, _ := newInjectorTestEnv(t)
+	ctx := context.Background()
+
+	_, err := inj.Inject(ctx, InjectRequest{
+		CorrelationID: "wf-unknown",
+		EventType:     event.WorkflowRequested,
+		Payload: event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt:     "build something",
+			WorkflowID: "totally-not-a-real-dag",
+		}),
+		Source: "grpc:ci-system",
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown WorkflowID")
+	}
+	if !containsSubstring(err.Error(), "totally-not-a-real-dag") {
+		t.Errorf("error %q must mention the unknown WorkflowID for operator triage", err.Error())
+	}
+	if !containsSubstring(err.Error(), "not a registered DAG") {
+		t.Errorf("error %q must distinguish registry-miss from a real failure", err.Error())
+	}
+
+	// Critical: nothing must have been persisted. Stranded events in the
+	// store would leave forensic noise the engine would later have to
+	// fail-fast against on first poll. The publisher rejection means
+	// store stays clean.
+	events, _ := store.Load(ctx, "wf-unknown")
+	if len(events) != 0 {
+		t.Errorf("rejected WorkflowRequested must not be persisted; got %d events", len(events))
+	}
+}
+
+// TestInjector_WorkflowRequested_MissingWorkflowID_Rejected verifies the
+// injector rejects a WorkflowRequested with an empty WorkflowID — same
+// rationale as the unknown-DAG case but for callers that forgot to set
+// the field at all.
+func TestInjector_WorkflowRequested_MissingWorkflowID_Rejected(t *testing.T) {
+	inj, _, _ := newInjectorTestEnv(t)
+	ctx := context.Background()
+
+	_, err := inj.Inject(ctx, InjectRequest{
+		CorrelationID: "wf-blank",
+		EventType:     event.WorkflowRequested,
+		Payload:       event.MustMarshal(event.WorkflowRequestedPayload{Prompt: "..."}),
+		Source:        "grpc:ci-system",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing workflow_id")
+	}
+	if !containsSubstring(err.Error(), "missing workflow_id") {
+		t.Errorf("error %q must call out the missing field by name", err.Error())
 	}
 }
 

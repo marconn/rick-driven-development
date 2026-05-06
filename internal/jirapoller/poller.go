@@ -10,11 +10,23 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/marconn/rick-event-driven-development/internal/engine"
 	"github.com/marconn/rick-event-driven-development/internal/event"
 	"github.com/marconn/rick-event-driven-development/internal/eventbus"
 	"github.com/marconn/rick-event-driven-development/internal/jira"
 	"github.com/marconn/rick-event-driven-development/internal/pluginstore"
 )
+
+// WorkflowRegistry is the narrow dependency the poller needs to validate
+// that its configured WorkflowID points at a registered DAG before
+// publishing a WorkflowRequested. *engine.Engine implements this.
+//
+// May be nil; when nil, validation is skipped. Production wiring must pass
+// a real registry — passing nil only exists for tests that focus on
+// unrelated paths.
+type WorkflowRegistry interface {
+	GetWorkflowDef(id string) (engine.WorkflowDef, bool)
+}
 
 // Config holds configuration for the Jira polling loop.
 type Config struct {
@@ -56,22 +68,27 @@ func (c *Config) defaults() {
 
 // Poller polls Jira for new tickets and publishes Rick workflow events.
 type Poller struct {
-	cfg    Config
-	jira   *jira.Client
-	pstore *pluginstore.Store
-	bus    eventbus.Bus
-	logger *slog.Logger
+	cfg      Config
+	jira     *jira.Client
+	pstore   *pluginstore.Store
+	bus      eventbus.Bus
+	registry WorkflowRegistry
+	logger   *slog.Logger
 }
 
-// NewPoller creates a Jira poller. Call Run() to start.
-func NewPoller(jiraClient *jira.Client, pstore *pluginstore.Store, bus eventbus.Bus, cfg Config) *Poller {
+// NewPoller creates a Jira poller. registry may be nil in tests; production
+// callers must pass a real registry so a misconfigured WorkflowID surfaces
+// as a refusal-to-publish (with a loud Error log) rather than an unbounded
+// stream of fail-fast WorkflowRequested events. Call Run() to start.
+func NewPoller(jiraClient *jira.Client, pstore *pluginstore.Store, bus eventbus.Bus, registry WorkflowRegistry, cfg Config) *Poller {
 	cfg.defaults()
 	return &Poller{
-		cfg:    cfg,
-		jira:   jiraClient,
-		pstore: pstore,
-		bus:    bus,
-		logger: cfg.Logger,
+		cfg:      cfg,
+		jira:     jiraClient,
+		pstore:   pstore,
+		bus:      bus,
+		registry: registry,
+		logger:   cfg.Logger,
 	}
 }
 
@@ -99,6 +116,25 @@ func (p *Poller) Run(ctx context.Context) error {
 }
 
 func (p *Poller) poll(ctx context.Context) {
+	// Validate the configured WorkflowID points at a registered DAG BEFORE
+	// we hit the Jira API. Without this guard, a typo / env-var drift /
+	// plugin-not-loaded would publish a stream of WorkflowRequested events
+	// the engine can only fail-fast against — operators would see waves of
+	// WorkflowFailed in their tracker on every poll cycle until the config
+	// is fixed. Short-circuiting here keeps both the Jira tracker and Rick's
+	// store clean; recovery is automatic once the operator fixes the env
+	// var (next cycle picks up the accumulated tickets).
+	// docs/bugs/jira-dev-stuck-in-requested.md.
+	if p.registry != nil {
+		if _, ok := p.registry.GetWorkflowDef(p.cfg.WorkflowID); !ok {
+			p.logger.Error("jira poller: skipping cycle; configured workflow_id is not a registered DAG",
+				slog.String("workflow_id", p.cfg.WorkflowID),
+				slog.String("hint", "check JIRA_POLL_WORKFLOW env var; the DAG must be a built-in or registered by a connected plugin"),
+			)
+			return
+		}
+	}
+
 	result, err := p.jira.Search(ctx, p.cfg.JQL, p.cfg.MaxResults)
 	if err != nil {
 		p.logger.Error("jira poller: search failed", slog.Any("error", err))

@@ -87,7 +87,7 @@ func newTestEnv(t *testing.T, def engine.WorkflowDef) *testEnv {
 		t.Fatalf("listen: %v", err)
 	}
 
-	injector := NewEventInjector(store, bus, logger)
+	injector := NewEventInjector(store, bus, eng, logger)
 	srv := NewServer(streamD, runner, injector, broker, eng, reg, logger)
 	grpcSrv := grpc.NewServer(
 		grpc.KeepaliveParams(keepalive.ServerParameters{

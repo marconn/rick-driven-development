@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,6 +91,147 @@ func TestEngineProcessDecisionWorkflowRequested(t *testing.T) {
 		}
 	default:
 		t.Error("expected at least one published event")
+	}
+}
+
+// TestEngine_JiraDevWorkflowRequested_EmitsWorkflowStarted is a regression
+// test for docs/bugs/jira-dev-stuck-in-requested.md. It drives the real
+// JiraDevWorkflowDef() through the full bus → engine → aggregate path and
+// asserts workflow.started.jira-dev is published in response to a
+// WorkflowRequested. Locks in the contract for the built-in def end-to-end —
+// the existing TestEngineProcessDecisionWorkflowRequested only covers an
+// inline synthetic def via direct processDecision().
+func TestEngine_JiraDevWorkflowRequested_EmitsWorkflowStarted(t *testing.T) {
+	eng, store, bus := newTestEngine(t)
+	ctx := context.Background()
+	eng.RegisterWorkflow(JiraDevWorkflowDef())
+
+	started := make(chan event.Envelope, 1)
+	unsub := bus.Subscribe(event.WorkflowStartedFor("jira-dev"),
+		func(_ context.Context, env event.Envelope) error {
+			started <- env
+			return nil
+		}, eventbus.WithName("test:started"))
+	defer unsub()
+
+	eng.Start()
+
+	wfID := "wf-jira-dev"
+	reqEvt := event.New(event.WorkflowRequested, 1,
+		event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "fix HULI-33782", WorkflowID: "jira-dev", Ticket: "HULI-33782",
+		})).
+		WithAggregate(wfID, 1).WithCorrelation(wfID).WithSource("mcp:run_workflow")
+
+	if err := store.Append(ctx, wfID, 0, []event.Envelope{reqEvt}); err != nil {
+		t.Fatalf("store append: %v", err)
+	}
+	if err := bus.Publish(ctx, reqEvt); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case env := <-started:
+		if env.Type != event.WorkflowStartedFor("jira-dev") {
+			t.Errorf("expected workflow.started.jira-dev, got %s", env.Type)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("workflow.started.jira-dev never emitted within 2s — production bug reproduction")
+	}
+}
+
+// TestEngine_WorkflowRequested_UnregisteredDef_FailsFast is the regression
+// test for docs/bugs/jira-dev-stuck-in-requested.md. Before the fix, an
+// unknown WorkflowID caused decideWorkflowRequested to return a Go error
+// that the engine logged and dropped — the aggregate stayed at version=1,
+// status=requested forever, with no terminal event ever emitted.
+//
+// The fix emits WorkflowFailed{Reason: "engine: unknown workflow id %q
+// (not registered)"} so the workflow reaches a terminal state visible from
+// rick_workflow_status, projections update, NotificationBroker pushes a
+// terminal notification, and the throttle slot is released. This test
+// locks in that contract.
+func TestEngine_WorkflowRequested_UnregisteredDef_FailsFast(t *testing.T) {
+	eng, store, bus := newTestEngine(t)
+	ctx := context.Background()
+	// Deliberately do NOT register "jira-dev" — reproduces the production
+	// pathology where the engine's registry is missing the def at the
+	// moment WorkflowRequested arrives (e.g. unknown DAG injected via
+	// gRPC EventInjector or a misconfigured jirapoller).
+
+	failed := make(chan event.Envelope, 1)
+	unsubF := bus.Subscribe(event.WorkflowFailed, func(_ context.Context, env event.Envelope) error {
+		failed <- env
+		return nil
+	}, eventbus.WithName("test:failed"))
+	defer unsubF()
+
+	started := make(chan event.Envelope, 1)
+	unsubS := bus.Subscribe(event.WorkflowStartedFor("jira-dev"),
+		func(_ context.Context, env event.Envelope) error {
+			started <- env
+			return nil
+		}, eventbus.WithName("test:started"))
+	defer unsubS()
+
+	eng.Start()
+
+	wfID := "da992d9c-6009-4f46-bee5-d0d010d678c3" // matches reproduction artifact
+	reqEvt := event.New(event.WorkflowRequested, 1,
+		event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "fix HULI-33782", WorkflowID: "jira-dev", Ticket: "HULI-33782",
+		})).
+		WithAggregate(wfID, 1).WithCorrelation(wfID).WithSource("mcp:run_workflow")
+
+	if err := store.Append(ctx, wfID, 0, []event.Envelope{reqEvt}); err != nil {
+		t.Fatalf("store append: %v", err)
+	}
+	if err := bus.Publish(ctx, reqEvt); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case env := <-failed:
+		var p event.WorkflowFailedPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		if !strings.Contains(p.Reason, "jira-dev") {
+			t.Errorf("WorkflowFailed.Reason %q must include the unknown DAG name", p.Reason)
+		}
+		if !strings.Contains(p.Reason, "not registered") {
+			t.Errorf("WorkflowFailed.Reason %q must distinguish registry-miss from real failure", p.Reason)
+		}
+		// Causation must point at the WorkflowRequested so projections can
+		// reconstruct the chain.
+		if env.CausationID != reqEvt.ID {
+			t.Errorf("CausationID = %s, want %s", env.CausationID, reqEvt.ID)
+		}
+		// Correlation preserved so a watcher subscribed by correlation sees it.
+		if env.CorrelationID != wfID {
+			t.Errorf("CorrelationID = %s, want %s", env.CorrelationID, wfID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WorkflowFailed never emitted within 2s — silent-stall regression")
+	}
+
+	select {
+	case env := <-started:
+		t.Errorf("unexpected WorkflowStarted on unknown DAG: %s", env.Type)
+	default:
+	}
+
+	// Aggregate now reaches a terminal state: version=2 (Requested + Failed),
+	// status=failed. This is what rick_workflow_status will surface.
+	agg, err := eng.loadAggregate(ctx, wfID)
+	if err != nil {
+		t.Fatalf("loadAggregate: %v", err)
+	}
+	if agg.Status != StatusFailed {
+		t.Errorf("status = %s, want %s", agg.Status, StatusFailed)
+	}
+	if agg.Version != 2 {
+		t.Errorf("version = %d, want 2 (Requested + Failed)", agg.Version)
 	}
 }
 
@@ -220,14 +362,33 @@ func TestAggregateApplyUnknownEventsAreNoOps(t *testing.T) {
 
 // === Decide Tests ===
 
+// TestAggregateDecideWorkflowRequestedNoDef verifies that an unknown
+// WorkflowID (registry miss → WorkflowDef==nil at Decide time) produces a
+// terminal WorkflowFailed instead of stranding the workflow at
+// status=requested. Regression for docs/bugs/jira-dev-stuck-in-requested.md.
 func TestAggregateDecideWorkflowRequestedNoDef(t *testing.T) {
 	agg := NewWorkflowAggregate("wf-1")
-	_, err := agg.Decide(event.Envelope{
+	agg.WorkflowID = "jira-dev"
+	events, err := agg.Decide(event.Envelope{
 		Type:    event.WorkflowRequested,
-		Payload: event.MustMarshal(event.WorkflowRequestedPayload{Prompt: "test"}),
+		Payload: event.MustMarshal(event.WorkflowRequestedPayload{Prompt: "test", WorkflowID: "jira-dev"}),
 	})
-	if err == nil {
-		t.Error("expected error when WorkflowDef is nil")
+	if err != nil {
+		t.Fatalf("unknown DAG must not return Go error (would re-introduce silent-stall log path): %v", err)
+	}
+	if len(events) != 1 || events[0].Type != event.WorkflowFailed {
+		t.Fatalf("expected [WorkflowFailed], got %v", events)
+	}
+	var p event.WorkflowFailedPayload
+	if unmarshalErr := json.Unmarshal(events[0].Payload, &p); unmarshalErr != nil {
+		t.Fatalf("unmarshal payload: %v", unmarshalErr)
+	}
+	// Reason must include the unknown id so operators can grep deploy logs.
+	if !strings.Contains(p.Reason, "jira-dev") {
+		t.Errorf("reason %q must mention the unknown workflow id", p.Reason)
+	}
+	if !strings.Contains(p.Reason, "not registered") {
+		t.Errorf("reason %q must distinguish registry-miss from a real workflow failure", p.Reason)
 	}
 }
 

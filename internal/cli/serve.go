@@ -181,7 +181,7 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 	broker.Start()
 	defer broker.Stop()
 
-	injector := grpchandler.NewEventInjector(store, bus, logger)
+	injector := grpchandler.NewEventInjector(store, bus, eng, logger)
 	grpcSrv := grpc.NewServer(
 		grpc.KeepaliveParams(keepalive.ServerParameters{
 			Time:    30 * time.Second,
@@ -220,7 +220,7 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 	}
 
 	// Optional services — start if configured.
-	startOptionalServices(ctx, bus, deps.Jira, ghClient, pstore, logger)
+	startOptionalServices(ctx, bus, eng, deps.Jira, ghClient, pstore, logger)
 
 	mcpDeps := mcp.Deps{
 		Store:          store,

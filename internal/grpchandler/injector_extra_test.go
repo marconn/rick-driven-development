@@ -40,10 +40,13 @@ func (b *failingBus) Publish(_ context.Context, _ event.Envelope) error {
 }
 
 // newInjectorWithStore creates an EventInjector using a custom store and bus.
+// These tests target retry / publish-failure paths and don't exercise the
+// WorkflowID validation, so the registry is the same broad stub used by
+// newInjectorTestEnv to keep test setup uniform.
 func newInjectorWithStore(t *testing.T, store eventstore.Store, bus eventbus.Bus) *EventInjector {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	return NewEventInjector(store, bus, logger)
+	return NewEventInjector(store, bus, newStubRegistry("workspace-dev", "new-wf"), logger)
 }
 
 // TestInjector_RetryExhaustion verifies that when all 3 retries fail due to

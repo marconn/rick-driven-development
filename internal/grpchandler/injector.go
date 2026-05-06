@@ -21,23 +21,43 @@ type InjectRequest struct {
 	Source        string
 }
 
+// WorkflowRegistry is the narrow dependency EventInjector needs to validate
+// that a WorkflowRequested references a registered DAG before persisting it.
+// *engine.Engine implements this. Provided as an interface so callers (and
+// tests) can plug in their own registry without depending on the full
+// engine type.
+//
+// May be nil; when nil, WorkflowID validation is skipped. Production wiring
+// should always pass a real registry — passing nil only exists so legacy
+// tests that don't exercise the WorkflowRequested path don't have to
+// construct an engine.
+type WorkflowRegistry interface {
+	GetWorkflowDef(id string) (engine.WorkflowDef, bool)
+}
+
 // EventInjector persists and publishes externally-supplied events into the
 // event store. It validates the event type against the allowlist, checks
-// workflow status, and handles optimistic concurrency conflicts with retry.
+// workflow status, validates the WorkflowID for new workflows, and handles
+// optimistic concurrency conflicts with retry.
 //
 // Reusable by the gRPC stream handler, a future unary RPC, or HTTP endpoint.
 type EventInjector struct {
-	store  eventstore.Store
-	bus    eventbus.Bus
-	logger *slog.Logger
+	store    eventstore.Store
+	bus      eventbus.Bus
+	registry WorkflowRegistry
+	logger   *slog.Logger
 }
 
-// NewEventInjector creates an EventInjector.
-func NewEventInjector(store eventstore.Store, bus eventbus.Bus, logger *slog.Logger) *EventInjector {
+// NewEventInjector creates an EventInjector. registry may be nil in tests
+// that don't inject WorkflowRequested events; production callers must pass
+// a real registry so injected WorkflowRequested events are validated
+// against the engine's known DAGs.
+func NewEventInjector(store eventstore.Store, bus eventbus.Bus, registry WorkflowRegistry, logger *slog.Logger) *EventInjector {
 	return &EventInjector{
-		store:  store,
-		bus:    bus,
-		logger: logger,
+		store:    store,
+		bus:      bus,
+		registry: registry,
+		logger:   logger,
 	}
 }
 
@@ -84,6 +104,25 @@ func (inj *EventInjector) tryInject(ctx context.Context, req InjectRequest, isNe
 	if isNewWorkflow {
 		if currentVersion != 0 {
 			return "", fmt.Errorf("injector: workflow %q already exists", req.CorrelationID)
+		}
+		// Validate WorkflowID points at a registered DAG before we persist
+		// the event. Without this check, a typo or env-var drift produces
+		// a WorkflowRequested the engine can't act on; the engine's
+		// fail-fast guard will turn it into WorkflowFailed, but rejecting
+		// at the injector boundary gives the gRPC caller a synchronous
+		// error and avoids a polluting failed-workflow row in the store.
+		// docs/bugs/jira-dev-stuck-in-requested.md.
+		if inj.registry != nil {
+			var p event.WorkflowRequestedPayload
+			if err := json.Unmarshal(req.Payload, &p); err != nil {
+				return "", fmt.Errorf("injector: decode WorkflowRequestedPayload: %w", err)
+			}
+			if p.WorkflowID == "" {
+				return "", errors.New("injector: WorkflowRequested missing workflow_id")
+			}
+			if _, ok := inj.registry.GetWorkflowDef(p.WorkflowID); !ok {
+				return "", fmt.Errorf("injector: workflow_id %q is not a registered DAG (typo, plugin not loaded, or env-var drift)", p.WorkflowID)
+			}
 		}
 	} else {
 		if currentVersion == 0 {

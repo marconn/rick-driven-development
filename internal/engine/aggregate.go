@@ -311,7 +311,27 @@ func (w *WorkflowAggregate) Decide(env event.Envelope) ([]event.Envelope, error)
 
 func (w *WorkflowAggregate) decideWorkflowRequested(env event.Envelope) ([]event.Envelope, error) {
 	if w.WorkflowDef == nil {
-		return nil, fmt.Errorf("engine: workflow def not set on aggregate %s", w.ID)
+		// Unknown WorkflowID: the registry has no def matching the requested
+		// id. Returning a Go error here used to silently strand the workflow
+		// at status=requested forever — no terminal event, no projection
+		// update, no notification, no throttle-slot release. Emit
+		// WorkflowFailed instead so the workflow reaches a terminal state
+		// operators can see in rick_workflow_status and downstream
+		// consumers (NotificationBroker, projections, throttle) handle
+		// uniformly. The reason string is grep-friendly so a misconfigured
+		// deploy (plugin not loaded, env-var drift) is distinguishable from
+		// a real workflow-code failure.
+		// docs/bugs/jira-dev-stuck-in-requested.md.
+		payload := event.MustMarshal(event.WorkflowFailedPayload{
+			Reason: fmt.Sprintf("engine: unknown workflow id %q (not registered)", w.WorkflowID),
+		})
+		return []event.Envelope{
+			event.New(event.WorkflowFailed, 1, payload).
+				WithAggregate(w.ID, w.Version+1).
+				WithCausation(env.ID).
+				WithCorrelation(env.CorrelationID).
+				WithSource("engine:aggregate"),
+		}, nil
 	}
 	// Guard: if the workflow was cancelled before the Engine processed
 	// WorkflowRequested, don't emit WorkflowStarted.
