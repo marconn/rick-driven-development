@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -45,7 +46,18 @@ const (
 	runnerNone      runnerKind = ""
 	runnerRunSh     runnerKind = "run.sh"
 	runnerMakeCheck runnerKind = "make check"
+	runnerManifest  runnerKind = ".rick/quality.yaml"
 )
+
+// qualityPlan bundles the runner identity, execution runtime, and the ordered
+// list of checks. Produced by detectQualityPlan; consumed by Handle. Keeping
+// runner and runtime distinct lets us tell "what we found" (manifest vs run.sh
+// vs Makefile) apart from "how it executes" (stack VM vs host process tree).
+type qualityPlan struct {
+	runner  runnerKind
+	runtime runtimeKind
+	checks  []qualityCheck
+}
 
 // makefileCheckTargetRe matches a top-level `check:` rule in a Makefile.
 // Tolerates optional whitespace before the colon and prerequisites/recipe
@@ -92,6 +104,41 @@ func makefileHasCheckTarget(wsPath string) bool {
 		return false
 	}
 	return makefileCheckTargetRe.Match(data)
+}
+
+// detectQualityPlan resolves the workspace's quality-check contract. Probe
+// order is manifest-first, legacy-fallback:
+//
+//  1. .rick/quality.yaml present → use it (declarative, repo-owned).
+//  2. else run.sh present → legacy heuristic (./run.sh lint + ./run.sh test
+//     wrapped in `bash -c "./run.sh up && ./run.sh test"`), runtime=stack.
+//  3. else Makefile with `check:` target → `make check`, runtime=stack.
+//  4. else → no plan; caller emits advisory.
+//
+// Returns the plan plus a load error. The error is non-nil only when a
+// manifest was present but failed to parse/validate — that case must NOT
+// silently fall back to probing because a misconfigured manifest is a
+// repo-team bug, not a missing-file scenario.
+func detectQualityPlan(wsPath string) (qualityPlan, error) {
+	mf, err := loadQualityManifest(wsPath)
+	if err != nil {
+		return qualityPlan{}, err
+	}
+	if mf != nil {
+		return qualityPlan{
+			runner:  runnerManifest,
+			runtime: mf.Runtime,
+			checks:  checksFromManifest(mf),
+		}, nil
+	}
+	runner, checks := detectRunner(wsPath)
+	if runner == runnerNone {
+		return qualityPlan{}, nil
+	}
+	// Legacy probing has always implied stack runtime — Multipass + docker-compose
+	// is the assumption baked into ./run.sh up && ./run.sh test and into make check.
+	// Repos that need host runtime must opt in via manifest.
+	return qualityPlan{runner: runner, runtime: runtimeStack, checks: checks}, nil
 }
 
 // QualityGateHandler runs project-level quality checks (lint, test) inside an
@@ -195,8 +242,16 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 		return nil, fmt.Errorf("quality-gate: no workspace found in correlation chain — workflow requires a provisioned workspace")
 	}
 
-	runner, checks := detectRunner(wsPath)
-	if runner == runnerNone {
+	plan, err := detectQualityPlan(wsPath)
+	if err != nil {
+		// Manifest is present but malformed/invalid. Loud failure — do NOT
+		// fall back to legacy probing. A broken manifest is a repo-team bug
+		// the operator must fix; silently probing would mask the typo and run
+		// whatever heuristic happens to match, which is almost never what the
+		// repo team intended.
+		return h.unverifiableVerdict(env.CorrelationID, wsPath, "manifest_invalid", "Rick's quality manifest at .rick/quality.yaml could not be loaded: "+err.Error()), nil
+	}
+	if plan.runner == runnerNone {
 		// We cannot drive this repo's build system. Escalate as advisory
 		// rather than silently passing — the operator must verify the
 		// developer's diff manually before approving the commit. The reason
@@ -205,6 +260,16 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 		// is concrete, not a guess.
 		return h.unverifiableVerdict(env.CorrelationID, wsPath, "no_run_sh", reasonNoRunner(wsPath)), nil
 	}
+	if plan.runtime == runtimeHost && !hostRuntimeAllowed() {
+		// Repo declared host runtime but the operator's environment hasn't
+		// opted in. Escalate as advisory: rick will not run host commands
+		// from a manifest without explicit consent (RICK_ALLOW_HOST_RUNTIME=1)
+		// because the manifest can be a vector for arbitrary code execution
+		// on the host. Default-deny is the safety boundary.
+		return h.unverifiableVerdict(env.CorrelationID, wsPath, "host_runtime_not_allowed",
+			"Manifest declares runtime=host but RICK_ALLOW_HOST_RUNTIME=1 is not set. Host runtime runs commands directly on the operator's host (no stack VM isolation); set the env var explicitly to opt in."), nil
+	}
+	checks := plan.checks
 
 	// Docs-only fast-pass: if every modified file is a .md/docs/* path,
 	// runtime checks are structurally irrelevant. We still require non-empty
@@ -217,7 +282,8 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	}
 
 	h.logger.Info("quality-gate: runner detected",
-		slog.String("runner", string(runner)),
+		slog.String("runner", string(plan.runner)),
+		slog.String("runtime", string(plan.runtime)),
 		slog.String("correlation", env.CorrelationID),
 	)
 
@@ -236,7 +302,7 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	var rawDiagnosticsParts []string
 
 	for _, check := range checks {
-		result, runErr := h.runCheck(ctx, wsPath, check)
+		result, runErr := h.runCheck(ctx, wsPath, check, plan.runtime)
 		if result.Kept && result.Stack != "" {
 			keptStacks = append(keptStacks, result.Stack)
 		}
@@ -301,7 +367,7 @@ func (h *QualityGateHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	h.destroyKeptStacks(ctx, keptStacks)
 
 	if len(issues) == 0 {
-		return h.passVerdict(passSummary(runner)), nil
+		return h.passVerdict(passSummary(plan.runner)), nil
 	}
 
 	rawDiagnostics := strings.Join(rawDiagnosticsParts, "\n\n")
@@ -513,19 +579,33 @@ type stackRunResult struct {
 }
 
 // isStackError returns true for infrastructure-level failures (no compose file,
-// repo not found, multipass errors) as opposed to inner command failures.
+// repo not found, multipass errors, missing host executable) as opposed to
+// inner command failures. The host_* codes are produced by runHostCheck for
+// the same operator-actionable class of errors as the multipass codes.
 func (r *stackRunResult) isStackError() bool {
 	if r.Status != "error" {
 		return false
 	}
 	switch r.Code {
-	case "no_compose_file", "repo_not_found", "multipass_not_installed", "multipass_error":
+	case "no_compose_file", "repo_not_found", "multipass_not_installed", "multipass_error",
+		"host_executable_missing", "host_command_invalid":
 		return true
 	}
 	return false
 }
 
-// runCheck executes `stack run --json --timeout <n> <wsPath> -- <check.command...>`
+// runCheck dispatches a single quality check to the runtime declared by the
+// repo's plan (manifest or legacy probe). All runtimes return the same
+// stackRunResult shape so the downstream pipeline (mergeOutputAndStderr,
+// buildFailureDescription, debug-log persistence) is runtime-agnostic.
+func (h *QualityGateHandler) runCheck(ctx context.Context, wsPath string, check qualityCheck, runtime runtimeKind) (stackRunResult, error) {
+	if runtime == runtimeHost {
+		return h.runHostCheck(ctx, wsPath, check)
+	}
+	return h.runStackCheck(ctx, wsPath, check)
+}
+
+// runStackCheck executes `stack run --json --timeout <n> <wsPath> -- <check.command...>`
 // to run the quality check inside an isolated Multipass VM. The command is
 // supplied by the caller so that compound shell invocations (e.g.
 // `bash -c "./run.sh up && ./run.sh test"`) can share a single one-shot VM.
@@ -535,7 +615,7 @@ func (r *stackRunResult) isStackError() bool {
 // `unknown shorthand flag: 'c' in -c`, short-circuiting before the VM is ever
 // reached. Stack flags must appear before the separator so cobra consumes
 // them rather than passing them through to the command.
-func (h *QualityGateHandler) runCheck(ctx context.Context, wsPath string, check qualityCheck) (stackRunResult, error) {
+func (h *QualityGateHandler) runStackCheck(ctx context.Context, wsPath string, check qualityCheck) (stackRunResult, error) {
 	args := []string{"run", "--json", "--timeout", fmt.Sprintf("%d", h.timeout), wsPath, "--"}
 	args = append(args, check.command...)
 	cmd := exec.CommandContext(ctx, h.stackBin, args...)
@@ -596,9 +676,96 @@ func (h *QualityGateHandler) runCheck(ctx context.Context, wsPath string, check 
 	return result, nil
 }
 
+// runHostCheck executes the check's command directly on the operator's host
+// with cwd=workspace. No stack VM is spawned. Used for repos that cannot be
+// stack-virtualized (e.g. Go monorepos with no docker-compose) and is gated
+// by RICK_ALLOW_HOST_RUNTIME=1, enforced upstream by Handle.
+//
+// Result shape mirrors runStackCheck so the downstream pipeline is uniform:
+// inner-command stdout maps to result.Output, inner-command stderr to
+// result.Stderr, exit code to result.ExitCode. A missing executable maps to
+// the dedicated host_executable_missing infra-error code so the operator
+// gets an actionable advisory instead of a misleading "test failed" verdict.
+func (h *QualityGateHandler) runHostCheck(ctx context.Context, wsPath string, check qualityCheck) (stackRunResult, error) {
+	if len(check.command) == 0 {
+		// Defensive: validateManifest already rejects this, but keep the guard
+		// so a hand-constructed qualityCheck (e.g. in tests) can't panic.
+		return stackRunResult{
+			Status:  "error",
+			Code:    "host_command_invalid",
+			Message: "empty command argv for check " + check.name,
+		}, fmt.Errorf("host check %q has empty command", check.name)
+	}
+
+	cmd := exec.CommandContext(ctx, check.command[0], check.command[1:]...)
+	cmd.Dir = wsPath
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	runErr := cmd.Run()
+
+	result := stackRunResult{
+		Status: "success",
+		Action: "run",
+		Output: stdout.String(),
+		Stderr: stderr.String(),
+	}
+
+	if runErr == nil {
+		return result, nil
+	}
+
+	// Distinguish "binary not found / permission denied / etc." (infrastructure
+	// problem the operator must fix) from "binary ran and exited non-zero"
+	// (real test/lint failure). Only the former should trigger isStackError().
+	var execErr *exec.Error
+	if errors.As(runErr, &execErr) {
+		result.Status = "error"
+		result.Code = "host_executable_missing"
+		result.Message = execErr.Error()
+		return result, runErr
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		result.ExitCode = exitErr.ExitCode()
+	} else {
+		// Unusual: not an *exec.Error, not an *exec.ExitError. Could be
+		// context cancellation. Surface as exit code -1 + the wrapped err
+		// so the failure description still has signal.
+		result.ExitCode = -1
+	}
+
+	// Mirror the stack-side "promote stderr into output when stdout is empty"
+	// safety net so buildFailureDescription's truncation always has signal.
+	if strings.TrimSpace(result.Output) == "" && strings.TrimSpace(result.Stderr) != "" {
+		result.Output = result.Stderr
+	}
+
+	return result, runErr
+}
+
+// maxNDJSONLineBytes caps a single NDJSON envelope at 16 MiB. Stack embeds
+// the inner command's full stdout/stderr inline in the "run" envelope, and
+// docker-compose pulls easily exceed bufio's default 64 KiB buffer. The 2026-05-06
+// huli-api regression was a 130 KiB envelope silently dropped by the scanner;
+// without an explicit cap we fall back to the last parseable line (typically
+// "create"), which has empty Output/Stderr — the verdict ends up with no
+// signal even though stack captured everything.
+//
+// 16 MiB is comfortable headroom for any plausible stack output. Beyond that,
+// scanner.Err() returns bufio.ErrTooLong and we surface a parse_error advisory
+// rather than a misleading "test failed" verdict on a partial parse.
+const maxNDJSONLineBytes = 16 * 1024 * 1024
+
 // parseStackNDJSON scans NDJSON lines from stack run --json and returns the
 // "run" action envelope. Falls back to the last parseable envelope if no "run"
-// action is found. Returns false if no JSON could be parsed at all.
+// action is found. Returns false if no JSON could be parsed at all OR if the
+// scanner hit a hard limit (line longer than maxNDJSONLineBytes) — partial
+// parses MUST NOT be treated as success because the missing line is almost
+// always the "run" envelope carrying the actual signal.
 func parseStackNDJSON(data []byte) (stackRunResult, bool) {
 	// Fast path: try single-JSON parse (works for tests and simple output).
 	var single stackRunResult
@@ -610,6 +777,7 @@ func parseStackNDJSON(data []byte) (stackRunResult, bool) {
 	var last stackRunResult
 	found := false
 	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 64*1024), maxNDJSONLineBytes)
 	for scanner.Scan() {
 		line := ansiRe.ReplaceAllString(strings.TrimSpace(scanner.Text()), "")
 		if len(line) == 0 || line[0] != '{' {
@@ -624,6 +792,14 @@ func parseStackNDJSON(data []byte) (stackRunResult, bool) {
 		if r.Action == "run" {
 			return r, true
 		}
+	}
+	if scanner.Err() != nil {
+		// A line exceeded our 16 MiB ceiling, OR an underlying read failed.
+		// Either way, returning a partial parse would silently mask the
+		// missing envelope (typically "run") and feed an empty-signal verdict
+		// to the developer. Hard fail so the caller takes the parse_error
+		// path and escalates to operator instead.
+		return stackRunResult{}, false
 	}
 	return last, found
 }
@@ -694,6 +870,8 @@ func passSummary(runner runnerKind) string {
 	switch runner {
 	case runnerMakeCheck:
 		return "make check passed"
+	case runnerManifest:
+		return "manifest checks passed"
 	default:
 		return "lint and test passed"
 	}
@@ -734,6 +912,13 @@ func reasonStackUnavailable(code, message string) string {
 			return "stack's multipass invocation failed: " + message
 		}
 		return "stack's multipass invocation failed (see logs)"
+	case "host_executable_missing":
+		if message != "" {
+			return "host runtime: command not found / not executable: " + message
+		}
+		return "host runtime: command not found / not executable on this host"
+	case "host_command_invalid":
+		return "host runtime: manifest declared an empty or malformed command argv"
 	default:
 		return "stack returned an infrastructure error (" + code + ")"
 	}

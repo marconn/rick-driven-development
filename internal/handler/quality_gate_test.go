@@ -920,7 +920,7 @@ exit 0
 
 	h := &QualityGateHandler{store: newMockStore(), name: "quality-gate", stackBin: fakeStack, timeout: 42}
 	testCheck := qualityCheck{name: "test", command: []string{"bash", "-c", "./run.sh up && ./run.sh test"}}
-	_, err := h.runCheck(context.Background(), "/ws/my-repo", testCheck)
+	_, err := h.runCheck(context.Background(), "/ws/my-repo", testCheck, runtimeStack)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -960,7 +960,7 @@ sleep 60
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	_, err := h.runCheck(ctx, tmp, qualityCheck{name: "lint", command: []string{"./run.sh", "lint"}})
+	_, err := h.runCheck(ctx, tmp, qualityCheck{name: "lint", command: []string{"./run.sh", "lint"}}, runtimeStack)
 	if err == nil {
 		t.Fatal("expected error from cancelled context, got nil")
 	}
