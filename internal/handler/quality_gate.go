@@ -155,7 +155,7 @@ type QualityGateHandler struct {
 	store        eventstore.Store
 	name         string
 	stackBin     string         // path to stack binary, defaults to "stack"
-	timeout      int            // stack run --timeout in seconds, defaults to 300
+	timeout      int            // stack run --timeout in seconds, defaults to 180 (3 minutes)
 	debugDir     string         // directory for full debug output; resolved by resolveQualityGateDebugDir
 	manifestsDir string         // operator-local config dir for per-repo manifests; resolved by resolveQualityManifestsDir
 	gh           *github.Client // optional — used to cross-check local fails against GitHub CI
@@ -192,7 +192,7 @@ func NewQualityGate(d Deps) *QualityGateHandler {
 		store:        d.Store,
 		name:         "quality-gate",
 		stackBin:     "stack",
-		timeout:      300,
+		timeout:      180,
 		debugDir:     resolveQualityGateDebugDir(),
 		manifestsDir: resolveQualityManifestsDir(),
 		gh:           d.GitHub,
