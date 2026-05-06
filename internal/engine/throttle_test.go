@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"
@@ -461,5 +462,221 @@ func drain(ch <-chan event.Envelope, fn func(event.Envelope)) {
 		default:
 			return
 		}
+	}
+}
+
+// === Throttle Watchdog Tests ===
+
+func TestThrottleStalledEntriesEmptyWhenAllFresh(t *testing.T) {
+	th := newWorkflowThrottle(5, nil, slog.Default())
+	th.addRunning("wf-1")
+	th.addRunning("wf-2")
+	got := th.stalledEntries(time.Hour, time.Now())
+	if len(got) != 0 {
+		t.Errorf("expected 0 stalled when all activity fresh, got %d (%v)", len(got), got)
+	}
+}
+
+func TestThrottleStalledEntriesDetectsAged(t *testing.T) {
+	th := newWorkflowThrottle(5, nil, slog.Default())
+	th.addRunning("fresh")
+	th.addRunning("stale")
+	// Backdate "stale" by hand to simulate a long-silent workflow.
+	th.lastActivity["stale"] = time.Now().Add(-2 * time.Hour)
+	got := th.stalledEntries(time.Hour, time.Now())
+	if len(got) != 1 || got[0] != "stale" {
+		t.Errorf("expected ['stale'] stalled, got %v", got)
+	}
+}
+
+func TestThrottleStalledEntriesZeroThresholdSkips(t *testing.T) {
+	th := newWorkflowThrottle(5, nil, slog.Default())
+	th.addRunning("wf-1")
+	th.lastActivity["wf-1"] = time.Now().Add(-time.Hour)
+	if got := th.stalledEntries(0, time.Now()); len(got) != 0 {
+		t.Errorf("threshold=0 should disable detection, got %v", got)
+	}
+}
+
+func TestThrottleTouchActivityRefreshes(t *testing.T) {
+	th := newWorkflowThrottle(5, nil, slog.Default())
+	th.addRunning("wf-1")
+	th.lastActivity["wf-1"] = time.Now().Add(-time.Hour)
+	th.touchActivity("wf-1")
+	if got := th.stalledEntries(30*time.Minute, time.Now()); len(got) != 0 {
+		t.Errorf("touchActivity should clear staleness, got %v", got)
+	}
+}
+
+func TestThrottleTouchActivityIgnoresUnknown(t *testing.T) {
+	th := newWorkflowThrottle(5, nil, slog.Default())
+	// Touching an ID that isn't running must not insert it.
+	th.touchActivity("ghost")
+	if _, ok := th.lastActivity["ghost"]; ok {
+		t.Error("touchActivity must not insert entries for absent IDs")
+	}
+}
+
+func TestThrottleMarkStalledFreesAndCounts(t *testing.T) {
+	th := newWorkflowThrottle(5, nil, slog.Default())
+	th.addRunning("wf-1")
+	stamp := time.Now().Add(-90 * time.Minute)
+	th.lastActivity["wf-1"] = stamp
+
+	silence := th.markStalled("wf-1", time.Now())
+	if silence < 89*time.Minute || silence > 91*time.Minute {
+		t.Errorf("silence duration off: %v", silence)
+	}
+	if th.runningCount() != 0 {
+		t.Errorf("markStalled must remove the running entry, got %d", th.runningCount())
+	}
+	if th.stalledCount() != 1 {
+		t.Errorf("stalledCount = %d, want 1", th.stalledCount())
+	}
+}
+
+// TestEngineWatchdogReclaimsStalledRunning runs runWatchdogSweep against a
+// running aggregate whose lastActivity has aged past the threshold and
+// asserts that a WorkflowFailed{stalled} is emitted, the slot is freed, and
+// the counter increments.
+func TestEngineWatchdogReclaimsStalledRunning(t *testing.T) {
+	eng, store, bus := newThrottledTestEngine(t, 1)
+	ctx := context.Background()
+	eng.RegisterWorkflow(WorkflowDef{ID: "test-wf", Required: []string{"developer"}, MaxIterations: 3})
+
+	published := make(chan event.Envelope, 32)
+	bus.SubscribeAll(func(_ context.Context, env event.Envelope) error {
+		published <- env
+		return nil
+	})
+
+	// Start a workflow so it sits in throttle.running and the aggregate
+	// reaches StatusRunning. Drain the dispatch artefacts.
+	req := seedWorkflowRequested(t, store, "wf-1", "test-wf")
+	if err := eng.processDecision(ctx, req); err != nil {
+		t.Fatalf("process wf-1: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	drain(published, nil)
+
+	if eng.throttle.runningCount() != 1 {
+		t.Fatalf("expected 1 running before sweep, got %d", eng.throttle.runningCount())
+	}
+
+	// Backdate activity so the watchdog will pick it up.
+	eng.throttle.lastActivity["wf-1"] = time.Now().Add(-2 * time.Hour)
+
+	eng.stallTimeout = time.Hour
+	eng.runWatchdogSweep(ctx, time.Now())
+
+	time.Sleep(50 * time.Millisecond)
+	var failedKind event.FailureKind
+	var sawFailed bool
+	drain(published, func(env event.Envelope) {
+		if env.Type != event.WorkflowFailed {
+			return
+		}
+		var p event.WorkflowFailedPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			t.Fatalf("unmarshal WorkflowFailed: %v", err)
+		}
+		failedKind = p.FailureKind
+		sawFailed = true
+	})
+	if !sawFailed {
+		t.Fatal("expected WorkflowFailed published by watchdog")
+	}
+	if failedKind != event.FailureKindStalled {
+		t.Errorf("FailureKind = %q, want %q", failedKind, event.FailureKindStalled)
+	}
+	if eng.throttle.runningCount() != 0 {
+		t.Errorf("watchdog should free the slot, running = %d", eng.throttle.runningCount())
+	}
+	if got := eng.ThrottleSnapshot().Stalled; got != 1 {
+		t.Errorf("ThrottleSnapshot.Stalled = %d, want 1", got)
+	}
+}
+
+// TestEngineWatchdogSkipsPaused asserts that a Paused aggregate is left
+// alone (no WorkflowFailed, slot retained) — paused-by-hint is intentional
+// and may exceed any timeout while waiting for an operator.
+func TestEngineWatchdogSkipsPaused(t *testing.T) {
+	eng, store, bus := newThrottledTestEngine(t, 2)
+	ctx := context.Background()
+	eng.RegisterWorkflow(WorkflowDef{ID: "test-wf", Required: []string{"developer"}, MaxIterations: 3})
+
+	published := make(chan event.Envelope, 32)
+	bus.SubscribeAll(func(_ context.Context, env event.Envelope) error {
+		published <- env
+		return nil
+	})
+
+	req := seedWorkflowRequested(t, store, "wf-paused", "test-wf")
+	if err := eng.processDecision(ctx, req); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	drain(published, nil)
+
+	// Append a WorkflowPaused so loadAggregate reports StatusPaused. We
+	// fetch the current version first to satisfy optimistic concurrency.
+	loaded, err := eng.loadAggregate(ctx, "wf-paused")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	pauseEvt := event.New(event.WorkflowPaused, 1, event.MustMarshal(event.WorkflowPausedPayload{Reason: "hint"})).
+		WithAggregate("wf-paused", loaded.Version+1).
+		WithCorrelation("wf-paused").
+		WithSource("test")
+	if err := store.Append(ctx, "wf-paused", loaded.Version, []event.Envelope{pauseEvt}); err != nil {
+		t.Fatalf("append pause: %v", err)
+	}
+
+	// Backdate activity past the threshold.
+	eng.throttle.lastActivity["wf-paused"] = time.Now().Add(-2 * time.Hour)
+	eng.stallTimeout = time.Hour
+	drain(published, nil)
+	eng.runWatchdogSweep(ctx, time.Now())
+
+	time.Sleep(50 * time.Millisecond)
+	drain(published, func(env event.Envelope) {
+		if env.Type == event.WorkflowFailed {
+			t.Errorf("watchdog must not WorkflowFailed a paused aggregate, got source=%s", env.Source)
+		}
+	})
+	if eng.throttle.runningCount() != 1 {
+		t.Errorf("paused entry should retain its slot, running = %d", eng.throttle.runningCount())
+	}
+	if eng.ThrottleSnapshot().Stalled != 0 {
+		t.Errorf("Stalled counter must not increment for paused aggregates")
+	}
+}
+
+// TestEngineProcessDecisionRefreshesActivity asserts that any event the
+// engine routes through processDecision touches the watchdog clock for its
+// correlation, so a busy workflow stays out of the stalled set.
+func TestEngineProcessDecisionRefreshesActivity(t *testing.T) {
+	eng, store, _ := newThrottledTestEngine(t, 1)
+	ctx := context.Background()
+	eng.RegisterWorkflow(WorkflowDef{ID: "test-wf", Required: []string{"developer"}, MaxIterations: 3})
+
+	req := seedWorkflowRequested(t, store, "wf-active", "test-wf")
+	if err := eng.processDecision(ctx, req); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	// Backdate activity to simulate a long-silent workflow…
+	eng.throttle.lastActivity["wf-active"] = time.Now().Add(-2 * time.Hour)
+
+	// …then route an unrelated lifecycle event through processDecision.
+	// HintRejected is a cheap pick — engine subscribes to it and Decide()
+	// is a no-op for an aggregate without prior HintEmitted state.
+	hintEvt := event.New(event.HintRejected, 1, event.MustMarshal(event.HintRejectedPayload{Persona: "developer"})).
+		WithAggregate("wf-active:persona:developer", 1).
+		WithCorrelation("wf-active").
+		WithSource("test")
+	_ = eng.processDecision(ctx, hintEvt)
+
+	if got := eng.throttle.stalledEntries(time.Hour, time.Now()); len(got) != 0 {
+		t.Errorf("activity touch should drop wf-active out of stalled, got %v", got)
 	}
 }

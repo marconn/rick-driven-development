@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/marconn/rick-event-driven-development/internal/event"
 	"github.com/marconn/rick-event-driven-development/internal/eventstore"
@@ -25,16 +26,19 @@ import (
 // A maxConcurrent of 0 means unlimited — the throttle is a no-op.
 type workflowThrottle struct {
 	maxConcurrent int
-	running       map[string]struct{} // aggregate IDs of running workflows
-	queued        []event.Envelope    // parked WorkflowRequested events (in-memory FIFO)
+	running       map[string]struct{}  // aggregate IDs of running workflows
+	lastActivity  map[string]time.Time // last event seen per running aggregate; drives the stalled-slot watchdog
+	queued        []event.Envelope     // parked WorkflowRequested events (in-memory FIFO)
 	store         eventstore.WorkflowQueueStore
 	logger        *slog.Logger
+	stalledTotal  int // cumulative count of slots reclaimed by the watchdog
 }
 
 func newWorkflowThrottle(maxConcurrent int, store eventstore.WorkflowQueueStore, logger *slog.Logger) *workflowThrottle {
 	return &workflowThrottle{
 		maxConcurrent: maxConcurrent,
 		running:       make(map[string]struct{}),
+		lastActivity:  make(map[string]time.Time),
 		queued:        nil,
 		store:         store,
 		logger:        logger,
@@ -97,9 +101,10 @@ func (t *workflowThrottle) dequeue(ctx context.Context) (event.Envelope, bool) {
 	return env, true
 }
 
-// addRunning marks a workflow as running.
+// addRunning marks a workflow as running and stamps its initial activity.
 func (t *workflowThrottle) addRunning(aggregateID string) {
 	t.running[aggregateID] = struct{}{}
+	t.lastActivity[aggregateID] = time.Now()
 }
 
 // removeRunning removes a workflow from the running set.
@@ -108,8 +113,57 @@ func (t *workflowThrottle) removeRunning(aggregateID string) bool {
 	_, ok := t.running[aggregateID]
 	if ok {
 		delete(t.running, aggregateID)
+		delete(t.lastActivity, aggregateID)
 	}
 	return ok
+}
+
+// touchActivity refreshes the last-seen timestamp for a running workflow.
+// No-op when the aggregate is not in the running set — this lets every event
+// the engine receives call through unconditionally without an upstream check.
+func (t *workflowThrottle) touchActivity(aggregateID string) {
+	if _, ok := t.running[aggregateID]; !ok {
+		return
+	}
+	t.lastActivity[aggregateID] = time.Now()
+}
+
+// stalledEntries returns aggregate IDs whose last activity is older than
+// threshold. Empty when no entry qualifies. Caller must own the throttle's
+// goroutine (single-writer invariant).
+func (t *workflowThrottle) stalledEntries(threshold time.Duration, now time.Time) []string {
+	if threshold <= 0 || len(t.running) == 0 {
+		return nil
+	}
+	cutoff := now.Add(-threshold)
+	var stalled []string
+	for id := range t.running {
+		if t.lastActivity[id].Before(cutoff) {
+			stalled = append(stalled, id)
+		}
+	}
+	return stalled
+}
+
+// markStalled records a slot reclaimed by the watchdog. Bumps the cumulative
+// counter and removes the running entry. Returns the duration the entry was
+// silent (used by the caller's log line).
+func (t *workflowThrottle) markStalled(aggregateID string, now time.Time) time.Duration {
+	last, ok := t.lastActivity[aggregateID]
+	silence := time.Duration(0)
+	if ok {
+		silence = now.Sub(last)
+	}
+	if t.removeRunning(aggregateID) {
+		t.stalledTotal++
+	}
+	return silence
+}
+
+// stalledCount returns the cumulative count of slots reclaimed by the
+// watchdog since process start. Read by ThrottleSnapshot for observability.
+func (t *workflowThrottle) stalledCount() int {
+	return t.stalledTotal
 }
 
 // removeQueued removes a workflow from the queue (e.g., cancelled before starting).
@@ -145,10 +199,16 @@ func (t *workflowThrottle) removeQueued(ctx context.Context, aggregateID string)
 }
 
 // warmRunning seeds the running set during recovery. Called once at startup
-// after projections have caught up.
+// after projections have caught up. Activity is stamped at warm time, so a
+// workflow that was already silent before the restart gets a full
+// stall-timeout grace period before the watchdog can reclaim it. That keeps
+// post-restart noise low at the cost of delaying ghost detection by up to
+// one timeout interval after each server start.
 func (t *workflowThrottle) warmRunning(aggregateIDs []string) {
+	now := time.Now()
 	for _, id := range aggregateIDs {
 		t.running[id] = struct{}{}
+		t.lastActivity[id] = now
 	}
 	if len(aggregateIDs) > 0 {
 		t.logger.Info("engine: throttle warmed from recovery",

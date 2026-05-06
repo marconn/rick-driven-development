@@ -484,6 +484,13 @@ const (
 	// this as a failure pauses the workflow so the operator can inspect
 	// the workspace directly instead of running review/qa against garbage.
 	FailureKindOutputTruncated FailureKind = "output_truncated"
+	// FailureKindStalled means the throttle watchdog observed no engine
+	// activity for the workflow within RICK_THROTTLE_STALL_TIMEOUT and
+	// auto-failed it to free its concurrency slot. Paused workflows are
+	// excluded — only Running aggregates are eligible. Distinct from
+	// idle/wall timeouts (which target a single backend call); this is a
+	// workflow-level liveness fault.
+	FailureKindStalled FailureKind = "stalled"
 )
 
 // PersonaFailedPayload is emitted when a persona handler fails.

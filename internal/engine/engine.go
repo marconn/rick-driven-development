@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/marconn/rick-event-driven-development/internal/event"
 	"github.com/marconn/rick-event-driven-development/internal/eventbus"
@@ -36,6 +37,21 @@ type Engine struct {
 	// Workflow concurrency throttle. Limits how many workflows can be
 	// running simultaneously. Owned exclusively by the processLoop goroutine.
 	throttle *workflowThrottle
+
+	// Throttle stall watchdog. When enabled, a separate goroutine ticks at
+	// watchdogInterval and posts onto watchdogTick; processLoop drains the
+	// tick on the same goroutine that owns the throttle so the sweep is
+	// race-free without a mutex. Auto-fails Running workflows with no
+	// engine-visible activity for stallTimeout, freeing their slot via
+	// FailureKindStalled. Paused aggregates are explicitly excluded —
+	// HintEmitted-pause is intentional and may legitimately exceed any
+	// timeout while waiting for an operator.
+	watchdogEnabled  bool
+	watchdogInterval time.Duration
+	stallTimeout     time.Duration
+	watchdogTick     chan time.Time
+	watchdogStop     chan struct{}
+	watchdogDone     chan struct{}
 }
 
 // NewEngine creates a new workflow lifecycle engine.
@@ -47,7 +63,56 @@ func NewEngine(store eventstore.Store, bus eventbus.Bus, logger *slog.Logger) *E
 		workflows: make(map[string]WorkflowDef),
 	}
 	e.initThrottleFromEnv()
+	e.initWatchdogFromEnv()
 	return e
+}
+
+// Default tuning for the throttle stall watchdog. Threshold sits comfortably
+// above RICK_BACKEND_TIMEOUT (default 20m) so a legitimate long-running
+// developer call has slack before being misclassified.
+const (
+	defaultStallTimeout     = 30 * time.Minute
+	defaultWatchdogInterval = 5 * time.Minute
+)
+
+// initWatchdogFromEnv reads RICK_THROTTLE_WATCHDOG / _STALL_TIMEOUT /
+// _WATCHDOG_INTERVAL. Defaults: enabled with a 30m timeout swept every 5m.
+// Set RICK_THROTTLE_WATCHDOG=0 to disable as a kill switch.
+func (e *Engine) initWatchdogFromEnv() {
+	e.watchdogEnabled = true
+	if raw := os.Getenv("RICK_THROTTLE_WATCHDOG"); raw != "" {
+		switch raw {
+		case "0", "false", "FALSE", "off", "OFF":
+			e.watchdogEnabled = false
+		}
+	}
+	e.stallTimeout = defaultStallTimeout
+	if d := parseDurationEnv("RICK_THROTTLE_STALL_TIMEOUT", e.logger); d > 0 {
+		e.stallTimeout = d
+	}
+	e.watchdogInterval = defaultWatchdogInterval
+	if d := parseDurationEnv("RICK_THROTTLE_WATCHDOG_INTERVAL", e.logger); d > 0 {
+		e.watchdogInterval = d
+	}
+}
+
+// parseDurationEnv reads a Go-format duration (e.g. "20m", "1h") from the
+// given env var. Returns 0 when unset, empty, or invalid (with a warn log).
+func parseDurationEnv(name string, logger *slog.Logger) time.Duration {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		logger.Warn("engine: ignoring invalid duration env var",
+			slog.String("name", name),
+			slog.String("value", raw),
+			slog.String("error", err.Error()),
+		)
+		return 0
+	}
+	return d
 }
 
 // initThrottleFromEnv reads RICK_MAX_WORKFLOWS and initializes the throttle.
@@ -169,6 +234,10 @@ type ThrottleSnapshot struct {
 	MaxConcurrent int
 	Running       int
 	Queued        int
+	// Stalled is the cumulative count of slots reclaimed by the throttle
+	// watchdog since this process started. Always zero when the throttle
+	// is disabled or the watchdog is off.
+	Stalled int
 }
 
 // ThrottleSnapshot returns a value copy of the current throttle state. The
@@ -187,6 +256,7 @@ func (e *Engine) ThrottleSnapshot() ThrottleSnapshot {
 		MaxConcurrent: e.throttle.maxConcurrent,
 		Running:       e.throttle.runningCount(),
 		Queued:        e.throttle.queuedCount(),
+		Stalled:       e.throttle.stalledCount(),
 	}
 }
 
@@ -231,6 +301,17 @@ func (e *Engine) Start() {
 	e.stopCh = make(chan struct{})
 	e.done = make(chan struct{})
 
+	if e.throttle != nil && e.watchdogEnabled && e.stallTimeout > 0 && e.watchdogInterval > 0 {
+		e.watchdogTick = make(chan time.Time, 1)
+		e.watchdogStop = make(chan struct{})
+		e.watchdogDone = make(chan struct{})
+		go e.watchdogLoop()
+		e.logger.Info("engine: throttle watchdog enabled",
+			slog.Duration("stall_timeout", e.stallTimeout),
+			slog.Duration("interval", e.watchdogInterval),
+		)
+	}
+
 	go e.processLoop()
 
 	reactTo := []event.Type{
@@ -265,6 +346,12 @@ func (e *Engine) Stop() {
 	}
 	e.unsubs = nil
 
+	if e.watchdogStop != nil {
+		close(e.watchdogStop)
+		<-e.watchdogDone
+		e.watchdogStop = nil
+	}
+
 	if e.stopCh != nil {
 		close(e.stopCh)
 		<-e.done
@@ -274,12 +361,16 @@ func (e *Engine) Stop() {
 
 // processLoop is the single goroutine that drains eventCh. All events from
 // the bus are serialized here — no concurrent access to the same aggregate.
+// Watchdog ticks share the same goroutine so the throttle's single-writer
+// invariant holds without locks.
 func (e *Engine) processLoop() {
 	defer close(e.done)
 	for {
 		select {
 		case env := <-e.eventCh:
 			e.processAndLog(env)
+		case now := <-e.watchdogTick:
+			e.runWatchdogSweep(context.Background(), now)
 		case <-e.stopCh:
 			// Drain remaining events in the channel before exiting.
 			for {
@@ -294,6 +385,110 @@ func (e *Engine) processLoop() {
 	}
 }
 
+// watchdogLoop ticks at watchdogInterval and forwards the tick onto
+// watchdogTick. The actual sweep runs on processLoop's goroutine to preserve
+// the throttle's single-writer invariant. Drops a tick when processLoop is
+// busy (the channel is buffer-1) — under sustained backpressure the next
+// tick still fires, so we don't leak tick goroutines.
+func (e *Engine) watchdogLoop() {
+	defer close(e.watchdogDone)
+	ticker := time.NewTicker(e.watchdogInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-e.watchdogStop:
+			return
+		case t := <-ticker.C:
+			select {
+			case e.watchdogTick <- t:
+			default:
+				// processLoop hasn't drained the previous tick yet —
+				// drop this one rather than block the watchdog goroutine.
+			}
+		}
+	}
+}
+
+// runWatchdogSweep auto-fails Running workflows whose last engine-visible
+// activity is older than stallTimeout. Paused / Cancelled / terminal
+// aggregates are filtered by reloading the aggregate before emitting —
+// callers cannot rely on the throttle's running set alone, since the
+// recovery scanner seeds paused aggregates into it too.
+//
+// Each reclaimed slot emits a workflow-aggregate WorkflowFailed
+// (FailureKindStalled), removes the entry from the throttle running set,
+// publishes the event so projections and notifications stay current, and
+// drains the queue.
+func (e *Engine) runWatchdogSweep(ctx context.Context, now time.Time) {
+	if e.throttle == nil {
+		return
+	}
+	candidates := e.throttle.stalledEntries(e.stallTimeout, now)
+	if len(candidates) == 0 {
+		return
+	}
+	for _, corrID := range candidates {
+		e.reclaimStalledSlot(ctx, corrID, now)
+	}
+	if len(candidates) > 0 {
+		e.drainThrottleQueue(ctx)
+	}
+}
+
+// reclaimStalledSlot processes a single watchdog candidate. Loads the
+// workflow aggregate to verify it is still Running, then appends and
+// publishes a WorkflowFailed{FailureKindStalled} event and frees the slot.
+// On any disqualifying state (paused, terminal, missing) the throttle entry
+// is left in place so the legitimate decrement path can reclaim it.
+func (e *Engine) reclaimStalledSlot(ctx context.Context, corrID string, now time.Time) {
+	agg, err := e.loadAggregate(ctx, corrID)
+	if err != nil {
+		e.logger.Warn("engine: watchdog load aggregate failed",
+			slog.String("correlation", corrID),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	if agg.Status != StatusRunning {
+		// Paused-by-design or already terminal. Leave the running entry
+		// intact when paused (operator may resume); it'll get re-evaluated
+		// on the next sweep with refreshed activity once the workflow
+		// resumes. For terminal states the legitimate path will remove it.
+		return
+	}
+
+	reason := fmt.Sprintf("throttle watchdog: no engine activity for %s", e.stallTimeout)
+	failed := event.New(event.WorkflowFailed, 1, event.MustMarshal(event.WorkflowFailedPayload{
+		Reason:      reason,
+		FailureKind: event.FailureKindStalled,
+	})).
+		WithAggregate(corrID, agg.Version+1).
+		WithCorrelation(corrID).
+		WithSource("engine:throttle_watchdog")
+
+	if err := e.store.Append(ctx, corrID, agg.Version, []event.Envelope{failed}); err != nil {
+		e.logger.Error("engine: watchdog append WorkflowFailed failed",
+			slog.String("correlation", corrID),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	silence := e.throttle.markStalled(corrID, now)
+	e.logger.Warn("engine: throttle watchdog reclaimed stalled slot",
+		slog.String("correlation", corrID),
+		slog.String("workflow_id", agg.WorkflowID),
+		slog.Duration("silence", silence),
+		slog.Duration("threshold", e.stallTimeout),
+		slog.Int("running", e.throttle.runningCount()),
+	)
+	if err := e.bus.Publish(ctx, failed); err != nil {
+		e.logger.Error("engine: watchdog publish WorkflowFailed failed",
+			slog.String("correlation", corrID),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
 func (e *Engine) processAndLog(env event.Envelope) {
 	if err := e.processDecision(context.Background(), env); err != nil {
 		e.logger.Error("engine: process decision failed",
@@ -305,6 +500,15 @@ func (e *Engine) processAndLog(env event.Envelope) {
 }
 
 func (e *Engine) processDecision(ctx context.Context, env event.Envelope) error {
+	// Refresh watchdog activity for any event tied to a known running
+	// workflow. Touch is a no-op when the correlation isn't in the throttle's
+	// running set, so unconditional call is cheap and keeps the watchdog
+	// signal fresh for every lifecycle / verdict / hint event the engine
+	// already subscribes to.
+	if e.throttle != nil && env.CorrelationID != "" {
+		e.throttle.touchActivity(env.CorrelationID)
+	}
+
 	// Throttle: queue WorkflowRequested if at capacity.
 	if env.Type == event.WorkflowRequested && e.throttle != nil && e.throttle.shouldQueue() {
 		e.throttle.enqueue(ctx, env)

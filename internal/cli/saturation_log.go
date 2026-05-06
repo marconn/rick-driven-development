@@ -62,6 +62,7 @@ func emitSaturationSnapshot(logger *slog.Logger, sat *observe.Saturation, eng *e
 			slog.Int("throttle_running", throttle.Running),
 			slog.Int("throttle_queued", throttle.Queued),
 			slog.Int("throttle_max", throttle.MaxConcurrent),
+			slog.Int("throttle_stalled", throttle.Stalled),
 		)
 	}
 	for _, b := range backends {
