@@ -1356,6 +1356,236 @@ func TestE2EAdvisoryPauseResumeFiresDownstream(t *testing.T) {
 	}
 }
 
+// TestE2EByteIdenticalPauseResumeFiresDownstream is the regression for the
+// resume-from-byte-identical-pause wedge observed in workflows
+// 1dee12fb (pr-feedback) and 0b7c0f8d (ci-fix) on 2026-05-07. Reproduction:
+//
+//  1. Pipeline: developer → reviewer + qa → quality-gate → committer.
+//  2. Iter 1: reviewer/qa pass; quality-gate emits NON-advisory fail.
+//     decideVerdictRendered emits FeedbackGenerated; developer re-runs.
+//  3. Iter 2: reviewer/qa pass; quality-gate emits the SAME non-advisory
+//     fail (byte-identical fingerprint). decideVerdictRendered's
+//     byte-identical branch fires escalateVerdict → WorkflowPaused.
+//  4. Pre-fix: WorkflowPaused carried no retarget directive.
+//     decideWorkflowResumed only re-emitted FeedbackGenerated when
+//     count >= MaxIterations; with count=1 < MaxIter=3 the loop body never
+//     fired. Committer's pre-pause dispatches were dropped at the join's
+//     pending_feedback predicate (non-advisory carve-out doesn't apply),
+//     so pauser.blocked was empty too. Resume → nothing → watchdog.
+//
+// Post-fix: byte-identical escalateVerdict emits WorkflowPaused with
+// RetargetPersona="developer", RetargetSource="quality-gate".
+// decideWorkflowResumed reads the retarget pair and re-emits
+// FeedbackGenerated on resume; developer runs a third iteration; QG
+// passes; committer fires; WorkflowCompleted.
+func TestE2EByteIdenticalPauseResumeFiresDownstream(t *testing.T) {
+	def := WorkflowDef{
+		ID:                "e2e-byte-identical-resume",
+		Required:          []string{"developer", "reviewer", "qa", "quality-gate", "committer"},
+		MaxIterations:     3,
+		EscalateOnMaxIter: true,
+		Graph: map[string][]string{
+			"developer":    {},
+			"reviewer":     {"developer"},
+			"qa":           {"developer"},
+			"quality-gate": {"reviewer", "qa"},
+			"committer":    {"quality-gate"},
+		},
+		RetriggeredBy: map[string][]event.Type{"developer": {event.FeedbackGenerated}},
+	}
+	env := newE2EEnv(t, def)
+
+	var committerFired atomic.Int32
+	var qgInvocations atomic.Int32
+
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name:   "developer",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) { return nil, nil },
+		},
+		trigger: handler.Trigger{
+			Events: []event.Type{event.WorkflowStartedFor("e2e-byte-identical-resume"), event.FeedbackGenerated},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "reviewer",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Persona: "developer", SourcePersona: "reviewer", Outcome: event.VerdictPass,
+						Summary: "looks good",
+					})),
+				}, nil
+			},
+		},
+		trigger: handler.Trigger{
+			Events:        []event.Type{event.PersonaCompleted},
+			AfterPersonas: []string{"developer"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "qa",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Persona: "developer", SourcePersona: "qa", Outcome: event.VerdictPass,
+						Summary: "tests pass",
+					})),
+				}, nil
+			},
+		},
+		trigger: handler.Trigger{
+			Events:        []event.Type{event.PersonaCompleted},
+			AfterPersonas: []string{"developer"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// quality-gate fails the first two invocations with a byte-identical
+	// payload (mirrors the production trace where a missing Make target
+	// produced the same stderr fingerprint twice). On the third invocation
+	// — after operator-corrected resume — it returns pass.
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "quality-gate",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				n := qgInvocations.Add(1)
+				outcome := event.VerdictPass
+				summary := "checks pass"
+				issues := []event.Issue(nil)
+				if n <= 2 {
+					outcome = event.VerdictFail
+					summary = "test failed"
+					issues = []event.Issue{{
+						Severity:    "major",
+						Category:    "correctness",
+						Description: "make: *** No rule to make target 'test-backend'.  Stop.",
+					}}
+				}
+				return []event.Envelope{
+					event.New(event.VerdictRendered, 1, event.MustMarshal(event.VerdictPayload{
+						Persona:       "developer",
+						SourcePersona: "quality-gate",
+						Outcome:       outcome,
+						Summary:       summary,
+						Issues:        issues,
+					})),
+				}, nil
+			},
+		},
+		trigger: handler.Trigger{
+			Events:        []event.Type{event.PersonaCompleted},
+			AfterPersonas: []string{"reviewer", "qa"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := env.reg.Register(&stubTriggeredHandler{
+		stubHandler: stubHandler{
+			name: "committer",
+			handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+				committerFired.Add(1)
+				return nil, nil
+			},
+		},
+		trigger: handler.Trigger{
+			Events:        []event.Type{event.PersonaCompleted},
+			AfterPersonas: []string{"quality-gate"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	paused := make(chan event.Envelope, 1)
+	unsubPause := env.bus.Subscribe(event.WorkflowPaused, func(_ context.Context, e event.Envelope) error {
+		if e.CorrelationID == "wf-byte-identical-resume" {
+			select {
+			case paused <- e:
+			default:
+			}
+		}
+		return nil
+	}, eventbus.WithName("test:byte-identical-pause-detect"))
+	defer unsubPause()
+
+	result := awaitWorkflowResult(t, env.bus, "wf-byte-identical-resume")
+	env.start(ctx)
+	env.fireWorkflow(ctx, t, "wf-byte-identical-resume", "e2e-byte-identical-resume")
+
+	select {
+	case pauseEvt := <-paused:
+		var p event.WorkflowPausedPayload
+		_ = json.Unmarshal(pauseEvt.Payload, &p)
+		if !strings.Contains(p.Reason, "byte-identical") {
+			t.Errorf("expected byte-identical pause reason, got: %s", p.Reason)
+		}
+		if p.RetargetPersona != "developer" {
+			t.Errorf("expected RetargetPersona=developer, got %q", p.RetargetPersona)
+		}
+		if p.RetargetSource != "quality-gate" {
+			t.Errorf("expected RetargetSource=quality-gate, got %q", p.RetargetSource)
+		}
+		t.Logf("byte-identical pause triggered: retarget=%s/%s", p.RetargetPersona, p.RetargetSource)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout: byte-identical pause never triggered")
+	}
+
+	if committerFired.Load() != 0 {
+		t.Errorf("committer fired before resume (count=%d) — should be paused", committerFired.Load())
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	events, _ := env.store.Load(ctx, "wf-byte-identical-resume")
+	currentVersion := events[len(events)-1].Version
+
+	resumeEvt := event.New(event.WorkflowResumed, 1, event.MustMarshal(event.WorkflowResumedPayload{
+		Reason: "operator fixed the Make target",
+	})).WithAggregate("wf-byte-identical-resume", currentVersion+1).
+		WithCorrelation("wf-byte-identical-resume").
+		WithSource("test:operator")
+
+	if err := env.store.Append(ctx, "wf-byte-identical-resume", currentVersion, []event.Envelope{resumeEvt}); err != nil {
+		t.Fatalf("append resume: %v", err)
+	}
+	if err := env.bus.Publish(ctx, resumeEvt); err != nil {
+		t.Fatalf("publish resume: %v", err)
+	}
+
+	select {
+	case got := <-result:
+		if got.Type != event.WorkflowCompleted {
+			t.Fatalf("expected WorkflowCompleted after resume, got %s", got.Type)
+		}
+	case <-time.After(10 * time.Second):
+		corr, _ := env.store.LoadByCorrelation(ctx, "wf-byte-identical-resume")
+		for _, e := range corr {
+			t.Logf("  event: %s (agg=%s)", e.Type, e.AggregateID)
+		}
+		t.Fatalf("timeout: workflow never completed after resume (committer fired=%d, qg invocations=%d)",
+			committerFired.Load(), qgInvocations.Load())
+	}
+
+	if committerFired.Load() != 1 {
+		t.Errorf("expected committer to fire exactly once after resume, got %d", committerFired.Load())
+	}
+	if qgInvocations.Load() != 3 {
+		t.Errorf("expected quality-gate to run 3 times (fail, fail, pass), got %d", qgInvocations.Load())
+	}
+}
+
 // TestWorkspaceDevWorkflowDefHasEscalation verifies the workspace-dev workflow
 // has EscalateOnMaxIter enabled by default.
 func TestWorkspaceDevWorkflowDefHasEscalation(t *testing.T) {

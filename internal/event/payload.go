@@ -129,9 +129,21 @@ type WorkflowCancelledPayload struct {
 }
 
 // WorkflowPausedPayload is emitted when an operator pauses a workflow.
+//
+// RetargetPersona / RetargetSource are an optional re-trigger directive for
+// the resume path: when a pause was caused by an escalation that intends the
+// operator to fix something and re-run a persona (byte-identical fingerprint,
+// max-iter exhausted with EscalateOnMaxIter), the emitter sets these fields
+// so decideWorkflowResumed can re-emit FeedbackGenerated for the named
+// persona on resume. Empty means "resume just unpauses" — used by advisory
+// verdicts (the operator's resume signals manual validation, not a retry)
+// and hint pauses (which advance via HintApproved/HintRejected, not via
+// WorkflowResumed).
 type WorkflowPausedPayload struct {
-	Reason string `json:"reason"`
-	Source string `json:"source,omitempty"` // "operator", "auto:max_iterations"
+	Reason          string `json:"reason"`
+	Source          string `json:"source,omitempty"` // "operator", "auto:max_iterations"
+	RetargetPersona string `json:"retarget_persona,omitempty"`
+	RetargetSource  string `json:"retarget_source,omitempty"`
 }
 
 // WorkflowResumedPayload is emitted when an operator resumes a paused workflow.

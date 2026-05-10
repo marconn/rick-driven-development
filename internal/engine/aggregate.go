@@ -71,6 +71,15 @@ type WorkflowAggregate struct {
 	// path that PR-D didn't cover). Last-write-wins per target — older
 	// diagnostics aren't useful when the operator just intervened.
 	LastFailingVerdict map[string]cachedVerdict
+	// PendingResumeRetarget / PendingResumeRetargetSource are folded from
+	// WorkflowPausedPayload by Apply(WorkflowPaused). When non-empty,
+	// decideWorkflowResumed re-emits FeedbackGenerated for the named
+	// (target, source) pair so the operator's resume actually drives a new
+	// iteration. Cleared by Apply(WorkflowResumed). Empty == legacy fallback
+	// (advisory pauses, hint pauses, plain operator pauses, and any pause
+	// event written before this field existed).
+	PendingResumeRetarget       string
+	PendingResumeRetargetSource string
 }
 
 // cachedVerdict carries the subset of VerdictPayload that
@@ -129,9 +138,18 @@ func (w *WorkflowAggregate) Apply(env event.Envelope) {
 		w.Status = StatusCancelled
 
 	case event.WorkflowPaused:
+		var p event.WorkflowPausedPayload
+		_ = json.Unmarshal(env.Payload, &p)
+		w.PendingResumeRetarget = p.RetargetPersona
+		w.PendingResumeRetargetSource = p.RetargetSource
 		w.Status = StatusPaused
 
 	case event.WorkflowResumed:
+		// Don't clear PendingResumeRetarget here: loadAggregate replays all
+		// events through Apply BEFORE Decide runs, so clearing on resume
+		// would race with Decide(WorkflowResumed) reading the retarget. The
+		// next WorkflowPaused unconditionally overwrites the pair (including
+		// to empty for advisory/hint), which is the canonical clearing path.
 		w.Status = StatusRunning
 
 	case event.WorkflowRetried:
@@ -518,9 +536,13 @@ func (w *WorkflowAggregate) decideVerdictRendered(env event.Envelope) ([]event.E
 	// review rather than a retry. Escalate immediately — no developer burn on
 	// what the gate itself flagged as likely-flake.
 	if v.Advisory {
+		// Advisory pauses leave Retarget* empty: resume signals operator
+		// validation, not a retry. The pauser.blocked replay path drives
+		// downstream once the join's advisory carve-out lets the dispatch
+		// reach the pause check.
 		return w.escalateVerdict(env, fmt.Sprintf(
 			"%s emitted advisory failure — %s (pausing for operator review instead of re-triggering %s)",
-			sourcePersona, v.Summary, targetPersona)), nil
+			sourcePersona, v.Summary, targetPersona), "", ""), nil
 	}
 
 	// Identical-failure dedup: if this verdict's fingerprint matches the one
@@ -534,17 +556,25 @@ func (w *WorkflowAggregate) decideVerdictRendered(env event.Envelope) ([]event.E
 	fpKey := sourcePersona + "|" + targetPersona
 	if w.FeedbackCount[targetPersona] >= 1 && w.LastVerdictFingerprint[fpKey] != "" &&
 		w.LastVerdictFingerprint[fpKey] == verdictFingerprint(v) {
+		// Byte-identical pause: operator-corrected guidance is the resume
+		// intent. Carry the retarget pair so decideWorkflowResumed re-emits
+		// FeedbackGenerated for (targetPersona, sourcePersona) once the
+		// operator publishes WorkflowResumed.
 		return w.escalateVerdict(env, fmt.Sprintf(
 			"%s failed twice with byte-identical verdict — not converging (last summary: %q)",
-			sourcePersona, v.Summary)), nil
+			sourcePersona, v.Summary), targetPersona, sourcePersona), nil
 	}
 
 	iteration := w.FeedbackCount[targetPersona] + 1
 	if iteration > w.MaxIterations {
 		// Escalate to operator (pause) or hard fail depending on workflow config
 		if w.WorkflowDef != nil && w.WorkflowDef.EscalateOnMaxIter {
+			// Max-iter pause: same shape as byte-identical — operator
+			// guidance is meant to drive a fresh iteration. Carry the
+			// retarget pair so resume re-emits FeedbackGenerated.
 			return w.escalateVerdict(env, fmt.Sprintf(
-				"max iterations (%d) reached for %s — escalated to operator", w.MaxIterations, targetPersona)), nil
+				"max iterations (%d) reached for %s — escalated to operator", w.MaxIterations, targetPersona),
+				targetPersona, sourcePersona), nil
 		}
 		payload := event.MustMarshal(event.WorkflowFailedPayload{
 			Reason:  fmt.Sprintf("max iterations (%d) reached for %s", w.MaxIterations, targetPersona),
@@ -580,10 +610,16 @@ func (w *WorkflowAggregate) decideVerdictRendered(env event.Envelope) ([]event.E
 // three decideVerdictRendered escape hatches (advisory / identical /
 // max-iter). Keeps the payload construction in one place so operators see
 // a consistent Source tag for every auto-escalation.
-func (w *WorkflowAggregate) escalateVerdict(env event.Envelope, reason string) []event.Envelope {
+//
+// retargetPersona / retargetSource are forwarded into the payload so the
+// resume path knows which persona to re-trigger (empty for advisory pauses
+// where resume signals manual validation rather than a retry).
+func (w *WorkflowAggregate) escalateVerdict(env event.Envelope, reason, retargetPersona, retargetSource string) []event.Envelope {
 	payload := event.MustMarshal(event.WorkflowPausedPayload{
-		Reason: reason,
-		Source: "engine:auto-escalation",
+		Reason:          reason,
+		Source:          "engine:auto-escalation",
+		RetargetPersona: retargetPersona,
+		RetargetSource:  retargetSource,
 	})
 	return []event.Envelope{
 		event.New(event.WorkflowPaused, 1, payload).
@@ -630,24 +666,54 @@ func (w *WorkflowAggregate) decideTokenBudgetExceeded(env event.Envelope) ([]eve
 	}, nil
 }
 
-// decideWorkflowResumed handles resume after auto-escalation. When the
-// workflow was paused because MaxIterations was reached, resuming means
-// the operator has provided guidance and wants to continue. We re-emit
-// FeedbackGenerated for the persona that hit the limit, allowing the
-// developer to re-run with the new guidance context.
+// decideWorkflowResumed handles resume after a pause. The pause's payload
+// carries an explicit retarget pair when the escalation intends a retry
+// (byte-identical fingerprint, max-iter exhausted). When set, we re-emit
+// FeedbackGenerated for that persona so the developer re-runs with the
+// operator-corrected context.
+//
+// Empty retarget falls through to a legacy max-iter scan that preserves
+// behavior for any in-flight WorkflowPaused events written before the
+// retarget fields existed. Advisory pauses and hint pauses also fall
+// through here and correctly no-op (count < MaxIterations) — their
+// downstream is driven by pauser.blocked replay or HintApproved, not by
+// this re-emit path.
 func (w *WorkflowAggregate) decideWorkflowResumed(env event.Envelope) ([]event.Envelope, error) {
-	// Find the persona that hit the iteration limit — it needs re-triggering.
+	if persona := w.PendingResumeRetarget; persona != "" && w.isRequiredPersona(persona) {
+		cached := w.LastFailingVerdict[persona]
+		sourcePersona := w.PendingResumeRetargetSource
+		if sourcePersona == "" {
+			sourcePersona = cached.SourcePersona
+		}
+		iteration := w.FeedbackCount[persona] + 1
+		// Bump MaxIterations only when the new iteration would exceed it.
+		// Byte-identical at iter 1 with MaxIter=3 stays at 3; max-iter at
+		// iter 3 with MaxIter=3 bumps to 4 (one extra retry, same as the
+		// legacy fallback below).
+		if iteration > w.MaxIterations {
+			w.MaxIterations = iteration
+		}
+		fbPayload := event.MustMarshal(event.FeedbackGeneratedPayload{
+			TargetPersona:  persona,
+			SourcePersona:  sourcePersona,
+			Iteration:      iteration,
+			Summary:        "re-triggered after operator guidance",
+			RawDiagnostics: cached.RawDiagnostics,
+		})
+		return []event.Envelope{
+			event.New(event.FeedbackGenerated, 1, fbPayload).
+				WithAggregate(w.ID, w.Version+1).
+				WithCausation(env.ID).
+				WithCorrelation(env.CorrelationID).
+				WithSource("engine:aggregate"),
+		}, nil
+	}
+
+	// Legacy fallback: WorkflowPaused events written before RetargetPersona
+	// existed land here. Original behavior preserved.
 	for persona, count := range w.FeedbackCount {
 		if count >= w.MaxIterations {
-			// Grant one additional iteration so the re-triggered feedback
-			// doesn't immediately hit the limit again.
 			w.MaxIterations = count + 1
-
-			// Rehydrate the last failing verdict's SourcePersona + RawDiagnostics
-			// (cached during Apply(VerdictRendered)) so the developer's next
-			// iteration prompt isn't stripped of the unfiltered failure tail.
-			// Empty cache (e.g., resume from a non-failure pause) leaves the
-			// fields zero — formatFeedback skips the section, no error.
 			cached := w.LastFailingVerdict[persona]
 			fbPayload := event.MustMarshal(event.FeedbackGeneratedPayload{
 				TargetPersona:  persona,
@@ -700,6 +766,9 @@ func (w *WorkflowAggregate) decideHintEmitted(env event.Envelope) ([]event.Envel
 	if len(h.Blockers) > 0 {
 		reason += fmt.Sprintf(", blockers=%v", h.Blockers)
 	}
+	// RetargetPersona/RetargetSource intentionally empty: hint pauses
+	// resume via HintApproved/HintRejected, not via WorkflowResumed
+	// re-triggering FeedbackGenerated.
 	payload := event.MustMarshal(event.WorkflowPausedPayload{
 		Reason: reason,
 		Source: "engine:hint-review",
