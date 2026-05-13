@@ -21,6 +21,22 @@ Defines the `Handler` plugin interface and the concrete handler implementations 
 
 `RegisterAll(reg, deps)` registers each handler exactly once. Workflow DAGs scope which handlers participate per workflow — there is no per-workflow handler duplication (no more `jira-developer` / `pr-reviewer` prefixes).
 
+### Per-persona Claude `--effort`
+
+`handlers.go` defines a `personaEffort` map that overrides the Claude CLI `--effort` reasoning level per handler name. The value flows: map → `AIHandlerConfig.Effort` → `backend.Request.Effort` → `claude.buildArgs` → `--effort <value>`. Empty/unmapped names fall through to `claude.go`'s `"high"` default, so adding a handler can never silently regress its reasoning budget. The map is Claude-specific — Gemini and Codex have no equivalent flag and ignore `Request.Effort`; if `qa`/`reviewer` run on the review backend (gemini by default) the effort field is set but no-ops, and only kicks in when the review rotation includes claude (`RICK_REVIEW_BACKENDS=claude`).
+
+Current settings:
+
+| Handler | Effort | Why |
+|---|---|---|
+| `architect` | `max` | planning cost dominates token cost — wrong plan blows the workflow |
+| `researcher` | `xhigh` | same shape as architect, slightly less depth required |
+| `qa` / `reviewer` | `high` | verdict-bearing reviewers must catch defects developer iterations miss |
+| `developer` | `medium` | bounded per-iteration thinking; the feedback loop drives correctness |
+| `committer` | `low` | mechanical step (commit message + push); no analysis needed |
+
+All other handlers (the 12 `pr-*` category reviewers, `feedback-analyzer`, `pr-replier`, `pr-consolidator`, `qa-analyzer`, `develop-only`/`develop`-aliased handlers) currently inherit the `high` default. Touch the map when tuning, not the handler registrations.
+
 ## Handler implementations (grouped by workflow)
 
 ### workspace-dev / jira-dev / ci-fix / develop-only

@@ -38,6 +38,7 @@ type AIHandler struct {
 	yolo           bool          // skip permission checks
 	plainText      bool          // skip structured JSON extraction, store raw text
 	backendTimeout time.Duration // hard cap on backend.Run; 0 disables
+	effort         string        // Claude --effort override; empty = claude.go default ("high")
 }
 
 // AIHandlerConfig configures an AI handler.
@@ -68,6 +69,11 @@ type AIHandlerConfig struct {
 	// timeout (legacy behavior). Production should always set this so a
 	// wedged claude/gemini subprocess fails fast instead of hanging.
 	BackendTimeout time.Duration
+	// Effort overrides the Claude CLI --effort reasoning level for this
+	// handler. Valid values: low / medium / high / xhigh / max. Empty falls
+	// through to claude.go's "high" default. No-op on Gemini / Codex
+	// backends — they have no equivalent flag.
+	Effort string
 }
 
 // defaultTemplate returns the prompt-template file name for a handler. The
@@ -122,6 +128,7 @@ func NewAIHandler(cfg AIHandlerConfig) *AIHandler {
 		yolo:           cfg.Yolo,
 		plainText:      cfg.PlainText,
 		backendTimeout: cfg.BackendTimeout,
+		effort:         cfg.Effort,
 	}
 }
 
@@ -239,6 +246,7 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		UserPrompt:   userPrompt,
 		WorkDir:      workDir,
 		Yolo:         h.yolo,
+		Effort:       h.effort,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("handler %s: backend: %w", h.name, err)

@@ -33,6 +33,12 @@ type Request struct {
 	MCPConfig    string    // JSON MCP server config (passed via --mcp-config for Claude).
 	SessionID    string    // "latest" to continue most recent, or a specific session ID to resume.
 	Output       io.Writer // Optional: stream extracted text here in real-time (tee'd with capture buffer).
+	// Effort sets the Claude CLI --effort reasoning level. Valid values
+	// follow the Claude CLI (low / medium / high / xhigh / max). Empty
+	// keeps the historical default ("high"). Ignored by Gemini and Codex —
+	// neither CLI exposes an equivalent knob; per-persona reasoning tuning
+	// only takes effect on the claude backend.
+	Effort string
 }
 
 // Response captures the result of an AI backend execution.

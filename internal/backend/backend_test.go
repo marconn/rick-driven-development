@@ -102,11 +102,44 @@ func TestClaudeBuildArgs(t *testing.T) {
 			// --effort high is the belt-and-suspenders companion: documented
 			// in `claude --help` (unlike --max-thinking-tokens, which is
 			// hidden) so if Anthropic ever removes the hidden flag we still
-			// pin reasoning budget via the stable CLI surface.
+			// pin reasoning budget via the stable CLI surface. "high" is the
+			// default applied when Request.Effort is empty.
 			assertArgPair(t, args, "--effort", "high")
 			if t.Failed() {
 				t.Fatalf("shape %d: missing thinking-budget flags (args=%v)", i, args)
 			}
+		}
+	})
+
+	// Per-persona effort overrides: handlers register with custom Effort
+	// (e.g., architect=max, researcher=xhigh, committer=low). The Request
+	// must carry that string through to --effort verbatim.
+	t.Run("effort_override_flows_through", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			effort string
+		}{
+			{"low", "low"},
+			{"medium", "medium"},
+			{"high_explicit", "high"},
+			{"xhigh", "xhigh"},
+			{"max", "max"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				args, _ := c.buildArgs(Request{
+					SystemPrompt: "sys",
+					UserPrompt:   "msg",
+					Effort:       tc.effort,
+				})
+				assertArgPair(t, args, "--effort", tc.effort)
+				// --max-thinking-tokens must remain pinned regardless of
+				// effort level — it bounds the silent-thinking window even
+				// at xhigh/max, which is what makes those levels safe to
+				// pick (the historical concern that motivated pinning was
+				// silent-window blow-up; the cap fixes that independently).
+				assertArgPair(t, args, "--max-thinking-tokens", "31999")
+			})
 		}
 	})
 

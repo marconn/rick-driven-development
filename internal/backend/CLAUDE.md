@@ -17,7 +17,7 @@ Wraps `claude`, `gemini`, and `codex` CLI binaries as a uniform `Backend` interf
 
 ## Key types
 - `Backend` — interface: `Name()`, `Run(ctx, Request) (*Response, error)`.
-- `Request` — `SystemPrompt`, `UserPrompt`, `Model`, `WorkDir`, `Yolo`, `MCPConfig`, `SessionID` (`""` new / `"latest"` continue / specific id resume), `Output` (optional tee for streaming).
+- `Request` — `SystemPrompt`, `UserPrompt`, `Model`, `WorkDir`, `Yolo`, `MCPConfig`, `SessionID` (`""` new / `"latest"` continue / specific id resume), `Output` (optional tee for streaming), `Effort` (Claude CLI `--effort` reasoning level: `low`/`medium`/`high`/`xhigh`/`max`; empty falls back to `"high"`; ignored by Gemini and Codex — no equivalent flag).
 - `Response` — `Output` (full captured text), `StopReason`, `Duration`.
 - `StreamWriter` — io.Writer that splits NDJSON, applies `ExtractFn` and optional `CheckResultFn`; `Close()` flushes trailing partial line.
 - `ExtractFn` / `CheckResultFn` — per-line text extractor and stop-reason inspector.

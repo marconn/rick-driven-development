@@ -53,17 +53,18 @@ func (c *Claude) buildArgs(req Request) (args []string, stdinPrompt string) {
 	// anthropics/claude-code#20127: in CLI v2.1.8+, stream-json silently
 	// drops thinking blocks, so a model that decides to think before
 	// emitting any other stdout looks like a wedged subprocess. Pinning a
-	// finite budget bounds the silent window — the model has to commit to
-	// emitting something within the cap rather than drifting on adaptive
-	// thinking. 31999 keeps us one token under the 32K Anthropic ceiling.
-	// --effort is the belt-and-suspenders companion: --max-thinking-tokens
-	// is a hidden/undocumented flag (absent from `claude --help` on 2.1.117)
-	// and could disappear in a future CLI release, while --effort is
-	// documented and maps to the same reasoning-budget concept. Pinning
-	// "high" keeps us on the upper end of the documented scale without
-	// going to "xhigh"/"max" which would make the silent-thinking window
-	// worse than adaptive.
-	args = append(args, "--max-thinking-tokens", "31999", "--effort", "high")
+	// finite budget bounds the silent window regardless of the effort
+	// level the caller picks — even at --effort xhigh/max the silent
+	// window stays capped because --max-thinking-tokens is the hard
+	// ceiling. --effort is the documented companion knob; persona-specific
+	// values come from internal/handler personaEffort. Empty Effort keeps
+	// the historical default "high" so handlers without an override see
+	// no behavior change.
+	effort := req.Effort
+	if effort == "" {
+		effort = "high"
+	}
+	args = append(args, "--max-thinking-tokens", "31999", "--effort", effort)
 
 	if req.Yolo {
 		args = append(args, "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions")

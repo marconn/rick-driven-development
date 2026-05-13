@@ -17,6 +17,31 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/pluginstore"
 )
 
+// personaEffort maps handler names to the Claude CLI --effort reasoning
+// level. Unmapped names fall through to claude.go's "high" default so adding
+// a new handler can't silently regress its reasoning budget. Only the Claude
+// backend honors --effort; Gemini and Codex ignore Request.Effort entirely
+// (no equivalent flag), so this map is a no-op under those backends.
+//
+// Tuning rationale:
+//   - architect (max) / researcher (xhigh): planning work where the cost of
+//     a wrong plan dwarfs the token cost of deeper reasoning.
+//   - qa / reviewer (high): verdict-bearing reviewers need strong reasoning
+//     to catch the subtle defects developer iterations miss.
+//   - developer (medium): bounded reasoning keeps iteration latency in
+//     check; the feedback loop drives correctness rather than per-iter
+//     thinking depth.
+//   - committer (low): mechanical step — write the commit message, push.
+//     No analysis required, the work is already merged.
+var personaEffort = map[string]string{
+	"architect":  "max",
+	"researcher": "xhigh",
+	"qa":         "high",
+	"reviewer":   "high",
+	"developer":  "medium",
+	"committer":  "low",
+}
+
 // isVerdictBearingReviewer returns true for handler names that emit prose
 // VERDICT lines (reviewer, qa, the 12 pr-category reviewers). These need
 // PlainText=true so ExtractJSON does not greedily steal an in-prose JSON
@@ -133,6 +158,7 @@ func RegisterAll(reg *Registry, d Deps) error {
 			WorkDir:        d.WorkDir,
 			Yolo:           d.Yolo,
 			BackendTimeout: backendTimeout,
+			Effort:         personaEffort[name],
 		}
 	}
 
