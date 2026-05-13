@@ -57,15 +57,15 @@ Rick (the system you built, named after yourself because obviously) executes dev
 1. **Jira ticket → jira-dev**: When a Jira ticket is involved (PROJ-*, or any PROJECT-* format), ALWAYS use dag=jira-dev. It fetches ticket context, resolves the repo from Jira labels/components, and provisions the workspace automatically. The system auto-upgrades workspace-dev to jira-dev when ticket is provided, but be explicit.
 2. **GitHub issue → github-dev**: When the operator references a GitHub issue (e.g. "huli/tools#641" or "github.com/huli/tools/issues/641"), ALWAYS use dag=github-dev with source=gh:owner/repo#N. Mirrors jira-dev but reads context from the GitHub Issue; the workspace branch is named 'issue-<N>', not a random correlation suffix. Reject PRs — use pr-review/pr-feedback for those.
 3. **GitHub PR → pr-review or pr-feedback**: When working with a GitHub PR, use pr-review (new review) or pr-feedback (address comments).
-4. **Generic prompt → workspace-dev**: Only when there's no ticket, no issue, and no PR — just a free-form coding task with repo specified. Produces a 'rick/<corr8>' branch (cosmetic fallback); prefer a ticket/issue whenever one exists.
+4. **Generic prompt → workspace-dev**: Only when there's no ticket, no issue, and no PR — just a free-form coding task with repo specified. **You MUST also pass a kebab-case verb-led branch name via the 'branch' arg** (e.g. add-rate-limiter, fix-pagination-bug); the workspace handler refuses to auto-generate branch names. Prefer a ticket/issue whenever one exists so the branch name comes from real metadata.
 5. **NEVER call rick_workspace_setup before rick_run_workflow**. Workflows provision their own workspace internally. rick_workspace_setup is only for ad-hoc jobs (rick_run, rick_consult) that need a working directory.
 
 | DAG | When to Use |
 |-----|-------------|
 | jira-dev | Implementing a Jira ticket — fetches ticket context, resolves repo, provisions workspace, full pipeline. **Use whenever a Jira ticket is involved.** |
 | github-dev | Implementing a GitHub issue — fetches issue via source=gh:owner/repo#N, branches as issue-<N>, full pipeline. **Use whenever a GitHub issue is referenced.** |
-| workspace-dev | General tasks with repo but NO ticket/issue (workspace → research → architect → dev → review → QA → commit). Default DAG. Requires repo param. |
-| develop-only | Quick code changes — skip research/architecture (workspace → dev → review → commit). Requires repo param. |
+| workspace-dev | General tasks with repo but NO ticket/issue (workspace → research → architect → dev → review → QA → commit). Default DAG. Requires repo param AND an explicit 'branch' arg (kebab-case verb-led, e.g. add-rate-limiter). |
+| develop-only | Quick code changes — skip research/architecture (workspace → dev → review → commit). Requires repo param AND an explicit 'branch' arg. |
 | pr-review | Reviewing an existing PR — clones repo, fetches Jira context, runs 3 parallel reviewers |
 | pr-feedback | Processing PR review feedback — provisions workspace, fixes comments from a previous PR review |
 | ci-fix | Fixing CI failures — provisions workspace, auto-diagnoses and fixes build/test failures |

@@ -421,12 +421,13 @@ func TestWorkspaceHandlerRepoBranchSuppressesEnrichmentTicket(t *testing.T) {
 	}
 }
 
-// TestWorkspaceHandlerDefaultsBranchWhenOnlyRepoProvided is a regression test
-// for workflow c4187d2c-1a0a-4944-a7c2-75631e900865: workspace-dev with
-// repo but no ticket/branch failed at workspace with
-// "ticket or branch is required". The handler now synthesizes a
-// correlation-derived branch name so generic workspace-dev callers work.
-func TestWorkspaceHandlerDefaultsBranchWhenOnlyRepoProvided(t *testing.T) {
+// TestWorkspaceHandlerRejectsMissingBranchIdentifier covers the contract that
+// replaces the historical `rick/<corr8>` fallback: a code-producing workflow
+// with repo but no ticket and no repo_branch must fail at the workspace
+// handler so the operator is forced to supply a meaningful branch name (via
+// ticket=<key> or branch=<name> at the MCP layer, or via a context-enriching
+// DAG like github-dev / pr-* / jira-dev).
+func TestWorkspaceHandlerRejectsMissingBranchIdentifier(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("RICK_REPOS_PATH", tmp)
 	setupTestGitRepo(t, tmp, "huli")
@@ -452,19 +453,14 @@ func TestWorkspaceHandlerDefaultsBranchWhenOnlyRepoProvided(t *testing.T) {
 
 	h := &WorkspaceHandler{store: store, name: "workspace"}
 	got, err := h.Handle(context.Background(), startedEvt)
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
+	if err == nil {
+		t.Fatalf("expected error for missing branch identifier, got events=%+v", got)
 	}
-	if len(got) != 1 || got[0].Type != event.WorkspaceReady {
-		t.Fatalf("expected WorkspaceReady event, got %+v", got)
+	if !strings.Contains(err.Error(), "branch identifier") {
+		t.Errorf("error=%q, want substring %q", err.Error(), "branch identifier")
 	}
-
-	var payload event.WorkspaceReadyPayload
-	if err := json.Unmarshal(got[0].Payload, &payload); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if payload.Branch != "rick/c4187d2c" {
-		t.Errorf("branch=%q, want rick/c4187d2c (correlation-derived default)", payload.Branch)
+	if len(got) != 0 {
+		t.Errorf("expected no events on error, got %d", len(got))
 	}
 }
 

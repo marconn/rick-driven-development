@@ -53,20 +53,28 @@ func (h *WorkspaceHandler) Handle(ctx context.Context, env event.Envelope) ([]ev
 		return nil, fmt.Errorf("workspace handler: ticket %q provided but repo is missing — use dag=jira-dev or pass repo explicitly", params.Ticket)
 	}
 
-	// Use first 8 chars of correlation as suffix to avoid workspace collisions
-	// when multiple workflows run for the same repo/ticket.
+	// Code-producing workflows require an operator-supplied branch identifier.
+	// The historical `rick/<corr8>` fallback was removed because the resulting
+	// branch names carried zero intent and surfaced on every PR Rick opened.
+	// Operators must now pass one of: ticket (Jira key → jira-dev branches the
+	// workspace on the key), branch (free-form name for workspace-dev /
+	// develop-only), or use a DAG whose upstream handler emits a branch via
+	// ContextEnrichment (github-dev → issue-<N>, pr-* → PR head branch).
+	if params.Ticket == "" && params.RepoBranch == "" {
+		return nil, fmt.Errorf(
+			"workspace handler: code-producing workflow requires a branch identifier — " +
+				"pass ticket=<key> for Jira-driven runs (auto-routes to jira-dev), " +
+				"pass branch=<name> for free-form runs, " +
+				"or select a DAG that derives the branch (github-dev / pr-review / pr-feedback / ci-fix)",
+		)
+	}
+
+	// First 8 chars of correlation disambiguate the workspace directory when
+	// two workflows target the same repo/ticket concurrently. Does NOT touch
+	// the branch name — that comes from ticket or RepoBranch verbatim.
 	suffix := env.CorrelationID
 	if len(suffix) > 8 {
 		suffix = suffix[:8]
-	}
-
-	// workspace-dev callers often provide only `repo` — no upstream handler
-	// enriches a ticket and no PR exists to derive a branch. Default to a
-	// correlation-derived branch so SetupWorkspace can proceed instead of
-	// failing with "ticket or branch is required". The suffix is unique
-	// per workflow, matching the workspace directory naming convention.
-	if params.Ticket == "" && params.RepoBranch == "" {
-		params.Ticket = "rick/" + suffix
 	}
 
 	result, err := workspace.SetupWorkspace(

@@ -136,7 +136,11 @@ func (s *Server) registerBuiltinTools() { //nolint:funlen // tool registration i
 					},
 					"ticket": map[string]any{
 						"type":        "string",
-						"description": "Issue tracker ticket ID, e.g. 'PROJ-123'.",
+						"description": "Issue tracker ticket ID, e.g. 'PROJ-123'. Doubles as the branch name; auto-routes workspace-dev → jira-dev.",
+					},
+					"branch": map[string]any{
+						"type":        "string",
+						"description": "Free-form branch name for code-producing workflows (workspace-dev / develop-only) when no ticket exists. Use kebab-case verbs, e.g. 'add-rate-limiter'. Ignored by github-dev / pr-* / jira-dev (they derive their own branch). Mutually exclusive with ticket — pass one or the other.",
 					},
 				},
 				"required": []string{"prompt"},
@@ -492,6 +496,7 @@ type runWorkflowArgs struct {
 	Repo     string `json:"repo,omitempty"`
 	PRNumber int    `json:"pr_number,omitempty"`
 	Ticket   string `json:"ticket,omitempty"`
+	Branch   string `json:"branch,omitempty"` // free-form branch name; rides on Ticket once DAG auto-swap has resolved
 }
 
 type runWorkflowResult struct {
@@ -535,7 +540,7 @@ func (s *Server) toolRunWorkflow(ctx context.Context, raw json.RawMessage) (any,
 		// Auto-select github-dev when the caller supplied a gh:owner/repo#N
 		// issue reference but no explicit DAG. github-dev runs github-context,
 		// which enriches the workflow with ticket=issue-<N> so the workspace
-		// handler produces a human-readable branch instead of rick/<corr>.
+		// handler gets a meaningful branch via ContextEnrichment.
 		// Skip when pr_number is set — that path targets a PR (pr-review /
 		// pr-feedback), not an issue, and github-context would hard-fail.
 		if args.PRNumber == 0 && strings.HasPrefix(args.Source, "gh:") && strings.Contains(args.Source, "#") {
@@ -549,6 +554,28 @@ func (s *Server) toolRunWorkflow(ctx context.Context, raw json.RawMessage) (any,
 	// workspace-dev would silently fail because it has no repo info.
 	if args.Ticket != "" && args.DAG == "workspace-dev" {
 		args.DAG = "jira-dev"
+	}
+
+	// Reject ambiguous input early: ticket + branch passed together has no
+	// coherent meaning — ticket already determines the branch name and routes
+	// to jira-dev.
+	if args.Ticket != "" && args.Branch != "" {
+		return nil, fmt.Errorf("pass either ticket or branch, not both: ticket=%q drives jira-dev with the key as the branch name, branch=%q is for free-form workspace-dev runs", args.Ticket, args.Branch)
+	}
+
+	// Branch flows through the existing Ticket → branch-name path in the
+	// workspace handler. We only set it when the DAG won't auto-derive its
+	// own branch (workspace-dev / develop-only); for github-dev / pr-* /
+	// jira-dev / ci-fix the upstream context handler supplies the branch via
+	// ContextEnrichment and an operator-supplied branch would be ignored
+	// anyway — surface that as an error instead of silently dropping it.
+	if args.Branch != "" {
+		switch args.DAG {
+		case "workspace-dev", "develop-only":
+			args.Ticket = args.Branch
+		default:
+			return nil, fmt.Errorf("branch=%q is only valid for workspace-dev / develop-only — %s derives its branch from upstream context (ticket / PR / issue)", args.Branch, args.DAG)
+		}
 	}
 
 	// Validate and register the workflow definition if not already registered

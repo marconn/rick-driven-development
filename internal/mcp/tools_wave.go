@@ -296,8 +296,9 @@ func (r resolvedWaveSource) ghParent() string {
 // defaultDAGForSource picks the built-in default DAG for a wave source when
 // neither the caller nor the dag_map supplied one. GitHub sources default to
 // github-dev so the workspace branch comes out as "issue-<N>" (via the
-// github-context handler) instead of the generic "rick/<corr>" fallback;
-// Jira sources default to jira-dev for the parallel reason.
+// github-context handler); Jira sources default to jira-dev for the parallel
+// reason — both DAGs derive a meaningful branch automatically, whereas
+// workspace-dev now refuses to run without an operator-supplied ticket/branch.
 func defaultDAGForSource(src resolvedWaveSource) string {
 	switch src.Kind {
 	case "github", "github_project":
@@ -1046,9 +1047,11 @@ func buildWaveTickets(assigned map[string]int, nodes map[string]*waveNode, order
 //  3. Otherwise, if the child has an open PR referencing it (Closes/Fixes) →
 //     pr-feedback against that PR.
 //  4. Fall back to dag_map["default"] or the source-kind default
-//     ("github-dev" for GitHub sources, "workspace-dev" otherwise). Using
-//     github-dev routes the child through the github-context handler so the
-//     workspace branch is named "issue-<N>" instead of "rick/<corr>".
+//     ("github-dev" for GitHub sources, "jira-dev" otherwise). Both DAGs run a
+//     context handler before workspace, so the workspace branch is named from
+//     real metadata (issue-<N> / PROJ-key) — workspace-dev is intentionally
+//     NOT in the fallback chain because it refuses to run without an
+//     operator-supplied branch identifier.
 //
 // The chosen DAG is written back into waveNode.dag so the launcher can pick
 // it up without re-running label logic.
