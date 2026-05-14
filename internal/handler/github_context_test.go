@@ -245,6 +245,143 @@ func TestGithubContextHandler_Handle_NoReference(t *testing.T) {
 	}
 }
 
+func TestGithubContextHandler_Handle_RefusesClosedIssue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"number": 891,
+			"title": "BE: Day-4 hardening bundle",
+			"state": "closed",
+			"state_reason": "completed",
+			"closed_at": "2025-11-12T18:33:21Z",
+			"body": "shipped at PR #1086"
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	store := newJiraContextMockStore()
+	payload, _ := json.Marshal(event.WorkflowRequestedPayload{
+		Source: "gh:acme/widgets#891",
+		Prompt: "Implement acme/widgets#891",
+	})
+	store.correlationEvents["corr-closed"] = []event.Envelope{
+		{Type: event.WorkflowRequested, CorrelationID: "corr-closed", Payload: payload},
+	}
+
+	h := &GithubContextHandler{store: store, github: gh.NewClientWithBase(srv.URL, "tok")}
+
+	_, err := h.Handle(context.Background(), event.Envelope{CorrelationID: "corr-closed"})
+	if err == nil {
+		t.Fatal("expected error for closed issue, got nil")
+	}
+	for _, want := range []string{"closed", "state_reason=\"completed\"", "allow-closed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %q; got: %v", want, err)
+		}
+	}
+}
+
+func TestGithubContextHandler_Handle_AllowClosedOverride(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"number": 891,
+			"title": "BE: Day-4 hardening bundle",
+			"state": "closed",
+			"state_reason": "completed",
+			"closed_at": "2025-11-12T18:33:21Z",
+			"body": "shipped at PR #1086"
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	store := newJiraContextMockStore()
+	payload, _ := json.Marshal(event.WorkflowRequestedPayload{
+		Source: "gh:acme/widgets#891",
+		Prompt: "Re-implement acme/widgets#891 in a fresh branch — allow-closed",
+	})
+	store.correlationEvents["corr-allow"] = []event.Envelope{
+		{Type: event.WorkflowRequested, CorrelationID: "corr-allow", Payload: payload},
+	}
+
+	h := &GithubContextHandler{store: store, github: gh.NewClientWithBase(srv.URL, "tok")}
+
+	results, err := h.Handle(context.Background(), event.Envelope{CorrelationID: "corr-allow"})
+	if err != nil {
+		t.Fatalf("override should allow closed issue: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 enrichment event, got %d", len(results))
+	}
+
+	var enrichment event.ContextEnrichmentPayload
+	if err := json.Unmarshal(results[0].Payload, &enrichment); err != nil {
+		t.Fatalf("unmarshal enrichment: %v", err)
+	}
+	for _, want := range []string{"State reason", "completed", "Closed at", "2025-11-12"} {
+		if !strings.Contains(enrichment.Summary, want) {
+			t.Errorf("override summary missing %q; got:\n%s", want, enrichment.Summary)
+		}
+	}
+}
+
+func TestGithubContextHandler_Handle_OpenIssueIgnoresOverride(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"number": 7,
+			"title": "Still open",
+			"state": "open",
+			"body": "work to do"
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	store := newJiraContextMockStore()
+	payload, _ := json.Marshal(event.WorkflowRequestedPayload{
+		Source: "gh:acme/widgets#7",
+		Prompt: "Implement acme/widgets#7",
+	})
+	store.correlationEvents["corr-open"] = []event.Envelope{
+		{Type: event.WorkflowRequested, CorrelationID: "corr-open", Payload: payload},
+	}
+
+	h := &GithubContextHandler{store: store, github: gh.NewClientWithBase(srv.URL, "tok")}
+
+	results, err := h.Handle(context.Background(), event.Envelope{CorrelationID: "corr-open"})
+	if err != nil {
+		t.Fatalf("open issue should pass unconditionally: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 enrichment event, got %d", len(results))
+	}
+	var enrichment event.ContextEnrichmentPayload
+	_ = json.Unmarshal(results[0].Payload, &enrichment)
+	if strings.Contains(enrichment.Summary, "State reason") {
+		t.Errorf("open issue should not render state reason; got:\n%s", enrichment.Summary)
+	}
+}
+
+func TestHasAllowClosedOverride(t *testing.T) {
+	cases := []struct {
+		prompt string
+		want   bool
+	}{
+		{"", false},
+		{"Implement #42", false},
+		{"Implement #42 — allow-closed", true},
+		{"allow-closed", true},
+		{"allow_closed", false},   // underscore variant must NOT match — typo guard
+		{"Allow-Closed", false},   // case-sensitive — operator must type it as documented
+		{"allowclosed", false},    // missing hyphen
+	}
+	for _, c := range cases {
+		if got := hasAllowClosedOverride(c.prompt); got != c.want {
+			t.Errorf("hasAllowClosedOverride(%q) = %v, want %v", c.prompt, got, c.want)
+		}
+	}
+}
+
 func TestGithubContextHandler_Handle_NilGithubClient(t *testing.T) {
 	store := newJiraContextMockStore()
 	payload, _ := json.Marshal(event.WorkflowRequestedPayload{Source: "gh:acme/widgets#7"})

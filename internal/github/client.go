@@ -376,6 +376,11 @@ type Issue struct {
 	Title     string     `json:"title"`
 	Body      string     `json:"body"`
 	State     string     `json:"state"`
+	// StateReason is GitHub's classification when state="closed": "completed"
+	// (resolved by code/PR), "not_planned" (deliberately abandoned), or "" for
+	// issues closed before the field existed (pre-2022) or by older API paths.
+	StateReason string     `json:"state_reason"`
+	ClosedAt    string     `json:"closed_at"`
 	HTMLURL   string     `json:"html_url"`
 	Labels    []IssueLabel `json:"labels"`
 	User      User       `json:"user"`

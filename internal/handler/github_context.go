@@ -58,6 +58,13 @@ func (h *GithubContextHandler) Handle(ctx context.Context, env event.Envelope) (
 	if issue.PullRequest != nil {
 		return nil, fmt.Errorf("github-context: %s/%s#%d is a pull request, not an issue — use dag=pr-review instead", owner, repo, number)
 	}
+	if issue.State == "closed" && !hasAllowClosedOverride(params.Prompt) {
+		return nil, fmt.Errorf(
+			"github-context: %s/%s#%d is closed (state_reason=%q, closed_at=%q) — refusing to implement already-resolved work; "+
+				"if this is intentional (re-implementation, intentional revert, separate copy), add the directive `allow-closed` to the prompt",
+			owner, repo, number, issue.StateReason, issue.ClosedAt,
+		)
+	}
 
 	enrichment := buildGithubIssueEnrichment(owner, repo, number, issue)
 	enrichEvt := event.New(event.ContextEnrichment, 1, event.MustMarshal(enrichment)).
@@ -88,6 +95,15 @@ func (h *GithubContextHandler) loadWorkflowRequested(ctx context.Context, correl
 	}
 
 	return event.WorkflowRequestedPayload{}, nil
+}
+
+// hasAllowClosedOverride reports whether the operator opted in to running
+// github-dev against a closed issue. The directive is a literal `allow-closed`
+// substring in the workflow prompt — kept simple so the error message can
+// quote it verbatim and the operator types it deliberately rather than
+// accidentally.
+func hasAllowClosedOverride(prompt string) bool {
+	return strings.Contains(prompt, "allow-closed")
 }
 
 // resolveGithubIssueRef extracts owner/repo/issue-number from the workflow
@@ -127,6 +143,14 @@ func buildGithubIssueEnrichment(owner, repo string, number int, issue *gh.Issue)
 	fmt.Fprintf(&sb, "**Title**: %s\n", issue.Title)
 	if issue.State != "" {
 		fmt.Fprintf(&sb, "**State**: %s\n", issue.State)
+	}
+	if issue.State == "closed" {
+		if issue.StateReason != "" {
+			fmt.Fprintf(&sb, "**State reason**: %s\n", issue.StateReason)
+		}
+		if issue.ClosedAt != "" {
+			fmt.Fprintf(&sb, "**Closed at**: %s\n", issue.ClosedAt)
+		}
 	}
 	if issue.User.Login != "" {
 		fmt.Fprintf(&sb, "**Author**: @%s\n", issue.User.Login)
