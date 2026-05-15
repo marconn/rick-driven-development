@@ -238,8 +238,12 @@ func fireWorkflowDirect(ctx context.Context, t *testing.T, store eventstore.Stor
 //  - Every Graph key must be in Required (no orphan handlers)
 
 func TestWithoutHandler_RemovesAndRewires(t *testing.T) {
-	// workspace-dev: committer depends on quality-gate, quality-gate depends on [reviewer, qa].
-	// After removing quality-gate, committer should depend on [reviewer, qa].
+	// workspace-dev: committer depends on quality-gate, which depends on
+	// review-consolidator (the synchronization barrier over {reviewer, qa}).
+	// After removing quality-gate, committer should inherit quality-gate's
+	// predecessor — the consolidator. WithoutHandler is the path
+	// RICK_DISABLE_QUALITY_GATE travels, so this exercises the rewire used
+	// by VM-less operators.
 	def := WorkspaceDevWorkflowDef()
 	got := WithoutHandler(def, "quality-gate")
 
@@ -253,19 +257,49 @@ func TestWithoutHandler_RemovesAndRewires(t *testing.T) {
 		t.Fatal("quality-gate still in Graph")
 	}
 
-	// committer must now depend on reviewer + qa (quality-gate's predecessors).
+	// committer must now depend on the consolidator (quality-gate's only
+	// predecessor in the rewired Graph).
 	committerDeps := got.Graph["committer"]
 	depSet := make(map[string]bool, len(committerDeps))
 	for _, d := range committerDeps {
 		depSet[d] = true
 	}
-	if !depSet["reviewer"] || !depSet["qa"] {
-		t.Errorf("committer deps = %v, want reviewer and qa", committerDeps)
+	if !depSet["review-consolidator"] {
+		t.Errorf("committer deps = %v, want review-consolidator", committerDeps)
 	}
 
 	// Original def must be unmodified (Graph is a reference type — WithoutHandler must copy).
 	if _, exists := def.Graph["quality-gate"]; !exists {
 		t.Fatal("original def was mutated — quality-gate missing from original Graph")
+	}
+}
+
+// TestWithoutHandler_RemovesConsolidator covers the alternate disable path:
+// when SynchronousFeedback is rolled back at registration time (via the env
+// kill switch) we should be able to remove the consolidator and have
+// quality-gate inherit its predecessors so the workflow still composes.
+func TestWithoutHandler_RemovesConsolidator(t *testing.T) {
+	def := WorkspaceDevWorkflowDef()
+	got := WithoutHandler(def, "review-consolidator")
+
+	for _, r := range got.Required {
+		if r == "review-consolidator" {
+			t.Fatal("review-consolidator still in Required")
+		}
+	}
+	if _, exists := got.Graph["review-consolidator"]; exists {
+		t.Fatal("review-consolidator still in Graph")
+	}
+
+	// quality-gate must now depend directly on reviewer + qa (consolidator's
+	// predecessors).
+	qgDeps := got.Graph["quality-gate"]
+	depSet := make(map[string]bool, len(qgDeps))
+	for _, d := range qgDeps {
+		depSet[d] = true
+	}
+	if !depSet["reviewer"] || !depSet["qa"] {
+		t.Errorf("quality-gate deps = %v, want reviewer and qa", qgDeps)
 	}
 }
 
@@ -1078,7 +1112,7 @@ func TestCheckJoinCondition_FeedbackInvalidatesStale(t *testing.T) {
 
 	// quality-gate joins on [reviewer, qa]. Both completed in round 1 but
 	// FeedbackGenerated invalidated them. Join must NOT be satisfied.
-	satisfied, _, _, _ := resolver.checkJoinCondition(ctx, []string{"reviewer", "qa"}, corrID)
+	satisfied, _, _, _ := resolver.checkJoinCondition(ctx, "test-handler", []string{"reviewer", "qa"}, corrID)
 	if satisfied {
 		t.Error("join should NOT be satisfied — reviewer and qa completions are stale (before FeedbackGenerated)")
 	}
@@ -1144,7 +1178,7 @@ func TestCheckJoinCondition_FreshAfterFeedback(t *testing.T) {
 	seedEvent("qa", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "qa"})))
 
 	// quality-gate joins on [reviewer, qa]. Both re-completed after feedback.
-	satisfied, _, _, _ := resolver.checkJoinCondition(ctx, []string{"reviewer", "qa"}, corrID)
+	satisfied, _, _, _ := resolver.checkJoinCondition(ctx, "test-handler", []string{"reviewer", "qa"}, corrID)
 	if !satisfied {
 		t.Error("join should be satisfied — reviewer and qa completed AFTER FeedbackGenerated")
 	}
@@ -1202,7 +1236,7 @@ func TestCheckJoinCondition_MultipleIterations(t *testing.T) {
 	})))
 
 	// After feedback #1, stale reviewer must not satisfy join.
-	sat1, _, _, _ := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
+	sat1, _, _, _ := resolver.checkJoinCondition(ctx, "test-handler", []string{"reviewer"}, corrID)
 	if sat1 {
 		t.Error("iteration 1: reviewer should be stale after first FeedbackGenerated")
 	}
@@ -1217,7 +1251,7 @@ func TestCheckJoinCondition_MultipleIterations(t *testing.T) {
 	})))
 
 	// After feedback #2, round 2 reviewer is stale again.
-	sat2, _, _, _ := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
+	sat2, _, _, _ := resolver.checkJoinCondition(ctx, "test-handler", []string{"reviewer"}, corrID)
 	if sat2 {
 		t.Error("iteration 2: reviewer should be stale after second FeedbackGenerated")
 	}
@@ -1227,7 +1261,7 @@ func TestCheckJoinCondition_MultipleIterations(t *testing.T) {
 	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
 
 	// No more feedback — join should be satisfied.
-	sat3, _, _, _ := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
+	sat3, _, _, _ := resolver.checkJoinCondition(ctx, "test-handler", []string{"reviewer"}, corrID)
 	if !sat3 {
 		t.Error("iteration 3: reviewer should be satisfied — no feedback after round 3")
 	}
@@ -1291,7 +1325,7 @@ func TestCheckJoinCondition_PartialRefire(t *testing.T) {
 	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
 
 	// quality-gate joins on [reviewer, qa]. qa is stale — join must NOT be satisfied.
-	satisfied, _, _, _ := resolver.checkJoinCondition(ctx, []string{"reviewer", "qa"}, corrID)
+	satisfied, _, _, _ := resolver.checkJoinCondition(ctx, "test-handler", []string{"reviewer", "qa"}, corrID)
 	if satisfied {
 		t.Error("join should NOT be satisfied — qa has not re-completed after feedback")
 	}
@@ -1377,7 +1411,7 @@ func TestCheckJoinCondition_AdvisoryVerdictDoesNotBlockDownstream(t *testing.T) 
 
 	// committer joins on [quality-gate]. The advisory verdict must NOT block
 	// the join — it is operator-escalated, not a pending-feedback gate.
-	satisfied, _, missing, err := resolver.checkJoinCondition(ctx, []string{"quality-gate"}, corrID)
+	satisfied, _, missing, err := resolver.checkJoinCondition(ctx, "test-handler", []string{"quality-gate"}, corrID)
 	if err != nil {
 		t.Fatalf("checkJoinCondition: %v", err)
 	}
@@ -1445,7 +1479,7 @@ func TestCheckJoinCondition_NonAdvisoryFailStillBlocks(t *testing.T) {
 	})))
 	seedEvent("reviewer", event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{Persona: "reviewer"})))
 
-	satisfied, _, missing, err := resolver.checkJoinCondition(ctx, []string{"reviewer"}, corrID)
+	satisfied, _, missing, err := resolver.checkJoinCondition(ctx, "test-handler", []string{"reviewer"}, corrID)
 	if err != nil {
 		t.Fatalf("checkJoinCondition: %v", err)
 	}

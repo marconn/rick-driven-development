@@ -278,7 +278,7 @@ func (w *workflowResolver) effectiveAfterPersonas(h handler.Handler, correlation
 //     should retry once before giving up; the error case is distinguishable
 //     from legit unsatisfaction so transient store hiccups don't look like
 //     wedges in the drop-reason telemetry.
-func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPersonas []string, correlationID string) (bool, string, []string, error) {
+func (w *workflowResolver) checkJoinCondition(ctx context.Context, requestingHandler string, requiredPersonas []string, correlationID string) (bool, string, []string, error) {
 	events, err := w.store.LoadByCorrelation(ctx, correlationID)
 	if err != nil {
 		return false, "", nil, fmt.Errorf("load correlation chain: %w", err)
@@ -407,8 +407,20 @@ func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPerso
 			// signal to advance, and the runner's pauser/blocked-replay path
 			// drives downstream handlers correctly once the join itself
 			// stops blocking.
-			missing = append(missing, req+"(pending_feedback)")
-			continue
+			//
+			// Bypass: when the requesting handler IS the workflow's named
+			// review-consolidator and the predecessor is one of its
+			// ConsolidatedReviewers, do NOT mark pending_feedback. The
+			// consolidator is the handler responsible for emitting the
+			// FeedbackGenerated that clears the verdict — gating it on the
+			// very verdict it needs to consume is a deadlock. Downstream
+			// consumers (quality-gate, committer) still hit the standard
+			// path via the consolidator's own PersonaCompleted, which the
+			// aggregate clears on its FeedbackGenerated emission.
+			if !isConsolidatorBypass(wfDef, requestingHandler, req) {
+				missing = append(missing, req+"(pending_feedback)")
+				continue
+			}
 		}
 		ids = append(ids, id)
 	}
@@ -418,4 +430,20 @@ func (w *workflowResolver) checkJoinCondition(ctx context.Context, requiredPerso
 
 	sort.Strings(ids)
 	return true, strings.Join(ids, "|"), nil, nil
+}
+
+// isConsolidatorBypass returns true when the join check should ignore the
+// pending_feedback marker for this (requestingHandler, predecessor) pair.
+// The bypass applies only when the requesting handler is the workflow's
+// declared ReviewConsolidator and the predecessor is in ConsolidatedReviewers
+// — i.e., the consolidator is consuming a verdict it is responsible for
+// resolving.
+func isConsolidatorBypass(wfDef *WorkflowDef, requestingHandler, predecessor string) bool {
+	if wfDef == nil || wfDef.ReviewConsolidator == "" {
+		return false
+	}
+	if requestingHandler != wfDef.ReviewConsolidator {
+		return false
+	}
+	return wfDef.IsConsolidatedReviewer(predecessor)
 }

@@ -236,6 +236,17 @@ func RegisterAll(reg *Registry, d Deps) error {
 		NewWorkspace(d),
 		NewContextSnapshot(d),
 		NewQualityGate(d),
+		// Review consolidator — synchronization barrier for parallel reviewer
+		// + qa fan-out. Stateless: rebuilds round state from the event store
+		// each dispatch. Active only in workflows that set
+		// WorkflowDef.SynchronousFeedback and list this handler in their
+		// Graph (see WorkspaceDevWorkflowDef).
+		NewReviewConsolidator(ReviewConsolidatorConfig{
+			Reviewers:     []string{"reviewer", "qa"},
+			TargetPersona: "developer",
+			Store:         d.Store,
+			Logger:        logger,
+		}),
 
 		// PR-specific handlers.
 		NewPRWorkspace(d),

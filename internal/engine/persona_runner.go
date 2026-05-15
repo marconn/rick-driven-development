@@ -299,7 +299,7 @@ func (r *PersonaRunner) RecoverDispatch(handlerName string, env event.Envelope) 
 	// Safety: verify join condition against the store.
 	afterPersonas := r.resolver.effectiveAfterPersonas(h, env.CorrelationID, r.hooks)
 	if len(afterPersonas) > 0 && env.CorrelationID != "" {
-		satisfied, _, _, err := r.resolver.checkJoinCondition(r.ctx, afterPersonas, env.CorrelationID)
+		satisfied, _, _, err := r.resolver.checkJoinCondition(r.ctx, handlerName, afterPersonas, env.CorrelationID)
 		if err != nil {
 			return fmt.Errorf("persona runner: recover dispatch: join check store error: %w", err)
 		}
@@ -629,7 +629,7 @@ func (r *PersonaRunner) wrap(h handler.Handler) eventbus.HandlerFunc {
 		// 6. Join condition check (DAG deps + hooks)
 		afterPersonas := r.resolver.effectiveAfterPersonas(h, env.CorrelationID, r.hooks)
 		if len(afterPersonas) > 0 && env.CorrelationID != "" {
-			satisfied, fingerprint, missing, joinErr := r.resolver.checkJoinCondition(r.ctx, afterPersonas, env.CorrelationID)
+			satisfied, fingerprint, missing, joinErr := r.resolver.checkJoinCondition(r.ctx, h.Name(), afterPersonas, env.CorrelationID)
 			if joinErr != nil {
 				// Transient store error. Unlatch the idempotency entry so a
 				// subsequent event (e.g., the next PersonaCompleted from a

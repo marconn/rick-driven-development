@@ -589,6 +589,20 @@ func (w *WorkflowAggregate) decideVerdictRendered(env event.Envelope) ([]event.E
 		}, nil
 	}
 
+	// Synchronization barrier: in workflows with SynchronousFeedback, the
+	// review-consolidator handler joins on the listed ConsolidatedReviewers
+	// and emits a single merged FeedbackGenerated after both verdicts render
+	// for the same developer iteration. Skip the per-verdict emission here so
+	// the developer doesn't fire twice per round. All escape hatches above
+	// (advisory, byte-identical, max-iter) ran first — those still escalate
+	// on the individual verdict because a single non-convergent reviewer
+	// should not wait for its peer before pausing. Verdicts from personas
+	// outside the consolidated set (quality-gate, committer) fall through to
+	// the standard FeedbackGenerated emission below.
+	if w.WorkflowDef.IsConsolidatedReviewer(sourcePersona) {
+		return nil, nil
+	}
+
 	fbPayload := event.MustMarshal(event.FeedbackGeneratedPayload{
 		TargetPersona:  targetPersona,
 		SourcePersona:  sourcePersona,

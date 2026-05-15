@@ -156,14 +156,15 @@ func TestSelectWorkflowDef_DisableQualityGate(t *testing.T) {
 		t.Error("quality-gate still in Graph with RICK_DISABLE_QUALITY_GATE set")
 	}
 
-	// committer should now depend on reviewer + qa.
+	// committer inherits quality-gate's single predecessor, the
+	// review-consolidator (synchronization barrier over reviewer + qa).
 	deps := def.Graph["committer"]
 	depSet := make(map[string]bool, len(deps))
 	for _, d := range deps {
 		depSet[d] = true
 	}
-	if !depSet["reviewer"] || !depSet["qa"] {
-		t.Errorf("committer deps = %v, want reviewer and qa", deps)
+	if !depSet["review-consolidator"] {
+		t.Errorf("committer deps = %v, want review-consolidator", deps)
 	}
 }
 
@@ -185,14 +186,21 @@ func TestPRFeedbackWorkflowDef_IncludesQualityGate(t *testing.T) {
 		t.Error("quality-gate missing from Required")
 	}
 
-	// quality-gate must depend on reviewer + qa.
+	// quality-gate sits behind the synchronization barrier — its sole
+	// predecessor is the review-consolidator, which joins reviewer + qa.
 	qgDeps := def.Graph["quality-gate"]
-	depSet := make(map[string]bool, len(qgDeps))
-	for _, d := range qgDeps {
-		depSet[d] = true
+	if len(qgDeps) != 1 || qgDeps[0] != "review-consolidator" {
+		t.Errorf("quality-gate deps = %v, want [review-consolidator]", qgDeps)
 	}
-	if !depSet["reviewer"] || !depSet["qa"] {
-		t.Errorf("quality-gate deps = %v, want [reviewer, qa]", qgDeps)
+
+	// review-consolidator joins on reviewer + qa.
+	conDeps := def.Graph["review-consolidator"]
+	conSet := make(map[string]bool, len(conDeps))
+	for _, d := range conDeps {
+		conSet[d] = true
+	}
+	if !conSet["reviewer"] || !conSet["qa"] {
+		t.Errorf("review-consolidator deps = %v, want [reviewer, qa]", conDeps)
 	}
 
 	// committer must depend on quality-gate.
@@ -219,14 +227,14 @@ func TestPRFeedbackWorkflowDef_DisableQualityGate(t *testing.T) {
 		t.Error("quality-gate still in Graph with RICK_DISABLE_QUALITY_GATE set")
 	}
 
-	// committer should now depend on reviewer + qa directly.
+	// committer inherits quality-gate's single predecessor: review-consolidator.
 	deps := def.Graph["committer"]
 	depSet := make(map[string]bool, len(deps))
 	for _, d := range deps {
 		depSet[d] = true
 	}
-	if !depSet["reviewer"] || !depSet["qa"] {
-		t.Errorf("committer deps = %v, want reviewer and qa", deps)
+	if !depSet["review-consolidator"] {
+		t.Errorf("committer deps = %v, want review-consolidator", deps)
 	}
 }
 

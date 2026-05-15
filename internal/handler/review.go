@@ -82,6 +82,10 @@ func (h *ReviewHandler) Handle(ctx context.Context, env event.Envelope) ([]event
 		Issues:        issues,
 		Summary:       verdict.Summary,
 		Source:        verdict.Source,
+		// DevTriggerID is the developer PersonaCompleted ID that triggered
+		// this review. The review-consolidator joins reviewer+qa verdicts by
+		// this key so it never merges across developer iterations.
+		DevTriggerID: string(env.ID),
 	})).WithSource("handler:" + h.ai.name)
 
 	out := append(aiEvents, verdictEvt)

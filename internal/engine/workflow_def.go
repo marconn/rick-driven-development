@@ -2,6 +2,7 @@ package engine
 
 import (
 	"os"
+	"slices"
 	"strconv"
 
 	"github.com/marconn/rick-event-driven-development/internal/event"
@@ -13,6 +14,13 @@ import (
 // effective cap without each call site having to remember to apply it.
 const maxIterationsEnvVar = "RICK_MAX_ITERATION"
 
+// synchronousFeedbackEnvVar is the kill-switch for the review-consolidator
+// synchronization barrier. When set to "0", every registered workflow has its
+// SynchronousFeedback flag forced to false at registration time, reverting to
+// the legacy per-verdict FeedbackGenerated emission path. Restart-only revert;
+// in-flight workflows continue with the snapshot they were registered against.
+const synchronousFeedbackEnvVar = "RICK_SYNCHRONOUS_FEEDBACK"
+
 // applyEnvOverrides returns a copy of def with environment-driven overrides
 // applied. Currently only RICK_MAX_ITERATION; future per-workflow overrides
 // (e.g., RICK_MAX_ITERATION_GITHUB_DEV) can layer in here without touching
@@ -23,6 +31,9 @@ func applyEnvOverrides(def WorkflowDef) WorkflowDef {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			def.MaxIterations = n
 		}
+	}
+	if os.Getenv(synchronousFeedbackEnvVar) == "0" {
+		def.SynchronousFeedback = false
 	}
 	return def
 }
@@ -54,6 +65,50 @@ type WorkflowDef struct {
 	// reviewer does not invalidate the rest — not for feedback-loop
 	// workflows where a single handler failure is load-bearing.
 	PartialReviewOnFailure bool
+	// SynchronousFeedback engages the review-consolidator synchronization
+	// barrier for parallel review fan-outs ({reviewer, qa} after developer).
+	// When true, decideVerdictRendered does NOT emit FeedbackGenerated on a
+	// raw fail verdict from any persona listed in ConsolidatedReviewers — the
+	// review-consolidator handler joins on those personas' VerdictRendered
+	// events for the same developer iteration and emits a single merged
+	// FeedbackGenerated, so the developer fires once per round instead of
+	// once per reviewer. The aggregate's existing escape hatches (advisory
+	// verdict, byte-identical fingerprint, max-iterations) still fire on
+	// individual raw verdicts so non-convergent loops escalate immediately
+	// rather than waiting for the second reviewer.
+	//
+	// Verdicts from personas NOT in ConsolidatedReviewers (e.g. quality-gate,
+	// committer) still emit FeedbackGenerated through the existing
+	// aggregate path — only the reviewer/qa fan-out is gated. Workflows that
+	// set this MUST include "review-consolidator" in their Graph as a join
+	// over the listed reviewers, otherwise feedback effectively dead-ends.
+	// Kill switch: RICK_SYNCHRONOUS_FEEDBACK=0.
+	SynchronousFeedback bool
+	// ConsolidatedReviewers names the personas whose VerdictRendered events
+	// the review-consolidator joins. The aggregate suppresses the per-verdict
+	// FeedbackGenerated emission only for these source personas when
+	// SynchronousFeedback is true. Order is not significant. Empty when
+	// SynchronousFeedback is false.
+	ConsolidatedReviewers []string
+	// ReviewConsolidator names the handler that joins on ConsolidatedReviewers
+	// and emits the merged FeedbackGenerated. When set, the workflow resolver
+	// bypasses the pending_feedback join gate FOR THIS HANDLER ONLY — the
+	// consolidator is the thing that clears the verdict, so it cannot wait on
+	// itself. Downstream consumers (quality-gate, committer) still see the
+	// gate via the standard path. Empty when SynchronousFeedback is false.
+	ReviewConsolidator string
+}
+
+// IsConsolidatedReviewer returns true when the named source persona's verdict
+// is joined by the review-consolidator and the aggregate should therefore
+// suppress its per-verdict FeedbackGenerated. False when SynchronousFeedback
+// is off or the persona is outside the consolidated set (quality-gate,
+// committer, etc., whose feedback still flows through the aggregate).
+func (d *WorkflowDef) IsConsolidatedReviewer(sourcePersona string) bool {
+	if d == nil || !d.SynchronousFeedback || sourcePersona == "" {
+		return false
+	}
+	return slices.Contains(d.ConsolidatedReviewers, sourcePersona)
 }
 
 // EffectiveMaxChainDepth returns the chain-depth limit for this workflow.
@@ -125,24 +180,38 @@ func DevelopOnlyWorkflowDef() WorkflowDef {
 
 // WorkspaceDevWorkflowDef returns a workflow that provisions a git workspace
 // first, then runs the full development pipeline.
+//
+// Reviewer + qa fire in parallel after the developer and feed into the
+// review-consolidator synchronization barrier (SynchronousFeedback: true).
+// The consolidator emits a single merged FeedbackGenerated when either
+// reviewer or qa fails, so the developer fires exactly once per review
+// round instead of once per reviewer. Quality-gate's predecessor is the
+// consolidator (not the raw reviewers) so it only runs after the round
+// settles to "all pass" — when feedback is needed the consolidator
+// clears its own CompletedPersonas via SourcePersona, gating quality-gate
+// behind the next round.
 func WorkspaceDevWorkflowDef() WorkflowDef {
 	return WorkflowDef{
 		ID:       "workspace-dev",
-		Required: []string{"workspace", "context-snapshot", "developer", "quality-gate", "reviewer", "qa", "committer"},
+		Required: []string{"workspace", "context-snapshot", "developer", "quality-gate", "reviewer", "qa", "review-consolidator", "committer"},
 		Graph: map[string][]string{
-			"workspace":        {},
-			"context-snapshot": {"workspace"},
-			"developer":        {"context-snapshot"},
-			"reviewer":         {"developer"},
-			"qa":               {"developer"},
-			"quality-gate":     {"reviewer", "qa"},
-			"committer":        {"quality-gate"},
+			"workspace":           {},
+			"context-snapshot":    {"workspace"},
+			"developer":           {"context-snapshot"},
+			"reviewer":            {"developer"},
+			"qa":                  {"developer"},
+			"review-consolidator": {"reviewer", "qa"},
+			"quality-gate":        {"review-consolidator"},
+			"committer":           {"quality-gate"},
 		},
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
 		},
-		MaxIterations:     3,
-		EscalateOnMaxIter: true,
+		MaxIterations:         3,
+		EscalateOnMaxIter:     true,
+		SynchronousFeedback:   true,
+		ConsolidatedReviewers: []string{"reviewer", "qa"},
+		ReviewConsolidator:    "review-consolidator",
 	}
 }
 
@@ -211,27 +280,31 @@ func PRFeedbackWorkflowDef() WorkflowDef {
 		ID: "pr-feedback",
 		Required: []string{
 			"workspace", "github-pr-fetcher", "feedback-analyzer", "context-snapshot",
-			"developer", "reviewer", "qa", "quality-gate", "committer",
+			"developer", "reviewer", "qa", "review-consolidator", "quality-gate", "committer",
 			"pr-replier", "pr-reply-poster",
 		},
 		Graph: map[string][]string{
-			"github-pr-fetcher": {},
-			"workspace":         {"github-pr-fetcher"},
-			"feedback-analyzer": {"workspace"},
-			"context-snapshot":  {"feedback-analyzer"},
-			"developer":         {"context-snapshot"},
-			"reviewer":          {"developer"},
-			"qa":                {"developer"},
-			"quality-gate":      {"reviewer", "qa"},
-			"committer":         {"quality-gate"},
-			"pr-replier":        {"committer"},
-			"pr-reply-poster":   {"pr-replier"},
+			"github-pr-fetcher":   {},
+			"workspace":           {"github-pr-fetcher"},
+			"feedback-analyzer":   {"workspace"},
+			"context-snapshot":    {"feedback-analyzer"},
+			"developer":           {"context-snapshot"},
+			"reviewer":            {"developer"},
+			"qa":                  {"developer"},
+			"review-consolidator": {"reviewer", "qa"},
+			"quality-gate":        {"review-consolidator"},
+			"committer":           {"quality-gate"},
+			"pr-replier":          {"committer"},
+			"pr-reply-poster":     {"pr-replier"},
 		},
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
 		},
-		MaxIterations:     3,
-		EscalateOnMaxIter: true,
+		MaxIterations:         3,
+		EscalateOnMaxIter:     true,
+		SynchronousFeedback:   true,
+		ConsolidatedReviewers: []string{"reviewer", "qa"},
+		ReviewConsolidator:    "review-consolidator",
 	}
 }
 
@@ -243,25 +316,29 @@ func JiraDevWorkflowDef() WorkflowDef {
 		Required: []string{
 			"jira-context", "workspace", "context-snapshot",
 			"researcher", "architect", "developer",
-			"quality-gate", "reviewer", "qa", "committer",
+			"review-consolidator", "quality-gate", "reviewer", "qa", "committer",
 		},
 		Graph: map[string][]string{
-			"jira-context":     {},
-			"workspace":        {"jira-context"},
-			"context-snapshot": {"workspace"},
-			"researcher":       {"context-snapshot"},
-			"architect":        {"researcher"},
-			"developer":        {"architect"},
-			"reviewer":         {"developer"},
-			"qa":               {"developer"},
-			"quality-gate":     {"reviewer", "qa"},
-			"committer":        {"quality-gate"},
+			"jira-context":        {},
+			"workspace":           {"jira-context"},
+			"context-snapshot":    {"workspace"},
+			"researcher":          {"context-snapshot"},
+			"architect":           {"researcher"},
+			"developer":           {"architect"},
+			"reviewer":            {"developer"},
+			"qa":                  {"developer"},
+			"review-consolidator": {"reviewer", "qa"},
+			"quality-gate":        {"review-consolidator"},
+			"committer":           {"quality-gate"},
 		},
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
 		},
-		MaxIterations:     3,
-		EscalateOnMaxIter: true,
+		MaxIterations:         3,
+		EscalateOnMaxIter:     true,
+		SynchronousFeedback:   true,
+		ConsolidatedReviewers: []string{"reviewer", "qa"},
+		ReviewConsolidator:    "review-consolidator",
 	}
 }
 
@@ -274,25 +351,29 @@ func GithubDevWorkflowDef() WorkflowDef {
 		Required: []string{
 			"github-context", "workspace", "context-snapshot",
 			"researcher", "architect", "developer",
-			"quality-gate", "reviewer", "qa", "committer",
+			"review-consolidator", "quality-gate", "reviewer", "qa", "committer",
 		},
 		Graph: map[string][]string{
-			"github-context":   {},
-			"workspace":        {"github-context"},
-			"context-snapshot": {"workspace"},
-			"researcher":       {"context-snapshot"},
-			"architect":        {"researcher"},
-			"developer":        {"architect"},
-			"reviewer":         {"developer"},
-			"qa":               {"developer"},
-			"quality-gate":     {"reviewer", "qa"},
-			"committer":        {"quality-gate"},
+			"github-context":      {},
+			"workspace":           {"github-context"},
+			"context-snapshot":    {"workspace"},
+			"researcher":          {"context-snapshot"},
+			"architect":           {"researcher"},
+			"developer":           {"architect"},
+			"reviewer":            {"developer"},
+			"qa":                  {"developer"},
+			"review-consolidator": {"reviewer", "qa"},
+			"quality-gate":        {"review-consolidator"},
+			"committer":           {"quality-gate"},
 		},
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
 		},
-		MaxIterations:     3,
-		EscalateOnMaxIter: true,
+		MaxIterations:         3,
+		EscalateOnMaxIter:     true,
+		SynchronousFeedback:   true,
+		ConsolidatedReviewers: []string{"reviewer", "qa"},
+		ReviewConsolidator:    "review-consolidator",
 	}
 }
 
@@ -421,19 +502,23 @@ func WithoutHandler(def WorkflowDef, handler string) WorkflowDef {
 func CIFixWorkflowDef() WorkflowDef {
 	return WorkflowDef{
 		ID:       "ci-fix",
-		Required: []string{"workspace", "developer", "quality-gate", "reviewer", "qa", "committer"},
+		Required: []string{"workspace", "developer", "review-consolidator", "quality-gate", "reviewer", "qa", "committer"},
 		Graph: map[string][]string{
-			"workspace":    {},
-			"developer":    {"workspace"},
-			"reviewer":     {"developer"},
-			"qa":           {"developer"},
-			"quality-gate": {"reviewer", "qa"},
-			"committer":    {"quality-gate"},
+			"workspace":           {},
+			"developer":           {"workspace"},
+			"reviewer":            {"developer"},
+			"qa":                  {"developer"},
+			"review-consolidator": {"reviewer", "qa"},
+			"quality-gate":        {"review-consolidator"},
+			"committer":           {"quality-gate"},
 		},
 		RetriggeredBy: map[string][]event.Type{
 			"developer": {event.FeedbackGenerated},
 		},
-		MaxIterations:     2,
-		EscalateOnMaxIter: true,
+		MaxIterations:         2,
+		EscalateOnMaxIter:     true,
+		SynchronousFeedback:   true,
+		ConsolidatedReviewers: []string{"reviewer", "qa"},
+		ReviewConsolidator:    "review-consolidator",
 	}
 }

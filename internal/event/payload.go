@@ -224,6 +224,15 @@ type VerdictPayload struct {
 	// trimmed of Docker/multipass lifecycle noise. Empty when the verdict
 	// source did not capture a diagnostic stream.
 	RawDiagnostics string `json:"raw_diagnostics,omitempty"`
+	// DevTriggerID is the event ID of the developer PersonaCompleted that
+	// triggered this review. Populated by ReviewHandler from the envelope it
+	// received. Used by the review-consolidator to pair verdicts from reviewer
+	// and qa that reviewed the same developer iteration — when the consolidator
+	// merges, it groups VerdictRendered events by this field so it never folds
+	// a stale verdict from iteration N-1 into iteration N's feedback. Empty for
+	// events written before this field existed or for non-review verdict sources
+	// (committer, quality-gate) that have no developer-iteration concept.
+	DevTriggerID string `json:"dev_trigger_id,omitempty"`
 }
 
 // UnmarshalJSON tolerates legacy events written with the `phase`/`source_phase`
