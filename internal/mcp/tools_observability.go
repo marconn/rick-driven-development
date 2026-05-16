@@ -366,7 +366,10 @@ func (s *Server) resumeWorkflowFromPhase(
 		return nil, fmt.Errorf("from_phase %q is not in workflow %q's DAG", fromPhase, agg.WorkflowID)
 	}
 
-	invalidated := def.DownstreamOf(fromPhase) // includes fromPhase itself
+	// PersonasToInvalidateFor expands DownstreamOf with parallel-sibling
+	// invalidation under a sync-feedback barrier. For non-barrier workflows
+	// or non-consolidated personas it returns DownstreamOf unchanged.
+	invalidated := def.PersonasToInvalidateFor(fromPhase) // includes fromPhase itself
 
 	retryEvt := event.New(event.WorkflowRetried, 1, event.MustMarshal(event.WorkflowRetriedPayload{
 		FromPhase:           fromPhase,

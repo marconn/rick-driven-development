@@ -3,10 +3,53 @@ package engine
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/marconn/rick-event-driven-development/internal/backend"
 	"github.com/marconn/rick-event-driven-development/internal/event"
 )
+
+// rateLimitStderrPatterns are the substrings the classifier looks for in
+// captured backend stderr/stdout-tail to recognise an upstream rate-limit.
+// Conservative on purpose — a false positive labels a real crash as
+// "rate_limited" which routes through the pause path instead of failing, so
+// the operator could miss a genuine bug. Add patterns only when an actual
+// rate-limit produced the literal string in production logs.
+//
+// Provider sources:
+//   - claude CLI: "You've hit your limit · resets <localtime>" (stdout JSON,
+//     captured into BackendError.Stderr via the stdoutFallbackPrefix path).
+//   - gemini CLI: "quota exceeded for quota" / "RESOURCE_EXHAUSTED" (REST
+//     error surface, propagated to stderr).
+//   - codex CLI: "rate_limit_exceeded" (JSON error type field).
+//
+// All matching is case-insensitive substring — the stderr field already
+// includes the stdoutFallbackPrefix marker when claude wrote the message to
+// stdout, but the marker itself doesn't interfere with substring search.
+var rateLimitStderrPatterns = []string{
+	"you've hit your limit",
+	"hit your usage limit",
+	"rate_limit_exceeded",
+	"resource_exhausted",
+	"quota exceeded",
+	"too many requests", // HTTP 429 shape some CLIs surface verbatim
+}
+
+// looksLikeRateLimit reports whether stderr contains any of the known
+// rate-limit signatures. Empty stderr returns false (silent stall is its own
+// classification — FailureKindIdleTimeout already handles that).
+func looksLikeRateLimit(stderr string) bool {
+	if stderr == "" {
+		return false
+	}
+	lower := strings.ToLower(stderr)
+	for _, pat := range rateLimitStderrPatterns {
+		if strings.Contains(lower, pat) {
+			return true
+		}
+	}
+	return false
+}
 
 // classifyDispatchFailure maps a handler dispatch error into a typed
 // FailureKind and extracts any captured subprocess stderr plus the backend
@@ -25,10 +68,17 @@ import (
 //  1. errors.Is(err, ErrIdleTimeout)        → FailureKindIdleTimeout
 //  2. errors.Is(err, context.DeadlineExceeded) → FailureKindWallTimeout
 //  3. errors.Is(err, context.Canceled)      → FailureKindCancelled
-//  4. errors.As(err, *BackendError)         → FailureKindBackendError
-//  5. dispatchCtx.Err() == context.Canceled/DeadlineExceeded
+//  4. *BackendError with rate-limit stderr  → FailureKindRateLimited
+//  5. errors.As(err, *BackendError)         → FailureKindBackendError
+//  6. dispatchCtx.Err() == context.Canceled/DeadlineExceeded
 //     → FailureKindCancelled / FailureKindWallTimeout
-//  6. default                               → FailureKindHandlerError
+//  7. default                               → FailureKindHandlerError
+//
+// Rate-limit detection sits BELOW the timeout/cancel sentinels — a request
+// that timed out is classified by what we did to it (idle/wall timeout),
+// not by what the provider would have said. It sits ABOVE the generic
+// BackendError fallback so the aggregate can take the pause path instead
+// of failing the workflow.
 //
 // The returned backend name is the BackendError.Backend field when the
 // failure came through a BackendError, otherwise "". It is used to populate
@@ -54,6 +104,8 @@ func classifyDispatchFailure(dispatchCtx context.Context, err error) (kind event
 		return event.FailureKindWallTimeout, stderr, backendName
 	case errors.Is(err, context.Canceled):
 		return event.FailureKindCancelled, stderr, backendName
+	case hasBackendErr && looksLikeRateLimit(stderr):
+		return event.FailureKindRateLimited, stderr, backendName
 	case hasBackendErr:
 		return event.FailureKindBackendError, stderr, backendName
 	}

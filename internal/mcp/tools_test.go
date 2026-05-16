@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -881,6 +882,68 @@ func TestToolRetryWorkflow_FromPhase_EmitsRetryEvent(t *testing.T) {
 	}
 	if !retryFound {
 		t.Errorf("WorkflowRetried event not appended to store")
+	}
+}
+
+// TestToolRetryWorkflow_FromPhase_BarrierSibling is the MCP-surface
+// regression for the silent wedge on workflow
+// 3555adef-bd2b-4210-891e-3ec2a82dba10 (pr-feedback, 2026-05-15).
+//
+// When the operator retries from one half of a sync-feedback barrier
+// (reviewer or qa under workspace-dev / pr-feedback / etc.), the emitted
+// WorkflowRetried.InvalidatedPersonas MUST include the parallel sibling so
+// the review-consolidator's dev_trigger_id-keyed join can re-pair on the
+// next round. Without this, the consolidator's join is permanently
+// unsatisfiable — exactly the failure that took 1h50m of operator
+// attention to diagnose.
+func TestToolRetryWorkflow_FromPhase_BarrierSibling(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	ctx := context.Background()
+	corrID := "wf-retry-barrier-sibling"
+
+	// workspace-dev has SynchronousFeedback=true with ConsolidatedReviewers
+	// = ["reviewer", "qa"]. testDeps registers it by default.
+	def := engine.WorkspaceDevWorkflowDef()
+	reqEvt := event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+		Prompt:     "seed",
+		WorkflowID: def.ID,
+		Source:     "test",
+	})).WithAggregate(corrID, 1).WithCorrelation(corrID).WithSource("test")
+	failEvt := event.New(event.WorkflowFailed, 1, event.MustMarshal(event.WorkflowFailedPayload{
+		Reason:  "simulated reviewer failure",
+		Persona: "reviewer",
+	})).WithAggregate(corrID, 2).WithCorrelation(corrID).WithSource("test")
+	if err := deps.Store.Append(ctx, corrID, 0, []event.Envelope{reqEvt, failEvt}); err != nil {
+		t.Fatalf("seed events: %v", err)
+	}
+
+	result, err := callTool(t, s, "rick_retry_workflow", map[string]any{
+		"workflow_id": corrID,
+		"from_phase":  "reviewer",
+	})
+	if err != nil {
+		t.Fatalf("retry_workflow: %v", err)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", result)
+	}
+	invalidated, ok := m["invalidated_personas"].([]string)
+	if !ok {
+		t.Fatalf("invalidated_personas type = %T, want []string", m["invalidated_personas"])
+	}
+	if !slices.Contains(invalidated, "reviewer") {
+		t.Errorf("invalidated_personas = %v; missing reviewer (the from_phase itself)", invalidated)
+	}
+	if !slices.Contains(invalidated, "qa") {
+		t.Errorf("invalidated_personas = %v; MUST include qa under the sync-feedback barrier — "+
+			"this is the 3555adef-... wedge regression. retry from one barrier member must "+
+			"invalidate ALL barrier members so the consolidator's dev_trigger_id join can re-pair.",
+			invalidated)
 	}
 }
 

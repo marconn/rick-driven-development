@@ -39,6 +39,20 @@ func TestClassifyDispatchFailure(t *testing.T) {
 		Inner:   errors.New("exit status 1"),
 		Stderr:  "missing API key",
 	}
+	// Rate-limit shapes — the substring matcher in looksLikeRateLimit is
+	// the canonical detector. The Stderr text mirrors what claude and
+	// gemini actually wrote to stdout/stderr in production failures
+	// (3555adef-... 2026-05-15 for the claude case).
+	claudeRateLimit := &backend.BackendError{
+		Backend: "claude",
+		Inner:   errors.New("exit status 1"),
+		Stderr:  "[no stderr; stdout tail]\nYou've hit your limit · resets 4:50pm (America/Costa_Rica)",
+	}
+	geminiQuota := &backend.BackendError{
+		Backend: "gemini",
+		Inner:   errors.New("exit status 1"),
+		Stderr:  "Error: RESOURCE_EXHAUSTED: quota exceeded for quota metric",
+	}
 
 	cases := []struct {
 		name        string
@@ -88,6 +102,44 @@ func TestClassifyDispatchFailure(t *testing.T) {
 			wantKind:    event.FailureKindBackendError,
 			wantStderr:  "missing API key",
 			wantBackend: "codex",
+		},
+		{
+			// Bug 2 regression: claude rate-limit message captured into the
+			// BackendError.Stderr via the stdoutFallbackPrefix path. The
+			// classifier must surface FailureKindRateLimited so the
+			// aggregate takes the WorkflowPaused branch instead of failing
+			// the workflow and cascade-cancelling the parallel sibling.
+			name:        "rate_limited_claude_stdout_fallback",
+			ctxSetup:    context.Background,
+			err:         fmt.Errorf("handler reviewer: backend: %w", claudeRateLimit),
+			wantKind:    event.FailureKindRateLimited,
+			wantStderr:  claudeRateLimit.Stderr,
+			wantBackend: "claude",
+		},
+		{
+			// gemini surfaces quota exhaustion as RESOURCE_EXHAUSTED — the
+			// pattern allow-list covers both spellings.
+			name:        "rate_limited_gemini_resource_exhausted",
+			ctxSetup:    context.Background,
+			err:         fmt.Errorf("handler qa: backend: %w", geminiQuota),
+			wantKind:    event.FailureKindRateLimited,
+			wantStderr:  geminiQuota.Stderr,
+			wantBackend: "gemini",
+		},
+		{
+			// A backend error with stderr that does NOT match any
+			// rate-limit pattern must still fall to FailureKindBackendError
+			// — the pattern matcher is conservative on purpose.
+			name:     "backend_error_unrelated_stderr_stays_backend_error",
+			ctxSetup: context.Background,
+			err: fmt.Errorf("handler developer: backend: %w", &backend.BackendError{
+				Backend: "claude",
+				Inner:   errors.New("exit status 1"),
+				Stderr:  "panic: index out of range [3] with length 2",
+			}),
+			wantKind:    event.FailureKindBackendError,
+			wantStderr:  "panic: index out of range [3] with length 2",
+			wantBackend: "claude",
 		},
 		{
 			name:        "handler_error_when_no_backend_markers",

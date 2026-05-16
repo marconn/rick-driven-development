@@ -141,9 +141,27 @@ type WorkflowCancelledPayload struct {
 // WorkflowResumed).
 type WorkflowPausedPayload struct {
 	Reason          string `json:"reason"`
-	Source          string `json:"source,omitempty"` // "operator", "auto:max_iterations"
+	Source          string `json:"source,omitempty"` // "operator", "auto:max_iterations", "auto:rate_limited"
 	RetargetPersona string `json:"retarget_persona,omitempty"`
 	RetargetSource  string `json:"retarget_source,omitempty"`
+	// RetryFromPhase is the rate-limit-pause analogue of RetargetPersona. When
+	// set, decideWorkflowResumed emits WorkflowRetried{from_phase=RetryFromPhase}
+	// on resume rather than FeedbackGenerated — the rate-limited persona and
+	// its barrier siblings need a clean re-dispatch through the retry
+	// machinery, not a developer-loop feedback round. Mutually exclusive with
+	// RetargetPersona at emit time; resume handles RetryFromPhase first when
+	// both happen to be set.
+	RetryFromPhase string `json:"retry_from_phase,omitempty"`
+	// RateLimitResetHint is a best-effort, human-readable parse of the reset
+	// time the provider surfaced in stderr (e.g. "4:50pm (America/Costa_Rica)"
+	// from claude). Empty when the stderr line did not carry a reset hint.
+	// Surfaced verbatim in rick_workflow_status so operators know when to
+	// resume; the engine does not parse this further.
+	RateLimitResetHint string `json:"rate_limit_reset_hint,omitempty"`
+	// RateLimitBackend names the backend driver that hit the limit
+	// ("claude", "gemini", "codex"). Set alongside RetryFromPhase for
+	// rate-limit pauses; empty otherwise.
+	RateLimitBackend string `json:"rate_limit_backend,omitempty"`
 }
 
 // WorkflowResumedPayload is emitted when an operator resumes a paused workflow.
@@ -512,6 +530,13 @@ const (
 	// idle/wall timeouts (which target a single backend call); this is a
 	// workflow-level liveness fault.
 	FailureKindStalled FailureKind = "stalled"
+	// FailureKindRateLimited means the upstream LLM provider rate-limited the
+	// request — backend exited non-zero with a recognizable "limit reached"
+	// signature (e.g. claude's "You've hit your limit · resets <time>"). The
+	// aggregate converts this into WorkflowPaused (not WorkflowFailed) so the
+	// parallel branch under a sync-feedback barrier survives the failure and
+	// the operator/scheduled resume re-dispatches the persona post-reset.
+	FailureKindRateLimited FailureKind = "rate_limited"
 )
 
 // PersonaFailedPayload is emitted when a persona handler fails.

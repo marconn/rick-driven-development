@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
+	"strings"
 
 	"github.com/marconn/rick-event-driven-development/internal/event"
 )
@@ -80,6 +82,14 @@ type WorkflowAggregate struct {
 	// event written before this field existed).
 	PendingResumeRetarget       string
 	PendingResumeRetargetSource string
+	// PendingResumeRetryFromPhase is folded from WorkflowPausedPayload by
+	// Apply(WorkflowPaused) for rate-limit pauses. When non-empty,
+	// decideWorkflowResumed emits WorkflowRetried{from_phase=<this>} instead
+	// of FeedbackGenerated — the rate-limited persona and its barrier
+	// siblings need a clean re-dispatch, not a developer-loop round.
+	// Overwritten (incl. to empty) on every WorkflowPaused, same lifecycle
+	// rule as PendingResumeRetarget.
+	PendingResumeRetryFromPhase string
 }
 
 // cachedVerdict carries the subset of VerdictPayload that
@@ -142,6 +152,7 @@ func (w *WorkflowAggregate) Apply(env event.Envelope) {
 		_ = json.Unmarshal(env.Payload, &p)
 		w.PendingResumeRetarget = p.RetargetPersona
 		w.PendingResumeRetargetSource = p.RetargetSource
+		w.PendingResumeRetryFromPhase = p.RetryFromPhase
 		w.Status = StatusPaused
 
 	case event.WorkflowResumed:
@@ -430,6 +441,23 @@ func (w *WorkflowAggregate) decidePersonaFailed(env event.Envelope) ([]event.Env
 		return []event.Envelope{retry}, nil
 	}
 
+	// Rate-limit pause: an upstream provider rate-limit is recoverable but
+	// not on immediate retry — burning auto-retry slots against a still-
+	// active limit just wastes the quota for the next workflow. Pause the
+	// workflow with a retry hint so the operator (or a future scheduled
+	// resumer) can re-dispatch the persona after the reset window.
+	//
+	// Pause is NOT a terminal event in subscribeTerminalEvents, so the
+	// per-correlation context survives — any parallel sibling under a
+	// sync-feedback barrier (qa when reviewer rate-limited) keeps running
+	// and its verdict is captured. This is the cascade-fix half of Bug 2.
+	//
+	// Kill switch: RICK_RATE_LIMIT_AUTOPAUSE=0 falls through to
+	// WorkflowFailed so operators can revert at runtime without redeploy.
+	if pause := w.maybeRateLimitPause(env, p); pause != nil {
+		return []event.Envelope{*pause}, nil
+	}
+
 	// Partial-review workflows (e.g. pr-review) absorb single-reviewer
 	// failures as skips instead of failing the workflow. The Apply case
 	// for PersonaFailedTracked already marked this persona as
@@ -490,7 +518,11 @@ func (w *WorkflowAggregate) maybeAutoRetry(env event.Envelope, p event.PersonaFa
 		return event.Envelope{}, false
 	}
 
-	invalidated := w.WorkflowDef.DownstreamOf(p.Persona)
+	// PersonasToInvalidateFor expands DownstreamOf with parallel-sibling
+	// invalidation when p.Persona belongs to a sync-feedback barrier
+	// (ConsolidatedReviewers). Non-barrier workflows pay nothing — the
+	// returned set is identical to DownstreamOf there.
+	invalidated := w.WorkflowDef.PersonasToInvalidateFor(p.Persona)
 	reason := fmt.Sprintf("engine: auto-retry on transient %s (attempt %d/%d)",
 		p.FailureKind, w.AutoRetries[p.Persona]+1, MaxAutoRetriesPerPersona)
 
@@ -505,6 +537,92 @@ func (w *WorkflowAggregate) maybeAutoRetry(env event.Envelope, p event.PersonaFa
 		WithCorrelation(env.CorrelationID).
 		WithSource("engine:aggregate")
 	return retry, true
+}
+
+// rateLimitAutopauseEnvVar lets operators revert rate-limit handling to the
+// legacy WorkflowFailed path at runtime without redeploying. Set to "0" to
+// disable; any other value (including empty) leaves auto-pause enabled.
+const rateLimitAutopauseEnvVar = "RICK_RATE_LIMIT_AUTOPAUSE"
+
+// maybeRateLimitPause returns a WorkflowPaused envelope when the failed
+// persona's FailureKind is FailureKindRateLimited and the kill switch is
+// not engaged. Returns nil when the caller should fall through to whatever
+// comes after (PartialReviewOnFailure / WorkflowFailed). The retry hint
+// (RetryFromPhase + reset/backend metadata) is captured on the pause
+// payload so decideWorkflowResumed can issue a barrier-aware
+// WorkflowRetried on resume.
+func (w *WorkflowAggregate) maybeRateLimitPause(env event.Envelope, p event.PersonaFailedPayload) *event.Envelope {
+	if p.FailureKind != event.FailureKindRateLimited {
+		return nil
+	}
+	if os.Getenv(rateLimitAutopauseEnvVar) == "0" {
+		return nil
+	}
+	// Must be in the workflow's DAG — otherwise we have nothing to re-dispatch
+	// on resume and falling through to WorkflowFailed is the honest outcome.
+	if w.WorkflowDef == nil {
+		return nil
+	}
+	if _, inGraph := w.WorkflowDef.Graph[p.Persona]; !inGraph {
+		return nil
+	}
+	resetHint := extractRateLimitResetHint(p.Stderr)
+	reason := fmt.Sprintf("rate_limited: %s — resume after limit window", p.Persona)
+	if p.Backend != "" {
+		reason = fmt.Sprintf("rate_limited: %s on %s — resume after limit window", p.Persona, p.Backend)
+	}
+	if resetHint != "" {
+		reason = reason + " (resets " + resetHint + ")"
+	}
+	payload := event.MustMarshal(event.WorkflowPausedPayload{
+		Reason:             reason,
+		Source:             "auto:rate_limited",
+		RetryFromPhase:     p.Persona,
+		RateLimitResetHint: resetHint,
+		RateLimitBackend:   p.Backend,
+	})
+	paused := event.New(event.WorkflowPaused, 1, payload).
+		WithAggregate(w.ID, w.Version+1).
+		WithCausation(env.ID).
+		WithCorrelation(env.CorrelationID).
+		WithSource("engine:aggregate")
+	return &paused
+}
+
+// extractRateLimitResetHint pulls a human-readable reset window out of the
+// captured stderr/stdout tail. Best-effort and provider-specific — claude is
+// the only known producer of a reset hint today; gemini/codex surface
+// "quota exceeded" without a window. Returns the trimmed remainder of the
+// "resets <...>" suffix when present, empty otherwise.
+//
+// Format examples seen in production:
+//
+//	"You've hit your limit · resets 4:50pm (America/Costa_Rica)"
+//	"You've hit your limit · resets at 16:50 UTC"
+func extractRateLimitResetHint(stderr string) string {
+	if stderr == "" {
+		return ""
+	}
+	lower := strings.ToLower(stderr)
+	idx := strings.Index(lower, "resets ")
+	if idx < 0 {
+		return ""
+	}
+	// Take the rest of the line at the matched position in the ORIGINAL
+	// string so casing is preserved. Cap at 128 chars to avoid trailing
+	// noise leaking in.
+	tail := stderr[idx+len("resets "):]
+	if eol := strings.IndexAny(tail, "\n\r"); eol >= 0 {
+		tail = tail[:eol]
+	}
+	tail = strings.TrimSpace(tail)
+	if tail == "" {
+		return ""
+	}
+	if len(tail) > 128 {
+		tail = tail[:128]
+	}
+	return tail
 }
 
 func (w *WorkflowAggregate) decideVerdictRendered(env event.Envelope) ([]event.Envelope, error) {
@@ -680,19 +798,52 @@ func (w *WorkflowAggregate) decideTokenBudgetExceeded(env event.Envelope) ([]eve
 	}, nil
 }
 
-// decideWorkflowResumed handles resume after a pause. The pause's payload
-// carries an explicit retarget pair when the escalation intends a retry
-// (byte-identical fingerprint, max-iter exhausted). When set, we re-emit
-// FeedbackGenerated for that persona so the developer re-runs with the
-// operator-corrected context.
+// decideWorkflowResumed handles resume after a pause. Resolution order:
 //
-// Empty retarget falls through to a legacy max-iter scan that preserves
-// behavior for any in-flight WorkflowPaused events written before the
-// retarget fields existed. Advisory pauses and hint pauses also fall
-// through here and correctly no-op (count < MaxIterations) — their
-// downstream is driven by pauser.blocked replay or HintApproved, not by
-// this re-emit path.
+//  1. PendingResumeRetryFromPhase set (rate-limit pause) → emit
+//     WorkflowRetried so the rate-limited persona AND its barrier siblings
+//     are invalidated and re-dispatched cleanly. This is the rate-limit
+//     analogue of the retarget path — semantically a "retry", not a
+//     "feedback round," because the persona crashed before producing a
+//     verdict and there's nothing for the developer to re-iterate on.
+//  2. PendingResumeRetarget set (max-iter / byte-identical escalation) →
+//     re-emit FeedbackGenerated for that persona so the developer re-runs
+//     with the operator-corrected context.
+//  3. Legacy max-iter scan fallback for WorkflowPaused events written
+//     before the retarget fields existed.
+//
+// Advisory pauses and hint pauses fall through and correctly no-op (count <
+// MaxIterations) — their downstream is driven by pauser.blocked replay or
+// HintApproved, not by this re-emit path.
 func (w *WorkflowAggregate) decideWorkflowResumed(env event.Envelope) ([]event.Envelope, error) {
+	if persona := w.PendingResumeRetryFromPhase; persona != "" && w.WorkflowDef != nil {
+		// Guard: the persona must still be in the live DAG. If the workflow
+		// definition was edited between pause and resume (e.g. RICK_DISABLE_
+		// QUALITY_GATE flipped, or operator switched DAGs), fall through to
+		// the legacy paths rather than emitting an unreachable retry.
+		if _, inGraph := w.WorkflowDef.Graph[persona]; inGraph {
+			invalidated := w.WorkflowDef.PersonasToInvalidateFor(persona)
+			retryPayload := event.MustMarshal(event.WorkflowRetriedPayload{
+				FromPhase:           persona,
+				InvalidatedPersonas: invalidated,
+				Reason:              "engine: resume after rate_limited pause",
+				// Automatic=false: the AutoRetries counter caps deterministic
+				// transient retries (idle_timeout). A rate-limit pause is
+				// already operator-gated by the resume call, so it should not
+				// consume an auto-retry budget that another transient failure
+				// might need later in the same workflow.
+				Automatic: false,
+			})
+			return []event.Envelope{
+				event.New(event.WorkflowRetried, 1, retryPayload).
+					WithAggregate(w.ID, w.Version+1).
+					WithCausation(env.ID).
+					WithCorrelation(env.CorrelationID).
+					WithSource("engine:aggregate"),
+			}, nil
+		}
+	}
+
 	if persona := w.PendingResumeRetarget; persona != "" && w.isRequiredPersona(persona) {
 		cached := w.LastFailingVerdict[persona]
 		sourcePersona := w.PendingResumeRetargetSource

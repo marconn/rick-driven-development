@@ -123,6 +123,59 @@ func (d *WorkflowDef) EffectiveMaxChainDepth() int {
 	return len(d.Required) + 5
 }
 
+// PersonasToInvalidateFor returns the set of personas whose completed state
+// must be cleared when re-dispatching fromPhase via WorkflowRetried. It is the
+// retry-time invalidation primitive — wider than DownstreamOf when fromPhase
+// is a member of a synchronization barrier (ConsolidatedReviewers).
+//
+// The returned set always includes:
+//  1. fromPhase itself.
+//  2. Every persona DAG-downstream of fromPhase.
+//  3. Parallel siblings of fromPhase under the sync-feedback barrier — i.e.
+//     when fromPhase ∈ ConsolidatedReviewers, the OTHER ConsolidatedReviewers
+//     too, plus each sibling's own downstream set.
+//
+// (3) is load-bearing under SynchronousFeedback: the review-consolidator joins
+// barrier members by dev_trigger_id, so a retry that refreshes only one
+// member's verdict produces an unsatisfiable join (one fresh verdict, one
+// stale-or-missing). Manifested as the silent wedge on workflow
+// 3555adef-bd2b-4210-891e-3ec2a82dba10 (2026-05-15): retry from_phase=reviewer
+// left qa's dev_trigger_id unpaired; the consolidator's join.dropped fired
+// once and the workflow sat for 1h50m with no recovery.
+//
+// When SynchronousFeedback is false or fromPhase is outside the consolidated
+// set, this method returns exactly DownstreamOf(fromPhase) — no behavioral
+// change for non-barrier workflows.
+func (d *WorkflowDef) PersonasToInvalidateFor(fromPhase string) []string {
+	downstream := d.DownstreamOf(fromPhase)
+	if !d.SynchronousFeedback || !slices.Contains(d.ConsolidatedReviewers, fromPhase) {
+		return downstream
+	}
+	// Barrier expansion: every other consolidated reviewer must also be
+	// invalidated so the join can re-pair on the new dev_trigger_id, and
+	// each sibling's downstream is dragged along for the same reason
+	// fromPhase's was. Dedup via map; preserve no particular order — call
+	// sites store the result on an event payload and downstream consumers
+	// compare via slices.Contains.
+	seen := make(map[string]struct{}, len(downstream))
+	for _, p := range downstream {
+		seen[p] = struct{}{}
+	}
+	for _, sibling := range d.ConsolidatedReviewers {
+		if sibling == fromPhase {
+			continue
+		}
+		for _, p := range d.DownstreamOf(sibling) {
+			seen[p] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for p := range seen {
+		result = append(result, p)
+	}
+	return result
+}
+
 // DownstreamOf returns all personas that transitively depend on the given
 // persona in the Graph, including the persona itself. Used to invalidate
 // stale completions after a feedback loop re-triggers a persona.
