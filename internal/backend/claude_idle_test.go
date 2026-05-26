@@ -47,7 +47,16 @@ sleep 5
 	binPath := writeFakeBinary(t, "fake-claude.sh", script)
 
 	c := NewClaude(binPath)
-	c.stallTimeout = 150 * time.Millisecond
+	// 500ms (not 150ms): the watchdog ticker starts the moment WithIdleTimeout
+	// is called, BEFORE the subprocess has done its first echo. Cold-start
+	// `/bin/sh` (page-faulting the binary, especially under -race + go test
+	// scheduler contention) is empirically ~150ms on macOS, so a 150ms idle
+	// window would fire at T=150ms with the shell still mid-exec, no bytes in
+	// the stderr pipe yet, and the stderr assertion below would see an empty
+	// bytes.Buffer. The production stall window is minutes; this test only
+	// shrinks it for speed. 500ms is ~3× the worst observed cold-start time
+	// while keeping wall-clock well under a second.
+	c.stallTimeout = 500 * time.Millisecond
 
 	start := time.Now()
 	resp, err := c.Run(context.Background(), Request{
@@ -80,7 +89,7 @@ sleep 5
 		t.Errorf("errors.Is(err, ErrIdleTimeout) = false; failure_classify will mislabel this as handler_error")
 	}
 	// Stall duration must travel with the error so the message contains
-	// "(stall=150ms)" — operators grep for this to confirm the watchdog
+	// "(stall=500ms)" — operators grep for this to confirm the watchdog
 	// (not the wall-clock deadline) fired.
 	if !strings.Contains(backendErr.Inner.Error(), "stall=") {
 		t.Errorf("Inner = %q; want stall=<duration> marker", backendErr.Inner.Error())
@@ -113,7 +122,11 @@ sleep 3
 	binPath := writeFakeBinary(t, "fake-claude-shape.sh", script)
 
 	c := NewClaude(binPath)
-	c.stallTimeout = 120 * time.Millisecond
+	// See sibling test's note on the 500ms floor: under -race the cold-start
+	// `/bin/sh` exec can take ~150ms on macOS, which would race a sub-200ms
+	// idle window. The error-message shape is what this test pins; bumping
+	// the window doesn't change the format being asserted.
+	c.stallTimeout = 500 * time.Millisecond
 
 	_, err := c.Run(context.Background(), Request{UserPrompt: "x"})
 	if err == nil {
@@ -121,7 +134,7 @@ sleep 3
 	}
 	msg := err.Error()
 	// The message format this guards:
-	//   claude: backend: idle timeout exceeded (stall=120ms) (after 150ms)
+	//   claude: backend: idle timeout exceeded (stall=500ms) (after 550ms)
 	// classifyDispatchFailure doesn't parse this, but humans and
 	// rick_persona_output's Error field do.
 	for _, needle := range []string{"claude", "idle timeout", "stall=", "after"} {
