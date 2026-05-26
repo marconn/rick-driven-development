@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/marconn/rick-event-driven-development/internal/event"
 	"github.com/marconn/rick-event-driven-development/internal/eventstore"
@@ -43,6 +45,16 @@ type PRCommentPosterHandler struct {
 	kind     string // PRCommentPostedPayload.Kind for the legacy plain-text path
 	gh       prCommentClient
 	store    eventstore.Store
+	logger   *slog.Logger
+
+	// botLogin is the GitHub login of the token Rick runs under. Populated
+	// lazily by ensureBotLogin on the first Handle call so registration stays
+	// network-free. When the lookup fails we leave it empty and fall back to
+	// the body-hash + correlation-chain dedup paths — the worst case is the
+	// status-quo dedup signal, never a crash.
+	botLoginOnce sync.Once
+	botLoginMu   sync.RWMutex
+	botLogin     string
 }
 
 // prCommentClient is the subset of github.Client used by the poster. Narrowing
@@ -53,6 +65,7 @@ type prCommentClient interface {
 	CreatePRReviewCommentReply(ctx context.Context, owner, repo string, prNumber, commentID int, body string) (*gh.ReviewComment, error)
 	GetIssueComments(ctx context.Context, owner, repo string, number int) ([]gh.IssueComment, error)
 	GetPRReviewComments(ctx context.Context, owner, repo string, prNumber int) ([]gh.ReviewComment, error)
+	GetAuthenticatedUser(ctx context.Context) (*gh.User, error)
 }
 
 // PRCommentClientAdapter wraps a *github.Client so it satisfies the narrower
@@ -82,6 +95,11 @@ func (a PRCommentClientAdapter) GetPRReviewComments(ctx context.Context, owner, 
 	return a.Client.GetPRReviewComments(ctx, owner, repo, prNumber)
 }
 
+// GetAuthenticatedUser delegates to the wrapped client.
+func (a PRCommentClientAdapter) GetAuthenticatedUser(ctx context.Context) (*gh.User, error) {
+	return a.Client.GetAuthenticatedUser(ctx)
+}
+
 // PRCommentPosterConfig configures a poster instance.
 type PRCommentPosterConfig struct {
 	Name     string           // handler name, e.g. "pr-reply-poster"
@@ -89,16 +107,22 @@ type PRCommentPosterConfig struct {
 	Kind     string           // PRCommentPostedPayload.Kind for the plain-text fallback path, e.g. "reply"
 	GitHub   prCommentClient  // may be nil — handler short-circuits with an enrichment-only path
 	Store    eventstore.Store // required for loading correlation chain
+	Logger   *slog.Logger     // optional — falls back to slog.Default()
 }
 
 // NewPRCommentPoster creates a poster handler.
 func NewPRCommentPoster(cfg PRCommentPosterConfig) *PRCommentPosterHandler {
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &PRCommentPosterHandler{
 		name:     cfg.Name,
 		upstream: cfg.Upstream,
 		kind:     cfg.Kind,
 		gh:       cfg.GitHub,
 		store:    cfg.Store,
+		logger:   logger,
 	}
 }
 
@@ -154,15 +178,26 @@ func (h *PRCommentPosterHandler) Handle(ctx context.Context, env event.Envelope)
 		return nil, fmt.Errorf("%s: upstream %s produced empty body", h.name, h.upstream)
 	}
 
+	// Correlation-chain self-check (Fix A in the pr-feedback duplication
+	// analysis). The GitHub-side body-hash dedup in postSummary /
+	// postInlineReply / postLegacyPlain only catches byte-identical bodies; the
+	// pr-replier LLM produces different wording on every iteration, so across
+	// feedback loops the hash misses and we duplicate. Reading the poster's own
+	// PRCommentPosted history off the correlation gives a deterministic "did I
+	// already post on this thread in this correlation?" answer that is
+	// independent of LLM text. Threaded through the per-action posters so each
+	// can short-circuit without an HTTP call.
+	history := loadPosterHistory(events, h.name)
+
 	// Try the structured-JSON contract first. If the upstream output doesn't
 	// parse as the replier payload — or parses but carries no summary and no
 	// inline replies — fall back to the legacy plain-text top-level post so a
 	// non-compliant composer still produces something visible on the PR.
 	if payload, okJSON := parseReplierJSON(body); okJSON {
-		return h.postStructured(ctx, fullRepo, owner, repo, prNumber, payload)
+		return h.postStructured(ctx, fullRepo, owner, repo, prNumber, payload, history)
 	}
 
-	return h.postLegacyPlain(ctx, fullRepo, owner, repo, prNumber, body)
+	return h.postLegacyPlain(ctx, fullRepo, owner, repo, prNumber, body, history)
 }
 
 // postStructured handles the current pr-replier contract: optional summary
@@ -170,7 +205,7 @@ func (h *PRCommentPosterHandler) Handle(ctx context.Context, env event.Envelope)
 // abort the whole handler — each post is attempted independently so one bad
 // `comment_id` doesn't suppress the other inline replies or the summary.
 // Errors are collected and returned so the caller sees the failure surface.
-func (h *PRCommentPosterHandler) postStructured(ctx context.Context, fullRepo, owner, repo string, prNumber int, payload replierPayload) ([]event.Envelope, error) {
+func (h *PRCommentPosterHandler) postStructured(ctx context.Context, fullRepo, owner, repo string, prNumber int, payload replierPayload, history posterHistory) ([]event.Envelope, error) {
 	summary := strings.TrimSpace(payload.Summary)
 	if summary == "" && len(payload.InlineReplies) == 0 {
 		// Replier explicitly returned "nothing to say" — emit a single skipped
@@ -182,7 +217,7 @@ func (h *PRCommentPosterHandler) postStructured(ctx context.Context, fullRepo, o
 	var firstErr error
 
 	if summary != "" {
-		evts, err := h.postSummary(ctx, fullRepo, owner, repo, prNumber, summary)
+		evts, err := h.postSummary(ctx, fullRepo, owner, repo, prNumber, summary, history)
 		out = append(out, evts...)
 		if err != nil {
 			firstErr = err
@@ -194,7 +229,7 @@ func (h *PRCommentPosterHandler) postStructured(ctx context.Context, fullRepo, o
 		if reply.CommentID == 0 || body == "" {
 			continue
 		}
-		evt, err := h.postInlineReply(ctx, fullRepo, owner, repo, prNumber, reply.CommentID, body)
+		evt, err := h.postInlineReply(ctx, fullRepo, owner, repo, prNumber, reply.CommentID, body, history)
 		if evt.Type != "" {
 			out = append(out, evt)
 		}
@@ -208,15 +243,30 @@ func (h *PRCommentPosterHandler) postStructured(ctx context.Context, fullRepo, o
 
 // postSummary posts the top-level summary as an issue comment with SHA-256
 // dedup against the existing issue comments. Kind="summary".
-func (h *PRCommentPosterHandler) postSummary(ctx context.Context, fullRepo, owner, repo string, prNumber int, body string) ([]event.Envelope, error) {
+func (h *PRCommentPosterHandler) postSummary(ctx context.Context, fullRepo, owner, repo string, prNumber int, body string, history posterHistory) ([]event.Envelope, error) {
 	bodyHash := hashBody(body)
+
+	// Correlation-chain self-check: if we already posted a summary in this
+	// correlation, skip without hitting GitHub. Deterministic across feedback
+	// iterations where the LLM produces different summary text each round.
+	if history.summaryPosted {
+		return []event.Envelope{h.postedEvent("summary", fullRepo, prNumber, bodyHash, 0, 0, true)}, nil
+	}
 
 	if h.gh == nil {
 		return []event.Envelope{h.postedEvent("summary", fullRepo, prNumber, bodyHash, 0, 0, true)}, nil
 	}
 
+	botLogin := h.ensureBotLogin(ctx)
 	if existing, err := h.gh.GetIssueComments(ctx, owner, repo, prNumber); err == nil {
 		if duplicateIssueHash(existing, bodyHash) {
+			return []event.Envelope{h.postedEvent("summary", fullRepo, prNumber, bodyHash, 0, 0, true)}, nil
+		}
+		// Author-identity dedup (Fix B): if the bot already posted any
+		// top-level issue comment on this PR, skip. Catches cross-correlation
+		// duplicates where the LLM produced different summary text but the
+		// bot account already spoke on this thread.
+		if botLogin != "" && authorPostedIssueComment(existing, botLogin) {
 			return []event.Envelope{h.postedEvent("summary", fullRepo, prNumber, bodyHash, 0, 0, true)}, nil
 		}
 	}
@@ -232,15 +282,32 @@ func (h *PRCommentPosterHandler) postSummary(ctx context.Context, fullRepo, owne
 // with per-thread dedup (match InReplyToID==root + body hash). Errors on a
 // single reply are returned alongside a skipped-or-nil event so the caller
 // can continue with the remaining replies.
-func (h *PRCommentPosterHandler) postInlineReply(ctx context.Context, fullRepo, owner, repo string, prNumber, rootCommentID int, body string) (event.Envelope, error) {
+func (h *PRCommentPosterHandler) postInlineReply(ctx context.Context, fullRepo, owner, repo string, prNumber, rootCommentID int, body string, history posterHistory) (event.Envelope, error) {
 	bodyHash := hashBody(body)
+
+	// Correlation-chain self-check: if we already replied on this thread in
+	// this correlation, skip without hitting GitHub. Catches the feedback-loop
+	// re-fire path that GitHub-side body-hash dedup misses because LLM wording
+	// drifts between iterations.
+	if history.inlineReplies[rootCommentID] {
+		return h.postedEvent("inline-reply", fullRepo, prNumber, bodyHash, 0, rootCommentID, true), nil
+	}
 
 	if h.gh == nil {
 		return h.postedEvent("inline-reply", fullRepo, prNumber, bodyHash, 0, rootCommentID, true), nil
 	}
 
+	botLogin := h.ensureBotLogin(ctx)
 	if existing, err := h.gh.GetPRReviewComments(ctx, owner, repo, prNumber); err == nil {
 		if duplicateReviewReplyHash(existing, rootCommentID, bodyHash) {
+			return h.postedEvent("inline-reply", fullRepo, prNumber, bodyHash, 0, rootCommentID, true), nil
+		}
+		// Author-identity dedup (Fix B): if the bot already replied on this
+		// thread at all, skip — independent of body text. This is the precise
+		// per-thread check; pr-consolidator only posts review comments anchored
+		// at the diff, not as replies to existing threads, so this matches
+		// only pr-reply-poster's own prior work.
+		if botLogin != "" && authorRepliedOnThread(existing, rootCommentID, botLogin) {
 			return h.postedEvent("inline-reply", fullRepo, prNumber, bodyHash, 0, rootCommentID, true), nil
 		}
 	}
@@ -257,15 +324,28 @@ func (h *PRCommentPosterHandler) postInlineReply(ctx context.Context, fullRepo, 
 // composer that emits plain text (and as a safety net when the replier's JSON
 // is malformed). Kind is whatever was configured on the poster (default
 // "reply").
-func (h *PRCommentPosterHandler) postLegacyPlain(ctx context.Context, fullRepo, owner, repo string, prNumber int, body string) ([]event.Envelope, error) {
+func (h *PRCommentPosterHandler) postLegacyPlain(ctx context.Context, fullRepo, owner, repo string, prNumber int, body string, history posterHistory) ([]event.Envelope, error) {
 	bodyHash := hashBody(body)
+
+	// Correlation-chain self-check: if we already posted a legacy plain-text
+	// comment in this correlation, skip without hitting GitHub.
+	if history.legacyPosted {
+		return []event.Envelope{h.postedEvent(h.kind, fullRepo, prNumber, bodyHash, 0, 0, true)}, nil
+	}
 
 	if h.gh == nil {
 		return []event.Envelope{h.postedEvent(h.kind, fullRepo, prNumber, bodyHash, 0, 0, true)}, nil
 	}
 
+	botLogin := h.ensureBotLogin(ctx)
 	if existing, err := h.gh.GetIssueComments(ctx, owner, repo, prNumber); err == nil {
 		if duplicateIssueHash(existing, bodyHash) {
+			return []event.Envelope{h.postedEvent(h.kind, fullRepo, prNumber, bodyHash, 0, 0, true)}, nil
+		}
+		// Author-identity dedup (Fix B): same precision as the summary path —
+		// if the bot already spoke on this PR, treat the legacy plain-text
+		// post as redundant.
+		if botLogin != "" && authorPostedIssueComment(existing, botLogin) {
 			return []event.Envelope{h.postedEvent(h.kind, fullRepo, prNumber, bodyHash, 0, 0, true)}, nil
 		}
 	}
@@ -279,6 +359,49 @@ func (h *PRCommentPosterHandler) postLegacyPlain(ctx context.Context, fullRepo, 
 	}
 
 	return []event.Envelope{h.postedEvent(h.kind, fullRepo, prNumber, bodyHash, comment.ID, 0, false)}, nil
+}
+
+// posterHistory snapshots what this poster handler has already committed to
+// the PR in the current correlation, derived from PRCommentPosted events in
+// the correlation chain. The fields hold only non-skipped posts — a prior
+// Skipped=true event means we never actually called GitHub, so it must not
+// suppress a real attempt.
+type posterHistory struct {
+	summaryPosted bool         // a non-skipped Kind="summary" event was recorded
+	legacyPosted  bool         // a non-skipped Kind=h.kind (legacy plain-text) event was recorded
+	inlineReplies map[int]bool // rootCommentID → true when a non-skipped inline-reply was recorded
+}
+
+// loadPosterHistory walks the correlation chain for PRCommentPosted events
+// authored by this handler and indexes the non-skipped ones. Source filter
+// (`handler:<name>`) ensures we don't read the pr-consolidator's posts or a
+// future second poster instance.
+func loadPosterHistory(events []event.Envelope, handlerName string) posterHistory {
+	h := posterHistory{inlineReplies: make(map[int]bool)}
+	wantSource := "handler:" + handlerName
+	for _, e := range events {
+		if e.Type != event.PRCommentPosted || e.Source != wantSource {
+			continue
+		}
+		var p event.PRCommentPostedPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			continue
+		}
+		if p.Skipped {
+			continue
+		}
+		switch p.Kind {
+		case "summary":
+			h.summaryPosted = true
+		case "inline-reply":
+			if p.InReplyToID != 0 {
+				h.inlineReplies[p.InReplyToID] = true
+			}
+		case "reply":
+			h.legacyPosted = true
+		}
+	}
+	return h
 }
 
 // postedEvent builds the observability event. Stored on a persona-scoped
@@ -389,4 +512,73 @@ func duplicateReviewReplyHash(comments []gh.ReviewComment, rootCommentID int, ta
 		}
 	}
 	return false
+}
+
+// authorRepliedOnThread returns true when the bot login already has at least
+// one reply on the thread rooted at rootCommentID. Identity-based dedup that
+// is robust to LLM wording drift across iterations and correlations — see
+// Fix B in the pr-feedback duplication analysis.
+func authorRepliedOnThread(comments []gh.ReviewComment, rootCommentID int, botLogin string) bool {
+	if botLogin == "" {
+		return false
+	}
+	for _, c := range comments {
+		if c.InReplyToID != rootCommentID {
+			continue
+		}
+		if c.User.Login == botLogin {
+			return true
+		}
+	}
+	return false
+}
+
+// authorPostedIssueComment returns true when the bot login authored any
+// top-level issue comment on the PR. Used by the summary + legacy plain-text
+// paths to suppress duplicate top-level posts.
+func authorPostedIssueComment(comments []gh.IssueComment, botLogin string) bool {
+	if botLogin == "" {
+		return false
+	}
+	for _, c := range comments {
+		if c.User.Login == botLogin {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureBotLogin lazily resolves the bot's GitHub login via GET /user and
+// caches the result for the lifetime of the handler. Returns "" when the
+// lookup fails or no client is configured — callers MUST treat empty login
+// as "identity dedup disabled" and fall back to the other dedup layers.
+//
+// The one-shot sync.Once ensures we don't repeat the lookup on every Handle.
+// If the first attempt errors we still set the cached value to "" and let
+// the lookup never retry; a transient flake at startup would otherwise
+// permanently degrade dedup. The dedup paths still have body-hash +
+// correlation-chain as safety nets, so disabling identity-dedup is graceful.
+func (h *PRCommentPosterHandler) ensureBotLogin(ctx context.Context) string {
+	if h.gh == nil {
+		return ""
+	}
+	h.botLoginOnce.Do(func() {
+		user, err := h.gh.GetAuthenticatedUser(ctx)
+		if err != nil {
+			h.logger.Warn("pr-comment-poster: bot identity lookup failed, falling back to body-hash dedup",
+				slog.String("handler", h.name),
+				slog.String("error", err.Error()),
+			)
+			return
+		}
+		if user == nil {
+			return
+		}
+		h.botLoginMu.Lock()
+		h.botLogin = user.Login
+		h.botLoginMu.Unlock()
+	})
+	h.botLoginMu.RLock()
+	defer h.botLoginMu.RUnlock()
+	return h.botLogin
 }

@@ -25,6 +25,13 @@ type fakeGithub struct {
 	// behavior in pr_comment_poster.go).
 	listErr error
 
+	// botLogin returned by GetAuthenticatedUser. Empty string ⇒ return a User
+	// with empty Login (identity dedup disabled). botLoginErr forces an error
+	// to exercise the graceful-degradation path.
+	botLogin       string
+	botLoginErr    error
+	botLoginCalls  int
+
 	// Captured on CreatePRComment.
 	postedOwner    string
 	postedRepo     string
@@ -92,6 +99,14 @@ func (f *fakeGithub) GetIssueComments(_ context.Context, _, _ string, _ int) ([]
 
 func (f *fakeGithub) GetPRReviewComments(_ context.Context, _, _ string, _ int) ([]gh.ReviewComment, error) {
 	return f.existingReview, nil
+}
+
+func (f *fakeGithub) GetAuthenticatedUser(_ context.Context) (*gh.User, error) {
+	f.botLoginCalls++
+	if f.botLoginErr != nil {
+		return nil, f.botLoginErr
+	}
+	return &gh.User{Login: f.botLogin}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -665,5 +680,407 @@ func TestHashBody_Stable(t *testing.T) {
 	}
 	if a == hashBody("hello world ") {
 		t.Errorf("trailing whitespace should change hash (handler trims caller-side before hashing)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Correlation-chain self-check (Fix A)
+//
+// GitHub-side body-hash dedup misses across feedback-loop iterations because
+// the pr-replier LLM produces different wording each round. These tests guard
+// the deterministic "did I already post in this correlation?" check that
+// consults the poster's own PRCommentPosted history before calling GitHub.
+// ---------------------------------------------------------------------------
+
+// seedPriorPost appends a PRCommentPosted event authored by the poster to the
+// correlation, mirroring what executeDispatch would persist after a successful
+// post. Used by the Fix A regression tests to simulate a prior iteration.
+func seedPriorPost(store *mockStore, corr, handlerName, kind string, inReplyToID, commentID int, skipped bool) {
+	evt := event.New(event.PRCommentPosted, 1, event.MustMarshal(event.PRCommentPostedPayload{
+		Repo:        "owner/repo",
+		PRNumber:    7,
+		Kind:        kind,
+		CommentID:   commentID,
+		InReplyToID: inReplyToID,
+		BodyHash:    "dummyhash",
+		Skipped:     skipped,
+	})).WithCorrelation(corr).WithSource("handler:" + handlerName)
+	store.correlationEvents[corr] = append(store.correlationEvents[corr], evt)
+}
+
+// TestPRCommentPoster_SkipsInlineReplyWhenPriorPostExists is the core Fix A
+// regression: iteration 2's reply text differs from iteration 1's, so
+// GitHub-side hash dedup would miss. The correlation-chain check must skip
+// regardless.
+func TestPRCommentPoster_SkipsInlineReplyWhenPriorPostExists(t *testing.T) {
+	store := newMockStore()
+	body := `{"summary":"","inline_replies":[
+		{"comment_id":500,"body":"Iteration 2 — different wording than iteration 1."}
+	]}`
+	trig := seedPosterChain(store, "corr-iter-reply", "gh:owner/repo#7", "pr-replier", body)
+
+	// Iteration 1 already posted on this thread; body hash on GitHub would
+	// differ from iteration 2's body, so the existing GitHub-side dedup would
+	// not catch it. The chain-history check must.
+	seedPriorPost(store, "corr-iter-reply", "pr-reply-poster", "inline-reply", 500, 901, false)
+
+	fg := &fakeGithub{
+		// Simulate the prior post landing on GitHub with the *old* body so
+		// the body-hash dedup cannot catch the new text.
+		existingReview: []gh.ReviewComment{
+			{ID: 901, InReplyToID: 500, Body: "Iteration 1 — original wording."},
+		},
+	}
+	h := newReplyPoster(t, store, fg)
+	events, err := h.Handle(context.Background(), trig)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if fg.replyCalls != 0 {
+		t.Errorf("expected 0 reply posts via chain-history dedup, got %d", fg.replyCalls)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 skipped event, got %d", len(events))
+	}
+	p := posterPayload(t, events[0])
+	if !p.Skipped {
+		t.Errorf("expected Skipped=true after chain-history match")
+	}
+	if p.Kind != "inline-reply" || p.InReplyToID != 500 {
+		t.Errorf("expected kind=inline-reply InReplyToID=500, got kind=%q InReplyToID=%d", p.Kind, p.InReplyToID)
+	}
+}
+
+// TestPRCommentPoster_SkipsSummaryWhenPriorPostExists is the summary-side
+// twin: the LLM's iteration-2 summary text differs from iteration-1's, so
+// only the chain-history check catches it.
+func TestPRCommentPoster_SkipsSummaryWhenPriorPostExists(t *testing.T) {
+	store := newMockStore()
+	body := `{"summary":"Iteration 2 summary — fresh wording.","inline_replies":[]}`
+	trig := seedPosterChain(store, "corr-iter-summary", "gh:owner/repo#7", "pr-replier", body)
+
+	seedPriorPost(store, "corr-iter-summary", "pr-reply-poster", "summary", 0, 50, false)
+
+	fg := &fakeGithub{
+		existing: []gh.IssueComment{
+			{ID: 50, Body: "Iteration 1 summary — original wording."},
+		},
+	}
+	h := newReplyPoster(t, store, fg)
+	events, err := h.Handle(context.Background(), trig)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if fg.postedCalls != 0 {
+		t.Errorf("expected 0 summary posts via chain-history dedup, got %d", fg.postedCalls)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 skipped summary event, got %d", len(events))
+	}
+	p := posterPayload(t, events[0])
+	if !p.Skipped || p.Kind != "summary" {
+		t.Errorf("expected skipped summary event, got kind=%q skipped=%v", p.Kind, p.Skipped)
+	}
+}
+
+// TestPRCommentPoster_SkipsLegacyWhenPriorPostExists covers the plain-text
+// fallback path through the same lens.
+func TestPRCommentPoster_SkipsLegacyWhenPriorPostExists(t *testing.T) {
+	store := newMockStore()
+	trig := seedPosterChain(store, "corr-iter-legacy", "gh:owner/repo#7", "pr-replier", "Plain text iteration 2.")
+
+	seedPriorPost(store, "corr-iter-legacy", "pr-reply-poster", "reply", 0, 99, false)
+
+	fg := &fakeGithub{
+		existing: []gh.IssueComment{
+			{ID: 99, Body: "Plain text iteration 1."},
+		},
+	}
+	h := newReplyPoster(t, store, fg)
+	events, err := h.Handle(context.Background(), trig)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if fg.postedCalls != 0 {
+		t.Errorf("expected 0 legacy posts via chain-history dedup, got %d", fg.postedCalls)
+	}
+	p := posterPayload(t, events[0])
+	if !p.Skipped || p.Kind != "reply" {
+		t.Errorf("expected skipped legacy reply event, got kind=%q skipped=%v", p.Kind, p.Skipped)
+	}
+}
+
+// TestPRCommentPoster_PartialPriorHistory verifies the chain check is
+// per-thread: a prior reply on thread A must not suppress a fresh reply on
+// thread B in the same correlation.
+func TestPRCommentPoster_PartialPriorHistory(t *testing.T) {
+	store := newMockStore()
+	body := `{"summary":"","inline_replies":[
+		{"comment_id":100,"body":"Already replied iteration 1."},
+		{"comment_id":200,"body":"New thread, first reply."}
+	]}`
+	trig := seedPosterChain(store, "corr-partial-history", "gh:owner/repo#7", "pr-replier", body)
+
+	// Only thread 100 has prior history.
+	seedPriorPost(store, "corr-partial-history", "pr-reply-poster", "inline-reply", 100, 901, false)
+
+	fg := &fakeGithub{}
+	h := newReplyPoster(t, store, fg)
+	events, err := h.Handle(context.Background(), trig)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if fg.replyCalls != 1 {
+		t.Errorf("expected 1 reply post (thread 200 only), got %d", fg.replyCalls)
+	}
+	if fg.replyCalls == 1 && fg.replies[0].CommentID != 200 {
+		t.Errorf("expected reply on thread 200, got %d", fg.replies[0].CommentID)
+	}
+
+	var skipped, posted int
+	for _, e := range events {
+		p := posterPayload(t, e)
+		if p.Kind != "inline-reply" {
+			continue
+		}
+		if p.Skipped {
+			skipped++
+			if p.InReplyToID != 100 {
+				t.Errorf("expected skipped event for thread 100, got %d", p.InReplyToID)
+			}
+		} else {
+			posted++
+			if p.InReplyToID != 200 {
+				t.Errorf("expected posted event for thread 200, got %d", p.InReplyToID)
+			}
+		}
+	}
+	if skipped != 1 || posted != 1 {
+		t.Errorf("event distribution mismatch: skipped=%d posted=%d", skipped, posted)
+	}
+}
+
+// TestPRCommentPoster_SkippedPriorDoesNotSuppress asserts the chain check
+// only counts non-skipped history. A prior Skipped=true event means we never
+// actually called GitHub — it must NOT short-circuit a real post.
+func TestPRCommentPoster_SkippedPriorDoesNotSuppress(t *testing.T) {
+	store := newMockStore()
+	body := `{"summary":"","inline_replies":[
+		{"comment_id":777,"body":"Real reply this time."}
+	]}`
+	trig := seedPosterChain(store, "corr-skipped-prior", "gh:owner/repo#7", "pr-replier", body)
+
+	// A prior Skipped=true event (e.g. the upstream noop signal or a prior
+	// chain-history skip). Must not block a fresh real attempt.
+	seedPriorPost(store, "corr-skipped-prior", "pr-reply-poster", "inline-reply", 777, 0, true)
+
+	fg := &fakeGithub{}
+	h := newReplyPoster(t, store, fg)
+	if _, err := h.Handle(context.Background(), trig); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if fg.replyCalls != 1 {
+		t.Errorf("expected 1 reply post (prior was Skipped=true), got %d", fg.replyCalls)
+	}
+}
+
+// TestPRCommentPoster_OtherHandlerHistoryIgnored guards against cross-handler
+// confusion. A PRCommentPosted authored by pr-consolidator on the same
+// correlation must not suppress pr-reply-poster's work — Source filter must
+// match `handler:<name>` exactly.
+func TestPRCommentPoster_OtherHandlerHistoryIgnored(t *testing.T) {
+	store := newMockStore()
+	body := `{"summary":"","inline_replies":[
+		{"comment_id":888,"body":"My own first reply."}
+	]}`
+	trig := seedPosterChain(store, "corr-other-handler", "gh:owner/repo#7", "pr-replier", body)
+
+	// Posted by a *different* handler — must be ignored by pr-reply-poster's
+	// chain check.
+	seedPriorPost(store, "corr-other-handler", "pr-consolidator", "inline-reply", 888, 999, false)
+
+	fg := &fakeGithub{}
+	h := newReplyPoster(t, store, fg)
+	if _, err := h.Handle(context.Background(), trig); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if fg.replyCalls != 1 {
+		t.Errorf("expected 1 reply post (other-handler history must not suppress), got %d", fg.replyCalls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Author-identity dedup (Fix B)
+//
+// Closes the cross-correlation gap that Fix A cannot: when the same PR is
+// re-targeted by a fresh pr-feedback run, the new correlation has no history
+// of its own, so Fix A's chain-check passes through. The bot's GitHub login
+// (resolved lazily via GET /user) is the durable identity signal — if the
+// bot already replied on this thread, suppress regardless of body text.
+// ---------------------------------------------------------------------------
+
+// TestPRCommentPoster_InlineReplySkipsWhenBotAlreadyReplied is the core Fix B
+// scenario for inline threads: a fresh correlation, no prior chain history,
+// but the bot has a reply on the thread from a previous workflow. Author
+// identity catches it; body-hash would miss because LLM wording differs.
+func TestPRCommentPoster_InlineReplySkipsWhenBotAlreadyReplied(t *testing.T) {
+	store := newMockStore()
+	body := `{"summary":"","inline_replies":[
+		{"comment_id":500,"body":"Fresh correlation, different wording."}
+	]}`
+	trig := seedPosterChain(store, "corr-fresh", "gh:owner/repo#7", "pr-replier", body)
+
+	fg := &fakeGithub{
+		botLogin: "rick-bot",
+		existingReview: []gh.ReviewComment{
+			// Bot's prior reply on the target thread from an earlier run —
+			// completely different body, so duplicateReviewReplyHash misses.
+			{ID: 901, InReplyToID: 500, Body: "Older wording.", User: gh.User{Login: "rick-bot"}},
+		},
+	}
+	h := newReplyPoster(t, store, fg)
+	events, err := h.Handle(context.Background(), trig)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if fg.replyCalls != 0 {
+		t.Errorf("expected 0 reply posts via identity dedup, got %d", fg.replyCalls)
+	}
+	if len(events) != 1 || !posterPayload(t, events[0]).Skipped {
+		t.Errorf("expected single skipped event")
+	}
+}
+
+// TestPRCommentPoster_InlineReplyIgnoresOtherUserReplies guards the precision
+// of the identity check: a reply on the same thread by a non-bot user must
+// NOT suppress Rick's reply.
+func TestPRCommentPoster_InlineReplyIgnoresOtherUserReplies(t *testing.T) {
+	store := newMockStore()
+	body := `{"summary":"","inline_replies":[
+		{"comment_id":500,"body":"Rick's first reply."}
+	]}`
+	trig := seedPosterChain(store, "corr-other-user", "gh:owner/repo#7", "pr-replier", body)
+
+	fg := &fakeGithub{
+		botLogin: "rick-bot",
+		existingReview: []gh.ReviewComment{
+			// Human reviewer replied on the thread — must not block Rick.
+			{ID: 901, InReplyToID: 500, Body: "Reviewer follow-up.", User: gh.User{Login: "alice"}},
+		},
+	}
+	h := newReplyPoster(t, store, fg)
+	if _, err := h.Handle(context.Background(), trig); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if fg.replyCalls != 1 {
+		t.Errorf("non-bot replies must not suppress; expected 1 reply, got %d", fg.replyCalls)
+	}
+}
+
+// TestPRCommentPoster_InlineReplyIgnoresBotOnDifferentThread guards thread
+// precision: a bot reply on a *different* thread must not suppress this
+// thread's reply. authorRepliedOnThread filters by InReplyToID.
+func TestPRCommentPoster_InlineReplyIgnoresBotOnDifferentThread(t *testing.T) {
+	store := newMockStore()
+	body := `{"summary":"","inline_replies":[
+		{"comment_id":500,"body":"Reply for thread 500."}
+	]}`
+	trig := seedPosterChain(store, "corr-other-thread", "gh:owner/repo#7", "pr-replier", body)
+
+	fg := &fakeGithub{
+		botLogin: "rick-bot",
+		existingReview: []gh.ReviewComment{
+			// Bot replied on a different thread — must not suppress thread 500.
+			{ID: 901, InReplyToID: 999, Body: "Bot reply on 999.", User: gh.User{Login: "rick-bot"}},
+		},
+	}
+	h := newReplyPoster(t, store, fg)
+	if _, err := h.Handle(context.Background(), trig); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if fg.replyCalls != 1 {
+		t.Errorf("bot on different thread must not suppress; expected 1 reply, got %d", fg.replyCalls)
+	}
+}
+
+// TestPRCommentPoster_SummarySkipsWhenBotAlreadyCommented mirrors the inline
+// behavior for top-level issue comments.
+func TestPRCommentPoster_SummarySkipsWhenBotAlreadyCommented(t *testing.T) {
+	store := newMockStore()
+	body := `{"summary":"Cross-correlation summary, fresh wording.","inline_replies":[]}`
+	trig := seedPosterChain(store, "corr-summary-fresh", "gh:owner/repo#7", "pr-replier", body)
+
+	fg := &fakeGithub{
+		botLogin: "rick-bot",
+		existing: []gh.IssueComment{
+			// Bot's prior summary from a previous workflow — different body.
+			{ID: 50, Body: "Older summary.", User: gh.User{Login: "rick-bot"}},
+		},
+	}
+	h := newReplyPoster(t, store, fg)
+	if _, err := h.Handle(context.Background(), trig); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if fg.postedCalls != 0 {
+		t.Errorf("expected 0 summary posts via identity dedup, got %d", fg.postedCalls)
+	}
+}
+
+// TestPRCommentPoster_LegacySkipsWhenBotAlreadyCommented covers the
+// plain-text fallback path through the same lens.
+func TestPRCommentPoster_LegacySkipsWhenBotAlreadyCommented(t *testing.T) {
+	store := newMockStore()
+	trig := seedPosterChain(store, "corr-legacy-fresh", "gh:owner/repo#7", "pr-replier", "Fresh plain-text body.")
+
+	fg := &fakeGithub{
+		botLogin: "rick-bot",
+		existing: []gh.IssueComment{
+			{ID: 50, Body: "Older plain-text body.", User: gh.User{Login: "rick-bot"}},
+		},
+	}
+	h := newReplyPoster(t, store, fg)
+	if _, err := h.Handle(context.Background(), trig); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if fg.postedCalls != 0 {
+		t.Errorf("expected 0 legacy posts via identity dedup, got %d", fg.postedCalls)
+	}
+}
+
+// TestPRCommentPoster_BotLoginLookupFailureDegradesGracefully verifies the
+// safety net: if GET /user fails, identity dedup is silently disabled and
+// the existing body-hash + correlation-chain layers must still work.
+func TestPRCommentPoster_BotLoginLookupFailureDegradesGracefully(t *testing.T) {
+	store := newMockStore()
+	trig := seedPosterChain(store, "corr-whoami-fail", "gh:owner/repo#7", "pr-replier", "Hello.")
+
+	fg := &fakeGithub{botLoginErr: errors.New("HTTP 401: bad credentials")}
+	h := newReplyPoster(t, store, fg)
+	if _, err := h.Handle(context.Background(), trig); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	// Identity dedup off → still posts via body-hash path.
+	if fg.postedCalls != 1 {
+		t.Errorf("expected 1 post after identity dedup degraded, got %d", fg.postedCalls)
+	}
+}
+
+// TestPRCommentPoster_BotLoginResolvedOnce verifies the sync.Once contract:
+// across multiple Handle invocations, GET /user is called exactly once.
+func TestPRCommentPoster_BotLoginResolvedOnce(t *testing.T) {
+	store := newMockStore()
+
+	fg := &fakeGithub{botLogin: "rick-bot"}
+	h := newReplyPoster(t, store, fg)
+
+	for i, corr := range []string{"a", "b", "c"} {
+		body := `{"summary":"","inline_replies":[{"comment_id":1,"body":"x"}]}`
+		trig := seedPosterChain(store, corr, "gh:owner/repo#1", "pr-replier", body)
+		if _, err := h.Handle(context.Background(), trig); err != nil {
+			t.Fatalf("Handle %d: %v", i, err)
+		}
+	}
+	if fg.botLoginCalls != 1 {
+		t.Errorf("expected GET /user called exactly once across invocations, got %d", fg.botLoginCalls)
 	}
 }

@@ -167,6 +167,24 @@ type User struct {
 	Login string `json:"login"`
 }
 
+// GetAuthenticatedUser returns the user record for the token Rick is running
+// under. Used by the pr-reply-poster's identity-based dedup (Fix B in the
+// pr-feedback duplication analysis) so it can skip threads where Rick's bot
+// account has already replied — even when the body text differs.
+//
+// GET /user
+func (c *Client) GetAuthenticatedUser(ctx context.Context) (*User, error) {
+	respBody, err := c.get(ctx, "/user")
+	if err != nil {
+		return nil, fmt.Errorf("github: get authenticated user: %w", err)
+	}
+	var u User
+	if err := json.Unmarshal(respBody, &u); err != nil {
+		return nil, fmt.Errorf("github: unmarshal authenticated user: %w", err)
+	}
+	return &u, nil
+}
+
 // Review is a top-level PR review.
 type Review struct {
 	ID      int    `json:"id"`
