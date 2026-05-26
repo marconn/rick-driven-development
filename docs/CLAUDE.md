@@ -6,6 +6,7 @@
 
 - `architecture.md` — System overview with Mermaid diagrams. Covers engine vs. PersonaRunner split, default workflow event flow, trigger config (events + AfterPersonas), feedback loop state machine, component responsibilities, workflow definitions, before-hooks, dispatch queue priorities, tag-based correlation lookup, and gRPC service discovery.
 - `event-bus-integration.md` — How to integrate with the event bus. Covers the `event.Envelope` shape, full event catalog, real event traces from the test suite, subscription patterns (`Subscribe` / `SubscribeAll`), subscriber guarantees, dispatch queue, tag lookup, middleware stack, persona context sharing, `ChannelBus` vs `OutboxBus`, and a side-system quickstart.
+- `install-macos.md` — Mac install + ops runbook. The Makefile's `deploy`/`restart` targets assume Linux systemd; on macOS the equivalent is a per-user LaunchAgent (`com.marconn.rick`). Covers the env-file convention (`~/.config/rick/env`), the plist template, `launchctl bootstrap` / `kickstart -k` ops, log paths, and uninstall.
 
 ## When to consult
 
