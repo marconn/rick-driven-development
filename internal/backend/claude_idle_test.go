@@ -226,10 +226,16 @@ printf '{"type":"result","subtype":"success","stop_reason":"end_turn","result":"
 	binPath := writeFakeBinary(t, "fake-claude-tool-exec.sh", script)
 
 	c := NewClaude(binPath)
-	// 300ms stall + 80ms inter-frame gap: pre-fix would idle-timeout because
-	// none of these frames are text_delta. Post-fix, the script runs to
-	// completion and Run returns nil error.
-	c.stallTimeout = 300 * time.Millisecond
+	// 500ms stall + 80ms inter-frame gap. The 500ms matches the cold-start
+	// floor established by commit 907f217 for the sibling idle tests: under
+	// macOS / go-test scheduler contention, `/bin/sh` exec can take ~150ms
+	// before the first printf runs, and a busy laptop can spike higher.
+	// A 300ms window raced that startup and produced sporadic
+	// "idle timeout exceeded (stall=300ms) (after 301ms)" failures with the
+	// watchdog firing BEFORE any frame arrived — masking the real contract
+	// (frames at 80ms keep the watchdog alive). 500ms keeps the test fast
+	// while making the cold-start race vanishingly unlikely.
+	c.stallTimeout = 500 * time.Millisecond
 
 	start := time.Now()
 	resp, err := c.Run(context.Background(), Request{

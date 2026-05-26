@@ -67,6 +67,18 @@ func TestSafeWorkspacePath(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
+	// Create the pattern-mismatch directory on disk. On macOS, t.TempDir()
+	// returns a path under /var/folders/... whose canonical form is
+	// /private/var/folders/...; filepath.EvalSymlinks resolves it on the
+	// RICK_REPOS_PATH side but silently falls back to filepath.Abs when the
+	// leaf doesn't exist, so the prefix check fails BEFORE the pattern check
+	// can run. Creating the dir makes both sides symlink-resolve consistently
+	// so the assertion reaches the pattern guard it's meant to exercise.
+	patternMismatchDir := filepath.Join(reposPath, "myapp-no-match")
+	if err := os.MkdirAll(patternMismatchDir, 0o755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
 	t.Setenv("RICK_REPOS_PATH", reposPath)
 
 	tests := []struct {
@@ -86,7 +98,7 @@ func TestSafeWorkspacePath(t *testing.T) {
 		},
 		{
 			name:    "path not matching rick-ws pattern",
-			path:    filepath.Join(reposPath, "myapp-no-match"),
+			path:    patternMismatchDir,
 			wantErr: "not matching *-rick-ws-*",
 		},
 		{
