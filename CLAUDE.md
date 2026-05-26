@@ -78,7 +78,7 @@ External handlers register via bidirectional gRPC streams — stream lifecycle I
 
 ## MCP + agent UI
 
-`internal/mcp/` exposes 48 tools over JSON-RPC 2.0 (stdio/HTTP) in 7 categories: workflow (16), jobs (6), workspace (3), jira (10), wave (5), observability (7), confluence (2). Used by Claude Desktop/Cursor and the `agent/` Wails desktop UI. Full tool catalog: `internal/mcp/CLAUDE.md`. Agent UI architecture + slash commands: `agent/CLAUDE.md`.
+`internal/mcp/` exposes 51 tools over JSON-RPC 2.0 (stdio/HTTP) in 7 categories: workflow (16), jobs (6), workspace (3), jira (12), wave (5), observability (7), confluence (2). Used by Claude Desktop/Cursor and the `agent/` Wails desktop UI. Full tool catalog: `internal/mcp/CLAUDE.md`. Agent UI architecture + slash commands: `agent/CLAUDE.md`.
 
 **Execution mode**: `rick serve --addr :58077 --grpc-addr :59077 --db rick.db --backend claude` starts HTTP (MCP) + gRPC. This is the primary mode — `rick run` is deprecated. Serve defaults `--yolo=true` (headless auto-approve).
 
@@ -94,9 +94,9 @@ Set in `~/.config/rick/env` or shell.
 | `RICK_MAX_ITERATION` | Override every workflow's `MaxIterations` (positive int). Replaces per-workflow hardcoded values at registration time. Unset = baked-in defaults (3 for most code-producing workflows, 1-2 for plan/PR workflows). |
 | `RICK_MAX_WORKFLOWS` | Concurrent workflow cap (0 = unlimited). Excess requests queue. |
 | `RICK_REPOS_PATH` | Root for isolated workspaces + repo clones. Required by workspace/wave tools. |
-| `RICK_CLAUDE_BIN` / `RICK_GEMINI_BIN` / `RICK_CODEX_BIN` | CLI binary paths. |
+| `RICK_CLAUDE_BIN` / `RICK_GEMINI_BIN` / `RICK_CODEX_BIN` / `RICK_ANTIGRAVITY_BIN` | CLI binary paths (antigravity default `agy`). |
 | `RICK_MODEL` | Override default LLM model. |
-| `RICK_REVIEW_BACKENDS` | Comma-separated rotation for review-phase handlers (default `claude,gemini,codex`). Set to a subset to limit to installed CLIs, or one name to disable rotation. |
+| `RICK_REVIEW_BACKENDS` | Comma-separated rotation for review-phase handlers (default `claude,gemini,codex`). Set to a subset to limit to installed CLIs, or one name to disable rotation. `antigravity` is supported but must be opted in explicitly here. |
 | `RICK_BACKEND_TIMEOUT` | Wall-clock cap on developer-phase backend calls (default `20m`). `0` disables. |
 | `RICK_REVIEW_BACKEND_TIMEOUT` | Wall-clock cap on review/commit/feedback-phase backend calls (default `15m`). `0` disables. |
 | `RICK_SERVER_URL` | Agent UI → rick-server URL. |

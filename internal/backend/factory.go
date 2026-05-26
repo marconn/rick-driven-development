@@ -21,10 +21,11 @@ import (
 // the CLI itself wedges past its own watchdogs.
 const defaultStallTimeout = 6 * time.Minute
 
-// New creates a backend by name. Valid names: "claude", "gemini", "codex".
-// Backend binary paths can be overridden via RICK_CLAUDE_BIN, RICK_GEMINI_BIN,
-// and RICK_CODEX_BIN environment variables; otherwise they default to the bare
-// binary name.
+// New creates a backend by name. Valid names: "claude", "gemini", "codex",
+// "antigravity". Backend binary paths can be overridden via RICK_CLAUDE_BIN,
+// RICK_GEMINI_BIN, RICK_CODEX_BIN, and RICK_ANTIGRAVITY_BIN environment
+// variables; otherwise they default to the bare binary name (`agy` for
+// antigravity).
 //
 // When RICK_BACKEND_CONCURRENCY_<UPPER> is set to a positive integer, the
 // backend is wrapped in a concurrency limiter so no more than that many Run
@@ -75,8 +76,17 @@ func newRaw(name string) (Backend, error) {
 		c.stallTimeout = stall
 		return c, nil
 
+	case "antigravity":
+		bin := os.Getenv("RICK_ANTIGRAVITY_BIN")
+		if bin == "" {
+			bin = "agy"
+		}
+		a := NewAntigravity(bin)
+		a.stallTimeout = stall
+		return a, nil
+
 	default:
-		return nil, fmt.Errorf("unknown backend: %s (valid: claude, gemini, codex)", name)
+		return nil, fmt.Errorf("unknown backend: %s (valid: claude, gemini, codex, antigravity)", name)
 	}
 }
 

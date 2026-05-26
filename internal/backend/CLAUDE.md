@@ -1,14 +1,15 @@
 # package backend
 
-Wraps `claude`, `gemini`, and `codex` CLI binaries as a uniform `Backend` interface, parsing their NDJSON `stream-json` output to capture text and stop reasons.
+Wraps `claude`, `gemini`, `codex`, and `antigravity` (`agy`) CLI binaries as a uniform `Backend` interface. Claude/Gemini/Codex parse NDJSON `stream-json` output to capture text and stop reasons; antigravity captures stdout as plain text (no documented structured stream).
 
 ## Files
 - `backend.go` — `Backend` interface, `Request`/`Response` types, `maxArgSize` (128KB) prompt-via-stdin threshold.
-- `factory.go` — `New(name)` single-backend constructor; honors `RICK_CLAUDE_BIN`, `RICK_GEMINI_BIN`, `RICK_CODEX_BIN` env overrides. Also exports `NewReviewBackend(names)` which returns a raw backend for len=1 and a `RoundRobin` for len≥2, plus `ParseReviewBackendsEnv` for `RICK_REVIEW_BACKENDS` handling.
+- `factory.go` — `New(name)` single-backend constructor; honors `RICK_CLAUDE_BIN`, `RICK_GEMINI_BIN`, `RICK_CODEX_BIN`, `RICK_ANTIGRAVITY_BIN` env overrides. Also exports `NewReviewBackend(names)` which returns a raw backend for len=1 and a `RoundRobin` for len≥2, plus `ParseReviewBackendsEnv` for `RICK_REVIEW_BACKENDS` handling. `DefaultReviewBackends` is `claude,gemini,codex` — antigravity must be opted in explicitly via `RICK_REVIEW_BACKENDS`.
 - `round_robin.go` — `RoundRobin` backend: atomic-counter rotation across N backends. Per-`Run` selection, not per-handler. `Name()` returns `round-robin(a,b,c)`. Known gap: `AIRequestSent`/`AIResponseReceived` record the composite name, not the chosen inner backend — per-call attribution requires subprocess logs today.
 - `claude.go` — `Claude` driver: `buildArgs` for `-p`/`--system-prompt`/`--continue`/`--resume`/`--mcp-config`/`--dangerously-skip-permissions`; clears `CLAUDECODE` env to avoid nested-session refusal.
 - `gemini.go` — `Gemini` driver: combines system + user prompt into `<system_instructions>` XML wrapper (gemini CLI has no system-prompt flag).
 - `codex.go` — `Codex` driver: uses `exec` and `exec resume` subcommands with `--json`; wraps system prompt in XML tags like Gemini.
+- `antigravity.go` — `Antigravity` driver (Google `agy` CLI): `-p` for single-shot, `--continue` / `--conversation <id>` for resume, `-m` model, `--dangerously-skip-permissions` for yolo, `--print-timeout 30m` to push the CLI's internal print watchdog past rick's outer wall-clock. No `--system-prompt` flag → folded into the prompt with the same `<system_instructions>` wrapper as Gemini. Stdout captured as plain text (no NDJSON envelope at integration time) so `StopReason` and `TokensUsed` stay empty. `MCPConfig` ignored.
 - `stream.go` — `StreamWriter` (io.Writer) buffers + splits NDJSON lines, calls `ExtractFn` per line, optional `CheckResultFn` via `WithResultCheck`.
 - `stream_claude.go` — `ExtractClaudeText` / `NewClaudePrintExtractor` / `ClaudeCheckResult`; handles both legacy flat events and `stream_event` envelope from `--include-partial-messages`.
 - `stream_gemini.go` — `ExtractGeminiText` / `GeminiCheckResult` (gemini exposes no stop_reason yet, returns "").

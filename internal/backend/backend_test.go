@@ -43,6 +43,16 @@ func TestNew(t *testing.T) {
 		}
 	})
 
+	t.Run("antigravity", func(t *testing.T) {
+		b, err := New("antigravity")
+		if err != nil {
+			t.Fatalf("New(antigravity): %v", err)
+		}
+		if b.Name() != "antigravity" {
+			t.Errorf("want antigravity, got %s", b.Name())
+		}
+	})
+
 	t.Run("unknown", func(t *testing.T) {
 		_, err := New("openai")
 		if err == nil {
@@ -331,6 +341,102 @@ func TestCodexBuildArgs(t *testing.T) {
 		assertContains(t, args, "--dangerously-bypass-approvals-and-sandbox")
 		assertContains(t, args, "--model")
 		assertContains(t, args, "gpt-5")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Antigravity buildArgs
+// ---------------------------------------------------------------------------
+
+func TestAntigravityBuildArgs(t *testing.T) {
+	a := NewAntigravity("agy")
+
+	t.Run("basic_combines_prompts", func(t *testing.T) {
+		args, stdin := a.buildArgs(Request{
+			SystemPrompt: "You are an expert.",
+			UserPrompt:   "Hello",
+		})
+		assertContains(t, args, "-p")
+		assertArgPair(t, args, "--print-timeout", antigravityPrintTimeout.String())
+		if stdin != "" {
+			t.Error("unexpected stdin prompt for small input")
+		}
+		// agy has no --system-prompt flag → system prompt must be embedded
+		// inside the -p argument (matches Gemini's folding strategy).
+		found := false
+		for _, a := range args {
+			if strings.Contains(a, "<system_instructions>") {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("system prompt not embedded in -p arg")
+		}
+		// New session must NOT carry --continue or --conversation.
+		for _, a := range args {
+			if a == "--continue" || a == "--conversation" {
+				t.Errorf("unexpected resume flag %q on fresh session", a)
+			}
+		}
+	})
+
+	t.Run("session_latest_uses_continue", func(t *testing.T) {
+		args, _ := a.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+			SessionID:    "latest",
+		})
+		assertContains(t, args, "--continue")
+		// System prompt must NOT be re-sent on resume.
+		for _, arg := range args {
+			if strings.Contains(arg, "<system_instructions>") {
+				t.Error("system prompt should not be embedded when continuing")
+			}
+		}
+	})
+
+	t.Run("session_specific_uses_conversation", func(t *testing.T) {
+		args, _ := a.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+			SessionID:    "conv-abc-123",
+		})
+		assertArgPair(t, args, "--conversation", "conv-abc-123")
+		for _, arg := range args {
+			if strings.Contains(arg, "<system_instructions>") {
+				t.Error("system prompt should not be embedded when resuming")
+			}
+		}
+	})
+
+	t.Run("yolo_and_model", func(t *testing.T) {
+		args, _ := a.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+			Yolo:         true,
+			Model:        "gemini-2.5-pro",
+		})
+		assertContains(t, args, "--dangerously-skip-permissions")
+		assertArgPair(t, args, "-m", "gemini-2.5-pro")
+	})
+
+	t.Run("large_prompt_uses_stdin", func(t *testing.T) {
+		large := strings.Repeat("x", maxArgSize+1)
+		args, stdin := a.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   large,
+		})
+		if stdin == "" {
+			t.Error("expected stdin for large prompt")
+		}
+		// -p flag still present (subcommand selector) but without the
+		// prompt as its argv value — the prompt body went to stdin.
+		assertContains(t, args, "-p")
+		for _, arg := range args {
+			if len(arg) > maxArgSize {
+				t.Errorf("argv element exceeds maxArgSize (%d bytes) — prompt should have moved to stdin", len(arg))
+			}
+		}
 	})
 }
 
