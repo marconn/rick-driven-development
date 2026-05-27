@@ -3,14 +3,16 @@
 Provisions isolated git working copies under `$RICK_REPOS_PATH` so workflows (`workspace-dev`, `jira-dev`, `pr-review`, `ci-fix`) can develop on a clean branch without disturbing the operator's checkout.
 
 ## Files
-- `workspace.go` — `SetupWorkspace`, `CleanupIsolatedWorkspace`, `WorkspaceResult`, internal `runGit` / `resolveBasePath` helpers
+- `workspace.go` — `SetupWorkspace`, `CleanupIsolatedWorkspace`, `WorkspaceResult`, internal `runGit` / `resolveBasePath` / `cpFallback` helpers
+- `clone_darwin.go` — `cloneTree` via APFS `clonefile(2)` (single syscall, copy-on-write, O(1)); falls back to `cpFallback` on EXDEV / ENOTSUP so non-APFS `RICK_REPOS_PATH` still works
+- `clone_other.go` — `cloneTree` via `cpFallback` on every non-Darwin platform (GNU cp already uses `copy_file_range()` on Linux)
 - `workspace_test.go` — table-driven tests over a self-hosted git repo (also defines a small `validateWorkspaceParams` helper used only by tests)
 
 ## Key types / functions
 - `WorkspaceResult{Path, Branch, Base, Isolated}` — return shape from `SetupWorkspace`
 - `SetupWorkspace(repo, ticket, branch, base, suffix string, isolate bool) (*WorkspaceResult, error)` — single entry point that:
   - resolves `$RICK_REPOS_PATH/<repo>` (falls back to the basename if `repo` is `owner/name` and the owner segment is already part of `RICK_REPOS_PATH`)
-  - if `isolate=true`, removes any stale destination then `cp -r` the source repo to the destination
+  - if `isolate=true`, removes any stale destination then clones the source repo (APFS `clonefile(2)` on macOS, `cp -r` elsewhere) to the destination
   - `git fetch origin`, then `reset --hard HEAD` + `clean -fd` to guarantee a clean tree
   - if `branch != ""`, checks out that existing remote branch (PR / ci-fix path); otherwise creates a new branch named after `ticket` from `origin/<base>`
   - falls back to `checkout` + `reset --hard origin/<branch-or-base>` when the local branch already exists from a prior run
@@ -29,7 +31,7 @@ Provisions isolated git working copies under `$RICK_REPOS_PATH` so workflows (`w
 ## Safety guards
 - Required-arg checks: `repo` must be set; at least one of `ticket` / `branch` must be set
 - Hard fail when `RICK_REPOS_PATH` is unset, when the source repo lacks `.git`, or when git operations fail (errors carry the git command + stderr)
-- Stale destination removed before `cp -r` so a half-written previous run can never leak files into the new workspace
+- Stale destination removed before the clone so a half-written previous run can never leak files into the new workspace (`clonefile(2)` also requires the destination not to exist)
 - Deferred cleanup of the isolated copy on any post-copy error so failed setups don't leave orphan directories
 - `reset --hard` + `clean -fd` ensure dirty trees never block branch creation in the in-place (non-isolated) mode
 - This package does NOT validate destination patterns before deletion — callers (`internal/mcp/tools_workspace.go`) own the `*-rick-ws-*` / suffix-based pattern guard before invoking `CleanupIsolatedWorkspace`

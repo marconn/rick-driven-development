@@ -27,6 +27,17 @@ func runGit(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// cpFallback is the cross-platform byte-copy path used when a faster
+// clone primitive isn't available (non-Darwin, or Darwin with the
+// destination on a filesystem that doesn't support clonefile(2)).
+func cpFallback(srcRepo, destPath string) error {
+	cmd := exec.Command("cp", "-r", srcRepo, destPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("cp -r: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 // resolveBasePath returns the $RICK_REPOS_PATH directory or an error if unset.
 func resolveBasePath() (string, error) {
 	p := os.Getenv("RICK_REPOS_PATH")
@@ -40,7 +51,8 @@ func resolveBasePath() (string, error) {
 // If branch is non-empty, checks out that existing remote branch instead of
 // creating a new branch from the ticket name. This is used by ci-fix and other
 // PR-based workflows where the developer must work on the PR's actual branch.
-// If isolate is true, creates an isolated copy (cp -r) under $RICK_REPOS_PATH.
+// If isolate is true, creates an isolated copy under $RICK_REPOS_PATH
+// (APFS clonefile(2) on macOS, cp -r elsewhere — see clone_darwin.go).
 // correlationID is recorded in the .rick/workspace.yaml marker so future
 // post-checks can correlate a workspace back to its workflow; pass "" for
 // manual setups (e.g., MCP rick_workspace_setup) that have no workflow.
@@ -114,10 +126,12 @@ found:
 			_ = os.RemoveAll(destPath)
 		}
 
-		// Copy the repo directory to preserve original remote config.
-		cmd := exec.Command("cp", "-r", srcRepo, destPath)
-		if out, cpErr := cmd.CombinedOutput(); cpErr != nil {
-			return nil, fmt.Errorf("cp -r: %s (%w)", strings.TrimSpace(string(out)), cpErr)
+		// Copy the repo directory to preserve original remote config. On macOS
+		// this issues a single APFS clonefile(2) syscall (sub-second for any
+		// size, copy-on-write); elsewhere it falls back to `cp -r`. See
+		// clone_darwin.go / clone_other.go.
+		if cpErr := cloneTree(srcRepo, destPath); cpErr != nil {
+			return nil, cpErr
 		}
 
 		workDir = destPath
