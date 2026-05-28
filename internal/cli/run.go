@@ -272,6 +272,13 @@ func selectWorkflowDef(name string) (engine.WorkflowDef, error) {
 		def = engine.WithoutHandler(def, "quality-gate")
 	}
 
+	// pr-stale-reference (cross-file documentation sweep) is opt-in. Inject it
+	// only when enabled — WithStaleReferenceSweep is a no-op for workflows
+	// without a pr-consolidator, so this is safe to apply to every def.
+	if os.Getenv("RICK_ENABLE_STALE_REF_SWEEP") != "" {
+		def = engine.WithStaleReferenceSweep(def)
+	}
+
 	return def, nil
 }
 

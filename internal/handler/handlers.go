@@ -256,6 +256,7 @@ func RegisterAll(reg *Registry, d Deps) error {
 		// review-rotation. See NewPRConsolidator for rationale.
 		NewPRConsolidator(d),
 		NewPRCleanup(d),
+		NewPRStaleReference(d),
 
 		// PR category reviewers — dedicated single-concern reviewers for pr-review workflow.
 		NewReviewHandler(ReviewHandlerConfig{

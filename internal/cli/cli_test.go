@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/marconn/rick-event-driven-development/internal/backend"
+	"github.com/marconn/rick-event-driven-development/internal/engine"
 	"github.com/marconn/rick-event-driven-development/internal/eventstore"
 	"github.com/marconn/rick-event-driven-development/internal/persona"
 )
@@ -166,6 +167,63 @@ func TestSelectWorkflowDef_DisableQualityGate(t *testing.T) {
 	if !depSet["review-consolidator"] {
 		t.Errorf("committer deps = %v, want review-consolidator", deps)
 	}
+}
+
+func TestSelectWorkflowDef_StaleRefSweepGating(t *testing.T) {
+	has := func(def engine.WorkflowDef, name string) bool {
+		if _, ok := def.Graph[name]; ok {
+			return true
+		}
+		return false
+	}
+	consolidatorDependsOn := func(def engine.WorkflowDef, name string) bool {
+		for _, d := range def.Graph["pr-consolidator"] {
+			if d == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("disabled by default", func(t *testing.T) {
+		// RICK_ENABLE_STALE_REF_SWEEP unset.
+		def, err := selectWorkflowDef("pr-review")
+		if err != nil {
+			t.Fatalf("selectWorkflowDef: %v", err)
+		}
+		if has(def, "pr-stale-reference") {
+			t.Error("pr-stale-reference present in Graph when sweep not enabled")
+		}
+		for _, r := range def.Required {
+			if r == "pr-stale-reference" {
+				t.Error("pr-stale-reference present in Required when sweep not enabled")
+			}
+		}
+		if consolidatorDependsOn(def, "pr-stale-reference") {
+			t.Error("pr-consolidator still depends on stripped pr-stale-reference")
+		}
+		// The reviewers must still feed the consolidator after the rewire.
+		if !consolidatorDependsOn(def, "pr-vendor-resilience") {
+			t.Error("rewire dropped a real reviewer from pr-consolidator deps")
+		}
+	})
+
+	t.Run("enabled via env", func(t *testing.T) {
+		t.Setenv("RICK_ENABLE_STALE_REF_SWEEP", "1")
+		def, err := selectWorkflowDef("pr-review")
+		if err != nil {
+			t.Fatalf("selectWorkflowDef: %v", err)
+		}
+		if !has(def, "pr-stale-reference") {
+			t.Fatal("pr-stale-reference missing from Graph when sweep enabled")
+		}
+		if deps := def.Graph["pr-stale-reference"]; len(deps) != 1 || deps[0] != "pr-jira-context" {
+			t.Errorf("pr-stale-reference deps = %v, want [pr-jira-context]", deps)
+		}
+		if !consolidatorDependsOn(def, "pr-stale-reference") {
+			t.Error("pr-consolidator must wait on pr-stale-reference when enabled")
+		}
+	})
 }
 
 func TestPRFeedbackWorkflowDef_IncludesQualityGate(t *testing.T) {

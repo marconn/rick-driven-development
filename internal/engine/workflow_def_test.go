@@ -183,6 +183,66 @@ func TestPRReviewWorkflowIncludesVendorResilience(t *testing.T) {
 	}
 }
 
+// TestPRReviewExcludesStaleReferenceByDefault locks in that the sweep is
+// opt-in: the raw def (the production default) must NOT contain it, so existing
+// pr-review consumers never join on a node that won't fire.
+func TestPRReviewExcludesStaleReferenceByDefault(t *testing.T) {
+	def := PRReviewWorkflowDef()
+	if _, ok := def.Graph["pr-stale-reference"]; ok {
+		t.Error("pr-stale-reference must not be in the default pr-review Graph")
+	}
+	for _, r := range def.Required {
+		if r == "pr-stale-reference" {
+			t.Error("pr-stale-reference must not be in the default pr-review Required")
+		}
+	}
+}
+
+// TestWithStaleReferenceSweep verifies the opt-in injection: a parallel node
+// after pr-jira-context that pr-consolidator joins on, without dropping any
+// real reviewer and without mutating the package-level reviewer slice.
+func TestWithStaleReferenceSweep(t *testing.T) {
+	base := PRReviewWorkflowDef()
+	def := WithStaleReferenceSweep(base)
+
+	requiredHas := false
+	for _, r := range def.Required {
+		if r == "pr-stale-reference" {
+			requiredHas = true
+			break
+		}
+	}
+	if !requiredHas {
+		t.Fatal("WithStaleReferenceSweep must add 'pr-stale-reference' to Required")
+	}
+
+	deps, ok := def.Graph["pr-stale-reference"]
+	if !ok || len(deps) != 1 || deps[0] != "pr-jira-context" {
+		t.Fatalf("pr-stale-reference deps: want [pr-jira-context], got %v (ok=%v)", deps, ok)
+	}
+
+	consolidatorHasReviewer, consolidatorHasStale := false, false
+	for _, d := range def.Graph["pr-consolidator"] {
+		switch d {
+		case "pr-stale-reference":
+			consolidatorHasStale = true
+		case "pr-security":
+			consolidatorHasReviewer = true
+		}
+	}
+	if !consolidatorHasStale {
+		t.Error("pr-consolidator must join on pr-stale-reference after injection")
+	}
+	if !consolidatorHasReviewer {
+		t.Error("injection dropped a real reviewer from pr-consolidator deps")
+	}
+
+	// The original def must be untouched (no aliasing / global mutation).
+	if _, ok := base.Graph["pr-stale-reference"]; ok {
+		t.Error("WithStaleReferenceSweep mutated the input def")
+	}
+}
+
 // TestPRReviewWorkflowIncludesDocsConcordance locks in the wiring for the
 // pr-docs-concordance category reviewer (same three invariants as the
 // vendor-resilience test): present in Required, keyed on pr-jira-context in the

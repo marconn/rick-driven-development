@@ -550,6 +550,40 @@ func WithoutHandler(def WorkflowDef, handler string) WorkflowDef {
 	return def
 }
 
+// WithStaleReferenceSweep injects the opt-in pr-stale-reference handler into a
+// pr-review-shaped def: a parallel node fired after pr-jira-context that
+// pr-consolidator joins on. It is the inverse of WithoutHandler and exists
+// because the sweep is default-off (RICK_ENABLE_STALE_REF_SWEEP) — baking it
+// into PRReviewWorkflowDef and stripping it by default would leave every
+// pr-review consumer joining on a node that never fires. No-op (returns def
+// unchanged) when the def has no pr-consolidator or already contains the node.
+// All copied state is fresh so the package-level prCategoryReviewers slice and
+// any shared Graph are never mutated.
+func WithStaleReferenceSweep(def WorkflowDef) WorkflowDef {
+	consDeps, ok := def.Graph["pr-consolidator"]
+	if !ok {
+		return def
+	}
+	if _, exists := def.Graph["pr-stale-reference"]; exists {
+		return def
+	}
+
+	def.Required = append(append([]string{}, def.Required...), "pr-stale-reference")
+
+	newGraph := make(map[string][]string, len(def.Graph)+1)
+	for h, deps := range def.Graph {
+		if h == "pr-consolidator" {
+			newGraph[h] = append(append([]string{}, consDeps...), "pr-stale-reference")
+			continue
+		}
+		newGraph[h] = deps
+	}
+	newGraph["pr-stale-reference"] = []string{"pr-jira-context"}
+	def.Graph = newGraph
+
+	return def
+}
+
 // CIFixWorkflowDef returns a workflow for fixing CI failures detected after
 // a committer push. Provisions workspace, developer fixes the issue, reviewer
 // + qa validate, committer pushes again.

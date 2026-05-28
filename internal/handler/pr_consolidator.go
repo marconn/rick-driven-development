@@ -186,8 +186,15 @@ func extractConsolidatorInputs(events []event.Envelope) (event.WorkflowRequested
 
 		case event.ContextEnrichment:
 			var p event.ContextEnrichmentPayload
-			if err := json.Unmarshal(e.Payload, &p); err == nil && p.Kind == "pr-diff-truncated" {
-				diffTruncated = true
+			if err := json.Unmarshal(e.Payload, &p); err == nil {
+				switch p.Kind {
+				case "pr-diff-truncated":
+					diffTruncated = true
+				case "stale-references":
+					// Deterministic cross-file sweep (pr-stale-reference). Folded
+					// into the review body as advisory; never an AIResponseReceived.
+					handlerOutputs["pr-stale-reference"] = p.Summary
+				}
 			}
 
 		case event.AIResponseReceived:
@@ -396,6 +403,15 @@ func buildConsolidationPrompt(params event.WorkflowRequestedPayload, handlerOutp
 			output = "(no output)"
 		}
 		fmt.Fprintf(&b, "---\n### %s\n\n%s\n\n", r.label, output)
+	}
+
+	// pr-stale-reference is a deterministic, non-AI sweep gated behind
+	// RICK_ENABLE_STALE_REF_SWEEP — surfaced as a dedicated advisory section
+	// only when present, so it never shows a phantom "(no output)" block when
+	// the sweep is disabled. It is NOT in prCategoryReviewerLabels for that
+	// reason. Findings are ground-truth grep hits; treat as advisory.
+	if staleRefs := handlerOutputs["pr-stale-reference"]; strings.TrimSpace(staleRefs) != "" {
+		fmt.Fprintf(&b, "---\n### Documentation Reference Check (advisory, non-blocking)\n\n%s\n\n", staleRefs)
 	}
 
 	b.WriteString("---\n## PR Diff\n\n")

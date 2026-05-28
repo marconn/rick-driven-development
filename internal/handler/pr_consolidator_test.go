@@ -98,6 +98,48 @@ func TestExtractConsolidatorInputs(t *testing.T) {
 	}
 }
 
+func TestExtractConsolidatorInputs_StaleReferences(t *testing.T) {
+	corrID := "corr-stale-1"
+	events := []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Source: "gh:owner/repo#7",
+		})).WithCorrelation(corrID),
+		event.New(event.ContextEnrichment, 1, event.MustMarshal(event.ContextEnrichmentPayload{
+			Source:  "pr-stale-reference",
+			Kind:    "stale-references",
+			Summary: "advisory: `FetchUser` lingers in `README.md:3`",
+		})).WithCorrelation(corrID).WithSource("handler:pr-stale-reference"),
+	}
+
+	_, handlerOutputs, _, _, _, _ := extractConsolidatorInputs(events)
+	if got := handlerOutputs["pr-stale-reference"]; !strings.Contains(got, "FetchUser") {
+		t.Errorf("stale-references enrichment not captured: %q", got)
+	}
+}
+
+func TestBuildConsolidationPrompt_StaleReferenceSection(t *testing.T) {
+	params := event.WorkflowRequestedPayload{Source: "gh:owner/repo#7"}
+
+	t.Run("present", func(t *testing.T) {
+		out := buildConsolidationPrompt(params, map[string]string{
+			"pr-stale-reference": "advisory: `FetchUser` lingers in `README.md:3`",
+		}, "")
+		if !strings.Contains(out, "Documentation Reference Check") {
+			t.Error("advisory section missing when stale refs present")
+		}
+		if !strings.Contains(out, "FetchUser") {
+			t.Error("stale-reference content missing")
+		}
+	})
+
+	t.Run("absent shows no phantom section", func(t *testing.T) {
+		out := buildConsolidationPrompt(params, map[string]string{}, "")
+		if strings.Contains(out, "Documentation Reference Check") {
+			t.Error("phantom advisory section rendered when sweep produced nothing")
+		}
+	})
+}
+
 // TestExtractConsolidatorInputs_CapturesWorkspacePath locks in the fix for the
 // PR #27 crash: the consolidator must run its backend inside the PR workspace
 // (a git repo), otherwise codex exits fast with "not inside a trusted

@@ -45,6 +45,7 @@ Schema:
 - `"REQUEST_CHANGES"` when any blocking / must-fix issue is present.
 - `"COMMENT"` for non-blocking findings only.
 - `"APPROVE"` when no grounded findings of any severity were surfaced.
+- The **Documentation Reference Check** section (if present) is **advisory and non-blocking** — it lists references to symbols this PR renamed/removed that linger in unchanged files. Surface its items under `unanchored` (the files are outside the diff, so they cannot anchor). **Never** raise the event to `REQUEST_CHANGES` on the strength of these alone; they do not block, and they must not by themselves prevent an otherwise-clean `APPROVE` (use `COMMENT` in that case).
 
 ## Summary Field
 
