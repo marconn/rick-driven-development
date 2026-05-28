@@ -409,7 +409,12 @@ func TestAntigravityBuildArgs(t *testing.T) {
 		}
 	})
 
-	t.Run("yolo_and_model", func(t *testing.T) {
+	// Regression: agy v1.0.3 has NO model flag — it rejects `-m`/`--model`
+	// with "flags provided but not defined" (exit 2) before doing any work.
+	// A model on the Request (from RICK_MODEL or a rick_consult/rick_run model
+	// arg) must therefore be dropped, never forwarded, or every model-bearing
+	// antigravity call crashes at flag-parse. Yolo must still be honored.
+	t.Run("yolo_set_model_dropped", func(t *testing.T) {
 		args, _ := a.buildArgs(Request{
 			SystemPrompt: "sys",
 			UserPrompt:   "msg",
@@ -417,7 +422,14 @@ func TestAntigravityBuildArgs(t *testing.T) {
 			Model:        "gemini-2.5-pro",
 		})
 		assertContains(t, args, "--dangerously-skip-permissions")
-		assertArgPair(t, args, "-m", "gemini-2.5-pro")
+		for i, arg := range args {
+			if arg == "-m" || arg == "--model" || strings.HasPrefix(arg, "--model=") {
+				t.Errorf("args[%d]=%q: model flag must not be emitted — agy rejects it", i, arg)
+			}
+			if arg == "gemini-2.5-pro" {
+				t.Errorf("args[%d]=%q: model value leaked into argv", i, arg)
+			}
+		}
 	})
 
 	t.Run("large_prompt_uses_stdin", func(t *testing.T) {

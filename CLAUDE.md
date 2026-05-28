@@ -98,7 +98,7 @@ Set in `~/.config/rick/env` or shell.
 | `RICK_MAX_WORKFLOWS` | Concurrent workflow cap (0 = unlimited). Excess requests queue. |
 | `RICK_REPOS_PATH` | Root for isolated workspaces + repo clones. Required by workspace/wave tools. |
 | `RICK_CLAUDE_BIN` / `RICK_GEMINI_BIN` / `RICK_CODEX_BIN` / `RICK_ANTIGRAVITY_BIN` | CLI binary paths (antigravity default `agy`). |
-| `RICK_MODEL` | Override default LLM model. |
+| `RICK_MODEL` | Override default LLM model. Set by the agent UI to choose its model; flows into `backend.Request.Model`. The `antigravity` backend ignores it — `agy` has no model flag and picks the model from the logged-in Antigravity session. |
 | `RICK_REVIEW_BACKENDS` | Comma-separated rotation for review-phase handlers (default `claude,gemini,codex`). Set to a subset to limit to installed CLIs, or one name to disable rotation. `antigravity` is supported but must be opted in explicitly here. |
 | `RICK_BACKEND_TIMEOUT` | Wall-clock cap on developer-phase backend calls (default `20m`). `0` disables. |
 | `RICK_REVIEW_BACKEND_TIMEOUT` | Wall-clock cap on review/commit/feedback-phase backend calls (default `15m`). `0` disables. |

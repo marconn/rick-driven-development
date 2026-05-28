@@ -13,9 +13,8 @@ import (
 
 // Antigravity shells out to Google's Antigravity CLI binary (`agy`).
 //
-// Argv shape (per agy --help, May 2026 release):
+// Argv shape (verified against `agy --help`, v1.0.3):
 //   - `-p` / `--print`        : single-shot prompt, non-interactive
-//   - `-m`                    : model override
 //   - `--continue` / `-c`     : continue the most recent conversation
 //   - `--conversation <id>`   : resume a specific conversation by ID
 //   - `--dangerously-skip-permissions` : auto-approve tool requests
@@ -24,7 +23,15 @@ import (
 //     developer / 15m review — is the binding deadline, not the CLI's
 //     internal cutoff)
 //
-// Unsupported (no documented flag at integration time):
+// Unsupported (no flag exists on the CLI):
+//   - model override → agy has NO `-m` / `--model` flag (both are rejected
+//     with "flags provided but not defined", exit 2, before any work).
+//     The model is chosen out-of-band from the logged-in Antigravity
+//     desktop session. Request.Model is therefore ignored here rather than
+//     forwarded — forwarding it crashed every call that set a model (any
+//     RICK_MODEL operator, any rick_consult/rick_run model arg). Silent
+//     ignore (vs error) is deliberate: a single global RICK_MODEL must not
+//     take antigravity out of a mixed review-backend rotation.
 //   - separate `--system-prompt` → folded into the prompt body inside a
 //     <system_instructions> wrapper, matching the Gemini driver.
 //   - structured `--output-format stream-json` → stdout is captured as
@@ -90,9 +97,9 @@ func (a *Antigravity) buildArgs(req Request) (args []string, stdinPrompt string)
 	if req.Yolo {
 		args = append(args, "--dangerously-skip-permissions")
 	}
-	if req.Model != "" {
-		args = append(args, "-m", req.Model)
-	}
+	// NOTE: Request.Model is intentionally NOT forwarded — agy has no model
+	// flag and rejects `-m`/`--model` outright (see type doc). The model is
+	// fixed by the logged-in Antigravity session.
 
 	// Push the CLI's internal print watchdog past our outer wall-clock cap
 	// so context cancellation is what actually surfaces on a stall, not a

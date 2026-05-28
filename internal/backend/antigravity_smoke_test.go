@@ -95,6 +95,49 @@ cat
 	}
 }
 
+// TestAntigravity_Run_Smoke_ModelDoesNotCrash: the real `agy` (v1.0.3) has no
+// model flag and exits 2 with "flags provided but not defined: -m" the moment
+// it sees one. This fake reproduces that fail-closed behavior, then asserts a
+// Run with Request.Model set still SUCCEEDS — i.e. the driver dropped the
+// model instead of forwarding it. This is the end-to-end guard for the bug
+// that broke every antigravity call under a global RICK_MODEL or a
+// rick_consult/rick_run model arg. A regression that re-adds `-m` turns this
+// red with the exact stderr operators were hitting in production.
+func TestAntigravity_Run_Smoke_ModelDoesNotCrash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("script-based fake binary is unix-only")
+	}
+
+	// Mimic agy's flag parser: enumerate argv, reject -m/--model like the
+	// stdlib flag package does, otherwise print OK.
+	script := `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -m|--model|--model=*)
+      echo "flags provided but not defined: $arg" 1>&2
+      exit 2
+      ;;
+  esac
+done
+echo 'antigravity ok'
+`
+	binPath := writeFakeBinary(t, "fake-agy-model.sh", script)
+
+	a := NewAntigravity(binPath)
+	resp, err := a.Run(context.Background(), Request{
+		SystemPrompt: "sys",
+		UserPrompt:   "hello",
+		Model:        "gemini-2.5-pro", // would crash a -m-forwarding driver
+		Yolo:         true,
+	})
+	if err != nil {
+		t.Fatalf("Run with Model set must succeed (model is dropped, not forwarded): %v", err)
+	}
+	if !strings.Contains(resp.Output, "antigravity ok") {
+		t.Errorf("Output = %q; want the fake CLI's success line", resp.Output)
+	}
+}
+
 // TestAntigravity_Run_Smoke_NonZeroExitCapturesStderr: a non-zero CLI exit
 // must surface as a BackendError carrying Backend="antigravity" and the
 // stderr tail. Operators rely on this stderr text in rick_persona_output

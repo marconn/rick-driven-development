@@ -224,6 +224,65 @@ func TestToolRun_YoloDefaultsTrue(t *testing.T) {
 	}
 }
 
+// Regression: a consult that names a backend must resolve to THAT backend,
+// not the server default. This is the consult-mode entry point for antigravity
+// — the broken model handling in the antigravity driver only ever surfaced
+// through this path (rick_consult backend=antigravity), so the selection
+// wiring needs explicit coverage. We assert resolveBackend directly rather
+// than launching the job: a named backend bypasses the injected stub and would
+// otherwise exec the real `agy` subprocess.
+func TestToolConsult_BackendSelectionAntigravity(t *testing.T) {
+	be := &stubBackend{name: "default", resp: backend.Response{Output: "x"}}
+	deps, cleanup := testDepsWithBackend(t, be)
+	defer cleanup()
+
+	s := NewServer(deps, testLogger())
+	defer s.Close()
+
+	resolved, err := s.resolveBackend("antigravity")
+	if err != nil {
+		t.Fatalf("resolveBackend(antigravity): %v", err)
+	}
+	if resolved.Name() != "antigravity" {
+		t.Errorf("resolveBackend(antigravity).Name() = %q; want antigravity (named backend must win over server default)", resolved.Name())
+	}
+
+	// And an empty backend name must fall back to the injected server default.
+	def, err := s.resolveBackend("")
+	if err != nil {
+		t.Fatalf("resolveBackend(\"\"): %v", err)
+	}
+	if def.Name() != "default" {
+		t.Errorf("resolveBackend(\"\").Name() = %q; want the server-default stub", def.Name())
+	}
+}
+
+// Regression: the model arg must reach backend.Request.Model. This is the
+// field the antigravity driver mishandled (forwarding it as a nonexistent
+// `-m` flag), and it is also how RICK_MODEL / per-call models reach every
+// backend, so the consult→backend wiring is pinned here.
+func TestToolConsult_ModelForwardedToRequest(t *testing.T) {
+	req := launchAndCaptureReq(t, "rick_consult", map[string]any{
+		"prompt": "Review the design",
+		"mode":   "architect",
+		"model":  "gemini-2.5-pro",
+	})
+	if req.Model != "gemini-2.5-pro" {
+		t.Errorf("Request.Model = %q; want the consult model arg forwarded", req.Model)
+	}
+}
+
+func TestToolRun_ModelForwardedToRequest(t *testing.T) {
+	req := launchAndCaptureReq(t, "rick_run", map[string]any{
+		"prompt": "Implement the endpoint",
+		"mode":   "developer",
+		"model":  "gemini-2.5-pro",
+	})
+	if req.Model != "gemini-2.5-pro" {
+		t.Errorf("Request.Model = %q; want the run model arg forwarded", req.Model)
+	}
+}
+
 func TestToolConsult_WithBackendAndContextFiles(t *testing.T) {
 	be := &stubBackend{name: "test", latency: 100 * time.Millisecond, resp: backend.Response{Output: "done"}}
 	deps, cleanup := testDepsWithBackend(t, be)
