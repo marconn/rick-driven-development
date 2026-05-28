@@ -16,11 +16,19 @@ type stubBackend struct {
 	resp    backend.Response
 	err     error
 	latency time.Duration
+
+	mu     sync.Mutex
+	gotReq *backend.Request // last request seen by Run (nil until called)
 }
 
 func (b *stubBackend) Name() string { return b.name }
 
-func (b *stubBackend) Run(ctx context.Context, _ backend.Request) (*backend.Response, error) {
+func (b *stubBackend) Run(ctx context.Context, req backend.Request) (*backend.Response, error) {
+	b.mu.Lock()
+	r := req
+	b.gotReq = &r
+	b.mu.Unlock()
+
 	if b.latency > 0 {
 		select {
 		case <-ctx.Done():
@@ -33,6 +41,17 @@ func (b *stubBackend) Run(ctx context.Context, _ backend.Request) (*backend.Resp
 	}
 	resp := b.resp
 	return &resp, nil
+}
+
+// lastRequest returns a copy of the most recent request Run received, or nil.
+func (b *stubBackend) lastRequest() *backend.Request {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.gotReq == nil {
+		return nil
+	}
+	r := *b.gotReq
+	return &r
 }
 
 // waitForStatus polls until the job reaches a non-running status or the

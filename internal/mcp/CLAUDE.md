@@ -21,7 +21,7 @@ Test files (`*_test.go`) cover protocol handshake, HTTP transport, job lifecycle
 
 - `Server` — holds `Deps`, the `tools` map, a logger, and a `JobManager`. Built once via `NewServer(deps, logger)`; tear down with `Close()` to stop the reaper.
 - `Tool` / `ToolDefinition` — name, description, JSON Schema for input, and a `ToolHandler func(ctx, json.RawMessage) (any, error)` that returns a JSON-serializable result.
-- `Deps` — injection bag: `eventstore.Store`, `eventbus.Bus`, `*engine.Engine`, four projections (`Workflows`, `Tokens`, `Timelines`, `Verdicts`), `SelectWorkflow`, `BackendName`, `WorkDir`, `Yolo`, plus `backend.Backend`, `*jira.Client`, `*confluence.Client` for Tier 1-5 tools.
+- `Deps` — injection bag: `eventstore.Store`, `eventbus.Bus`, `*engine.Engine`, four projections (`Workflows`, `Tokens`, `Timelines`, `Verdicts`), `SelectWorkflow`, `BackendName`, `WorkDir`, plus `backend.Backend`, `*jira.Client`, `*confluence.Client` for Tier 1-5 tools. (`rick_consult` / `rick_run` no longer read a server-wide yolo from `Deps`; they default `Yolo=true` per job via `resolveYolo`, opt-out with an explicit `yolo:false`.)
 - `JobManager` / `Job` / `JobStatus` — async job tracking with `running`/`completed`/`failed`/`cancelled` states and per-job cancel funcs.
 - `jsonRPCRequest` / `jsonRPCResponse` / `jsonRPCError` — wire envelopes, exported only within the package.
 

@@ -233,7 +233,6 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 		SelectWorkflow: selectWorkflowDef,
 		BackendName:    opts.backendName,
 		WorkDir:        opts.workDir,
-		Yolo:           opts.yolo,
 		Backend:        be,
 		Jira:           deps.Jira,
 		Confluence:     deps.Confluence,

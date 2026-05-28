@@ -188,6 +188,25 @@ func (s *Server) registerJobTools() {
 
 // --- Tool Handlers ---
 
+// resolveYolo decides whether a one-shot job (rick_consult / rick_run) runs
+// with backend permission checks skipped. It defaults to true and is gated
+// ONLY by an explicit caller opt-out (yolo:false).
+//
+// Why default-on: these jobs run headless, so the backend CLI cannot answer
+// an interactive permission prompt. Without --dangerously-skip-permissions
+// (claude) / --yolo (gemini) / equivalent, the persona can neither read files
+// nor run tools, which makes architect/reviewer/qa consults useless for
+// analysis. The server-wide --yolo flag intentionally does NOT gate this —
+// a `rick mcp` server (yolo=false) would otherwise hand back crippled jobs,
+// and the tool schema already advertises a true default that json.Unmarshal
+// never actually applied to the *bool arg.
+func resolveYolo(arg *bool) bool {
+	if arg != nil {
+		return *arg
+	}
+	return true
+}
+
 type consultArgs struct {
 	Prompt       string   `json:"prompt"`
 	Mode         string   `json:"mode"`
@@ -232,17 +251,12 @@ func (s *Server) toolConsult(_ context.Context, raw json.RawMessage) (any, error
 		userPrompt = fmt.Sprintf("%s\n\nContext files: %v", args.Prompt, args.ContextFiles)
 	}
 
-	yolo := s.deps.Yolo
-	if args.Yolo != nil {
-		yolo = *args.Yolo
-	}
-
 	req := backend.Request{
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
 		Model:        args.Model,
 		WorkDir:      s.resolveWorkDir(args.WorkDir),
-		Yolo:         yolo,
+		Yolo:         resolveYolo(args.Yolo),
 	}
 
 	jobID := s.jobs.Launch(be, req, "consult", args.Mode)
@@ -293,17 +307,12 @@ func (s *Server) toolRun(_ context.Context, raw json.RawMessage) (any, error) {
 		userPrompt = fmt.Sprintf("%s\n\nContext files: %v", args.Prompt, args.ContextFiles)
 	}
 
-	yolo := s.deps.Yolo
-	if args.Yolo != nil {
-		yolo = *args.Yolo
-	}
-
 	req := backend.Request{
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
 		Model:        args.Model,
 		WorkDir:      s.resolveWorkDir(args.WorkDir),
-		Yolo:         yolo,
+		Yolo:         resolveYolo(args.Yolo),
 	}
 	if len(args.MCPConfig) > 0 {
 		req.MCPConfig = string(args.MCPConfig)

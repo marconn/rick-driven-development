@@ -87,7 +87,6 @@ type Deps struct {
 	SelectWorkflow func(name string) (engine.WorkflowDef, error)
 	BackendName    string
 	WorkDir        string
-	Yolo           bool
 
 	// Extended deps for Tier 1-5 tools.
 	Backend    backend.Backend

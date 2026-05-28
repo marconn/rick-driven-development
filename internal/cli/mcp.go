@@ -163,7 +163,6 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 		SelectWorkflow: selectWorkflowDef,
 		BackendName:    opts.backendName,
 		WorkDir:        opts.workDir,
-		Yolo:           opts.yolo,
 		Backend:        be,
 		Jira:           deps.Jira,
 		Confluence:     deps.Confluence,
