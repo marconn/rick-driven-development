@@ -83,14 +83,29 @@ func (s *Server) handleHTTPGet(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	info := struct {
-		Server entityInfo       `json:"server"`
-		Tools  []ToolDefinition `json:"tools"`
+		Server         entityInfo       `json:"server"`
+		DefaultBackend string           `json:"default_backend"`
+		Tools          []ToolDefinition `json:"tools"`
 	}{
-		Server: entityInfo{Name: "rick", Version: "2.0.0"},
-		Tools:  defs,
+		Server:         entityInfo{Name: "rick", Version: "2.0.0"},
+		DefaultBackend: s.defaultBackendName(),
+		Tools:          defs,
 	}
 
 	writeJSONResponse(w, info)
+}
+
+// defaultBackendName reports the backend that rick_consult / rick_run use when
+// the caller omits the backend param — letting MCP clients discover the
+// default they'd otherwise get blind. Mirrors resolveBackend's empty-name path.
+func (s *Server) defaultBackendName() string {
+	if s.deps.Backend != nil {
+		return s.deps.Backend.Name()
+	}
+	if s.deps.BackendName != "" {
+		return s.deps.BackendName
+	}
+	return "claude"
 }
 
 func writeJSONResponse(w http.ResponseWriter, v any) {

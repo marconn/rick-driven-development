@@ -179,8 +179,9 @@ func TestHTTPGetHealthCheck(t *testing.T) {
 	}
 
 	var info struct {
-		Server entityInfo       `json:"server"`
-		Tools  []ToolDefinition `json:"tools"`
+		Server         entityInfo       `json:"server"`
+		DefaultBackend string           `json:"default_backend"`
+		Tools          []ToolDefinition `json:"tools"`
 	}
 	if err := json.NewDecoder(w.Body).Decode(&info); err != nil {
 		t.Fatal(err)
@@ -188,8 +189,35 @@ func TestHTTPGetHealthCheck(t *testing.T) {
 	if info.Server.Name != "rick" {
 		t.Errorf("expected server name rick, got %s", info.Server.Name)
 	}
+	if info.DefaultBackend != "claude" {
+		t.Errorf("expected default_backend 'claude' with no backend injected, got %q", info.DefaultBackend)
+	}
 	if len(info.Tools) < 11 {
 		t.Errorf("expected at least 11 tools, got %d", len(info.Tools))
+	}
+}
+
+// Health payload must report the configured default backend so MCP clients
+// can discover what they get when they omit the backend param.
+func TestHTTPGetHealthCheck_ReportsInjectedBackend(t *testing.T) {
+	be := &stubBackend{name: "gemini"}
+	deps, cleanup := testDepsWithBackend(t, be)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	h := httpHandler(s)
+
+	r := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	var info struct {
+		DefaultBackend string `json:"default_backend"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&info); err != nil {
+		t.Fatal(err)
+	}
+	if info.DefaultBackend != "gemini" {
+		t.Errorf("expected default_backend 'gemini', got %q", info.DefaultBackend)
 	}
 }
 
