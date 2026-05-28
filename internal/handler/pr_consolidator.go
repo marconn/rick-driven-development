@@ -374,6 +374,7 @@ var prCategoryReviewerLabels = []struct {
 	{"pr-data", "Data Integrity Review"},
 	{"pr-hygiene", "Code Hygiene Review"},
 	{"pr-vendor-resilience", "Vendor Resilience Review"},
+	{"pr-docs-concordance", "Docs/Code Concordance Review"},
 }
 
 // buildConsolidationPrompt assembles the user prompt for the consolidator AI call.

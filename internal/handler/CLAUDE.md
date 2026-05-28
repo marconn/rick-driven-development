@@ -35,7 +35,7 @@ Current settings:
 | `developer` | `medium` | bounded per-iteration thinking; the feedback loop drives correctness |
 | `committer` | `low` | mechanical step (commit message + push); no analysis needed |
 
-All other handlers (the 12 `pr-*` category reviewers, `feedback-analyzer`, `pr-replier`, `pr-consolidator`, `qa-analyzer`, `develop-only`/`develop`-aliased handlers) currently inherit the `high` default. Touch the map when tuning, not the handler registrations.
+All other handlers (the 13 `pr-*` category reviewers, `feedback-analyzer`, `pr-replier`, `pr-consolidator`, `qa-analyzer`, `develop-only`/`develop`-aliased handlers) currently inherit the `high` default. Touch the map when tuning, not the handler registrations.
 
 ## Handler implementations (grouped by workflow)
 

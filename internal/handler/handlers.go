@@ -43,7 +43,7 @@ var personaEffort = map[string]string{
 }
 
 // isVerdictBearingReviewer returns true for handler names that emit prose
-// VERDICT lines (reviewer, qa, the 12 pr-category reviewers). These need
+// VERDICT lines (reviewer, qa, the 13 pr-category reviewers). These need
 // PlainText=true so ExtractJSON does not greedily steal an in-prose JSON
 // snippet and discard the VERDICT tail (the 2026-04-22 default-optimistic
 // pass class). pr-replier and pr-consolidator are intentionally excluded —
@@ -55,7 +55,8 @@ func isVerdictBearingReviewer(name string) bool {
 		"pr-security", "pr-concurrency", "pr-error-handling",
 		"pr-observability", "pr-api-contract", "pr-idempotency",
 		"pr-testing", "pr-integration", "pr-performance",
-		"pr-data", "pr-hygiene", "pr-vendor-resilience":
+		"pr-data", "pr-hygiene", "pr-vendor-resilience",
+		"pr-docs-concordance":
 		return true
 	}
 	return false
@@ -303,6 +304,10 @@ func RegisterAll(reg *Registry, d Deps) error {
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
 			AIConfig:      reviewAiCfg("pr-vendor-resilience", persona.PRVendorResilience),
+			TargetPersona: "developer",
+		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:      reviewAiCfg("pr-docs-concordance", persona.PRDocsConcordance),
 			TargetPersona: "developer",
 		}),
 

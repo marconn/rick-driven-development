@@ -275,6 +275,7 @@ var prCategoryReviewers = []string{
 	"pr-observability", "pr-api-contract", "pr-idempotency",
 	"pr-testing", "pr-integration", "pr-performance",
 	"pr-data", "pr-hygiene", "pr-vendor-resilience",
+	"pr-docs-concordance",
 }
 
 // PRReviewWorkflowDef returns the pr-review workflow definition.

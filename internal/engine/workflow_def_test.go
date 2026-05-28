@@ -182,3 +182,43 @@ func TestPRReviewWorkflowIncludesVendorResilience(t *testing.T) {
 		t.Errorf("pr-consolidator deps must include 'pr-vendor-resilience'; got %v", consolidatorDeps)
 	}
 }
+
+// TestPRReviewWorkflowIncludesDocsConcordance locks in the wiring for the
+// pr-docs-concordance category reviewer (same three invariants as the
+// vendor-resilience test): present in Required, keyed on pr-jira-context in the
+// Graph, and a predecessor of pr-consolidator. Missing any one silently drops
+// the reviewer from the fan-out or hangs the consolidator join gate.
+func TestPRReviewWorkflowIncludesDocsConcordance(t *testing.T) {
+	def := PRReviewWorkflowDef()
+
+	requiredHas := false
+	for _, r := range def.Required {
+		if r == "pr-docs-concordance" {
+			requiredHas = true
+			break
+		}
+	}
+	if !requiredHas {
+		t.Fatal("PRReviewWorkflowDef.Required must contain 'pr-docs-concordance'")
+	}
+
+	deps, ok := def.Graph["pr-docs-concordance"]
+	if !ok {
+		t.Fatal("PRReviewWorkflowDef.Graph must have an entry for 'pr-docs-concordance'")
+	}
+	if len(deps) != 1 || deps[0] != "pr-jira-context" {
+		t.Errorf("pr-docs-concordance deps: want [pr-jira-context], got %v", deps)
+	}
+
+	consolidatorDeps := def.Graph["pr-consolidator"]
+	found := false
+	for _, d := range consolidatorDeps {
+		if d == "pr-docs-concordance" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("pr-consolidator deps must include 'pr-docs-concordance'; got %v", consolidatorDeps)
+	}
+}
