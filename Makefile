@@ -15,6 +15,13 @@ REPORTER_BIN   := $(HOME)/.local/bin/rick-github-reporter
 JIRA_PLANNER_BIN := $(HOME)/.local/bin/rick-jira-planner
 PLANNING_BIN     := $(HOME)/.local/bin/rick-planning
 
+# OS detection — Linux runs rick-server under systemd-user, macOS runs it under
+# launchd from ~/Library/LaunchAgents/com.marconn.rick.plist. The deploy
+# target branches on this. Plugin targets (deploy-plugins / restart) and
+# status/logs remain Linux-only because no equivalent macOS unit is shipped.
+UNAME_S            := $(shell uname -s)
+RICK_LAUNCHD_LABEL := com.marconn.rick
+
 .PHONY: help build build-agent build-plugins lint test test-race check deploy deploy-agent deploy-plugins restart package clean
 
 help: ## Show this help
@@ -52,10 +59,16 @@ check: lint test test-race ## Pre-commit gate: lint + tests + race — always ru
 
 # --- Deploy ---
 
-deploy: build ## Build and restart rick-server
+deploy: build ## Build and restart rick-server (auto-detects Linux systemd vs macOS launchd)
+ifeq ($(UNAME_S),Darwin)
+	@launchctl kickstart -k "gui/$$(id -u)/$(RICK_LAUNCHD_LABEL)"
+	@sleep 0.5
+	@launchctl list "$(RICK_LAUNCHD_LABEL)" 2>/dev/null | grep -q '"PID"' && echo "✓ rick-server running" || echo "✗ rick-server failed (check ~/Library/Logs/rick/err.log)"
+else
 	systemctl --user restart rick-server.service
 	@sleep 0.5
 	@systemctl --user is-active rick-server.service --quiet && echo "✓ rick-server running" || echo "✗ rick-server failed"
+endif
 
 deploy-plugins: build-plugins ## Build and restart plugin services
 	systemctl --user restart rick-github-reporter.service
