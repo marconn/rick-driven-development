@@ -21,11 +21,64 @@ import (
 // the CLI itself wedges past its own watchdogs.
 const defaultStallTimeout = 6 * time.Minute
 
-// New creates a backend by name. Valid names: "claude", "gemini", "codex",
-// "antigravity". Backend binary paths can be overridden via RICK_CLAUDE_BIN,
-// RICK_GEMINI_BIN, RICK_CODEX_BIN, and RICK_ANTIGRAVITY_BIN environment
-// variables; otherwise they default to the bare binary name (`agy` for
-// antigravity).
+// Descriptor describes a known backend: its name, the env var that overrides
+// its CLI binary path, and the default binary name when that env is unset.
+type Descriptor struct {
+	Name       string
+	BinEnv     string
+	DefaultBin string
+}
+
+// Catalog is the single source of truth for which backends exist and how their
+// binaries are resolved. The factory switch, the valid-names error message,
+// and any operator-facing backend listing all derive from this so they cannot
+// drift apart.
+var Catalog = []Descriptor{
+	{Name: "claude", BinEnv: "RICK_CLAUDE_BIN", DefaultBin: "claude"},
+	{Name: "gemini", BinEnv: "RICK_GEMINI_BIN", DefaultBin: "gemini"},
+	{Name: "codex", BinEnv: "RICK_CODEX_BIN", DefaultBin: "codex"},
+	{Name: "antigravity", BinEnv: "RICK_ANTIGRAVITY_BIN", DefaultBin: "agy"},
+	{Name: "opencode", BinEnv: "RICK_OPENCODE_BIN", DefaultBin: "opencode"},
+}
+
+// descriptorFor returns the catalog entry for a backend name, or false.
+func descriptorFor(name string) (Descriptor, bool) {
+	for _, d := range Catalog {
+		if d.Name == name {
+			return d, true
+		}
+	}
+	return Descriptor{}, false
+}
+
+// ResolveBinary returns the CLI binary path for a backend name, honoring the
+// per-backend env override and falling back to the catalog default. Unknown
+// names return "".
+func ResolveBinary(name string) string {
+	d, ok := descriptorFor(name)
+	if !ok {
+		return ""
+	}
+	if bin := os.Getenv(d.BinEnv); bin != "" {
+		return bin
+	}
+	return d.DefaultBin
+}
+
+// Names returns the valid backend names in catalog order.
+func Names() []string {
+	out := make([]string, len(Catalog))
+	for i, d := range Catalog {
+		out[i] = d.Name
+	}
+	return out
+}
+
+// New creates a backend by name. Valid names come from Catalog: "claude",
+// "gemini", "codex", "antigravity", "opencode". Backend binary paths can be
+// overridden via RICK_CLAUDE_BIN, RICK_GEMINI_BIN, RICK_CODEX_BIN,
+// RICK_ANTIGRAVITY_BIN, and RICK_OPENCODE_BIN environment variables; otherwise
+// they default to the bare binary name (`agy` for antigravity).
 //
 // When RICK_BACKEND_CONCURRENCY_<UPPER> is set to a positive integer, the
 // backend is wrapped in a concurrency limiter so no more than that many Run
@@ -48,45 +101,35 @@ func NewWithRecorder(name string, recorder Recorder) (Backend, error) {
 
 func newRaw(name string) (Backend, error) {
 	stall := stallTimeoutFromEnv()
+	bin := ResolveBinary(name)
 	switch name {
 	case "claude":
-		bin := os.Getenv("RICK_CLAUDE_BIN")
-		if bin == "" {
-			bin = "claude"
-		}
 		c := NewClaude(bin)
 		c.stallTimeout = stall
 		return c, nil
 
 	case "gemini":
-		bin := os.Getenv("RICK_GEMINI_BIN")
-		if bin == "" {
-			bin = "gemini"
-		}
 		g := NewGemini(bin)
 		g.stallTimeout = stall
 		return g, nil
 
 	case "codex":
-		bin := os.Getenv("RICK_CODEX_BIN")
-		if bin == "" {
-			bin = "codex"
-		}
 		c := NewCodex(bin)
 		c.stallTimeout = stall
 		return c, nil
 
 	case "antigravity":
-		bin := os.Getenv("RICK_ANTIGRAVITY_BIN")
-		if bin == "" {
-			bin = "agy"
-		}
 		a := NewAntigravity(bin)
 		a.stallTimeout = stall
 		return a, nil
 
+	case "opencode":
+		o := NewOpencode(bin)
+		o.stallTimeout = stall
+		return o, nil
+
 	default:
-		return nil, fmt.Errorf("unknown backend: %s (valid: claude, gemini, codex, antigravity)", name)
+		return nil, fmt.Errorf("unknown backend: %s (valid: %s)", name, strings.Join(Names(), ", "))
 	}
 }
 

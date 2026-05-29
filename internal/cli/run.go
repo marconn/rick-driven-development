@@ -58,7 +58,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVarP(&opts.backendName, "backend", "b", "claude", "AI backend (claude, gemini, codex, antigravity)")
+	cmd.Flags().StringVarP(&opts.backendName, "backend", "b", "claude", "AI backend (claude, gemini, codex, antigravity, opencode)")
 	cmd.Flags().StringVarP(&opts.dagName, "dag", "d", "workspace-dev", "Workflow definition (workspace-dev, develop-only, pr-review, jira-dev)")
 	cmd.Flags().StringVar(&opts.dbPath, "db", "rick.db", "SQLite database path")
 	cmd.Flags().StringVarP(&opts.sourcePath, "source", "s", "", "Source reference (file:path, jira:KEY-123, gh:owner/repo#1)")

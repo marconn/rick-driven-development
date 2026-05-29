@@ -12,7 +12,7 @@ All Rick Go packages live here. No public API — `internal/` is enforced by Go'
 ## Handlers + personas
 - [`handler/`](handler/CLAUDE.md) — Handler interface + every concrete persona handler
 - [`persona/`](persona/CLAUDE.md) — PromptBuilder + embedded prompt/phase markdown
-L15: - [`backend/`](backend/CLAUDE.md) — Claude/Gemini/Codex CLI subprocess wrappers
+L15: - [`backend/`](backend/CLAUDE.md) — Claude/Gemini/Codex/Antigravity/Opencode CLI subprocess wrappers
 
 
 ## External integrations

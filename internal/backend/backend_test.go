@@ -53,6 +53,16 @@ func TestNew(t *testing.T) {
 		}
 	})
 
+	t.Run("opencode", func(t *testing.T) {
+		b, err := New("opencode")
+		if err != nil {
+			t.Fatalf("New(opencode): %v", err)
+		}
+		if b.Name() != "opencode" {
+			t.Errorf("want opencode, got %s", b.Name())
+		}
+	})
+
 	t.Run("unknown", func(t *testing.T) {
 		_, err := New("openai")
 		if err == nil {
@@ -448,6 +458,156 @@ func TestAntigravityBuildArgs(t *testing.T) {
 			if len(arg) > maxArgSize {
 				t.Errorf("argv element exceeds maxArgSize (%d bytes) — prompt should have moved to stdin", len(arg))
 			}
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Opencode buildArgs
+// ---------------------------------------------------------------------------
+
+func TestOpencodeBuildArgs(t *testing.T) {
+	o := NewOpencode("opencode")
+
+	t.Run("basic_combines_prompts", func(t *testing.T) {
+		args := o.buildArgs(Request{
+			SystemPrompt: "You are an expert.",
+			UserPrompt:   "Hello",
+		})
+		assertContains(t, args, "run")
+		assertArgPair(t, args, "--format", "json")
+		// opencode run has no --system-prompt flag → folded into the positional
+		// message after the `--` terminator (matches Gemini / Antigravity).
+		if len(args) < 2 || args[len(args)-2] != "--" {
+			t.Errorf("prompt must follow a `--` terminator; args=%v", args)
+		}
+		if !strings.Contains(args[len(args)-1], "<system_instructions>") {
+			t.Errorf("system prompt not embedded in positional message; got %q", args[len(args)-1])
+		}
+		// New session must NOT carry a resume flag.
+		for _, a := range args {
+			if a == "--continue" || a == "--session" {
+				t.Errorf("unexpected resume flag %q on fresh session", a)
+			}
+		}
+	})
+
+	t.Run("session_latest_uses_continue", func(t *testing.T) {
+		args := o.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+			SessionID:    "latest",
+		})
+		assertContains(t, args, "--continue")
+		if strings.Contains(args[len(args)-1], "<system_instructions>") {
+			t.Error("system prompt should not be embedded when continuing")
+		}
+	})
+
+	t.Run("session_specific_uses_session_flag", func(t *testing.T) {
+		args := o.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+			SessionID:    "ses_abc123",
+		})
+		assertArgPair(t, args, "--session", "ses_abc123")
+		if strings.Contains(args[len(args)-1], "<system_instructions>") {
+			t.Error("system prompt should not be embedded when resuming")
+		}
+	})
+
+	t.Run("yolo", func(t *testing.T) {
+		args := o.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+			Yolo:         true,
+		})
+		assertContains(t, args, "--dangerously-skip-permissions")
+	})
+
+	// Model is forwarded ONLY when provider-qualified (contains "/"). A bare
+	// name like a global RICK_MODEL must be dropped — opencode rejects it with
+	// "Model not found: <name>/." which would crash every model-bearing call
+	// and drop opencode out of a mixed review rotation.
+	t.Run("model_qualified_forwarded", func(t *testing.T) {
+		args := o.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+			Model:        "google/gemini-2.5-pro",
+		})
+		assertArgPair(t, args, "-m", "google/gemini-2.5-pro")
+	})
+
+	t.Run("model_bare_dropped", func(t *testing.T) {
+		args := o.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+			Model:        "gemini-2.5-flash",
+		})
+		for i, a := range args {
+			if a == "-m" || a == "--model" {
+				t.Errorf("args[%d]=%q: bare model name must not be forwarded — opencode rejects it", i, a)
+			}
+			if a == "gemini-2.5-flash" {
+				t.Errorf("args[%d]=%q: bare model value leaked into argv", i, a)
+			}
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Opencode stream + export parsing
+// ---------------------------------------------------------------------------
+
+func TestParseOpencodeStream(t *testing.T) {
+	t.Run("session_and_text", func(t *testing.T) {
+		stream := `{"type":"step_start","sessionID":"ses_xyz","part":{"type":"step-start"}}
+{"type":"text","sessionID":"ses_xyz","part":{"type":"text","text":"Hello "}}
+{"type":"text","sessionID":"ses_xyz","part":{"type":"text","text":"world"}}`
+		res := parseOpencodeStream(stream)
+		if res.sessionID != "ses_xyz" {
+			t.Errorf("sessionID: want ses_xyz, got %q", res.sessionID)
+		}
+		if res.text != "Hello world" {
+			t.Errorf("text: want %q, got %q", "Hello world", res.text)
+		}
+		if res.errMsg != "" {
+			t.Errorf("errMsg should be empty, got %q", res.errMsg)
+		}
+	})
+
+	t.Run("error_event_captured", func(t *testing.T) {
+		// The run exits 0 even on a provider API error, so the error event is
+		// the only failure signal — it must be surfaced.
+		stream := `{"type":"step_start","sessionID":"ses_err","part":{"type":"step-start"}}
+{"type":"error","sessionID":"ses_err","error":{"name":"APIError","data":{"message":"model no longer available"}}}`
+		res := parseOpencodeStream(stream)
+		if res.sessionID != "ses_err" {
+			t.Errorf("sessionID: want ses_err, got %q", res.sessionID)
+		}
+		if res.errMsg != "model no longer available" {
+			t.Errorf("errMsg: want %q, got %q", "model no longer available", res.errMsg)
+		}
+	})
+
+	t.Run("step_start_only_no_text", func(t *testing.T) {
+		// The flush-race / flash-class case: only step_start reaches stdout. We
+		// still recover the sessionID (so export can supply the real output).
+		stream := `{"type":"step_start","sessionID":"ses_only","part":{"type":"step-start"}}`
+		res := parseOpencodeStream(stream)
+		if res.sessionID != "ses_only" {
+			t.Errorf("sessionID: want ses_only, got %q", res.sessionID)
+		}
+		if res.text != "" {
+			t.Errorf("text should be empty, got %q", res.text)
+		}
+	})
+
+	t.Run("skips_malformed_lines", func(t *testing.T) {
+		stream := "not json\n{\"type\":\"step_start\",\"sessionID\":\"ses_ok\"}\n{partial"
+		res := parseOpencodeStream(stream)
+		if res.sessionID != "ses_ok" {
+			t.Errorf("sessionID: want ses_ok, got %q", res.sessionID)
 		}
 	})
 }

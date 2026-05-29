@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 
 	"github.com/marconn/rick-event-driven-development/internal/backend"
 	"github.com/marconn/rick-event-driven-development/internal/persona"
@@ -30,8 +32,8 @@ func (s *Server) registerJobTools() {
 					},
 					"backend": map[string]any{
 						"type":        "string",
-						"enum":        []string{"claude", "gemini", "codex", "antigravity"},
-						"description": "AI backend. Defaults to server's configured backend.",
+						"enum":        []string{"claude", "gemini", "codex", "antigravity", "opencode"},
+						"description": "AI backend. Defaults to server's configured backend (see rick_backends for the active default and which CLIs are installed).",
 					},
 					"model": map[string]any{
 						"type":        "string",
@@ -77,8 +79,8 @@ func (s *Server) registerJobTools() {
 					},
 					"backend": map[string]any{
 						"type":        "string",
-						"enum":        []string{"claude", "gemini", "codex", "antigravity"},
-						"description": "AI backend. Defaults to server's configured backend.",
+						"enum":        []string{"claude", "gemini", "codex", "antigravity", "opencode"},
+						"description": "AI backend. Defaults to server's configured backend (see rick_backends for the active default and which CLIs are installed).",
 					},
 					"model": map[string]any{
 						"type":        "string",
@@ -183,6 +185,18 @@ func (s *Server) registerJobTools() {
 			},
 		},
 		Handler: s.toolJobsList,
+	})
+
+	s.register(Tool{
+		Definition: ToolDefinition{
+			Name:        "rick_backends",
+			Description: "List the AI backends rick knows about and which are active: the resolved default backend (used when a tool omits the backend arg), the review-phase rotation (RICK_REVIEW_BACKENDS), and per-backend whether the CLI binary is installed on PATH. Use this to discover which backends a client can actually select.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		Handler: s.toolBackends,
 	})
 }
 
@@ -461,6 +475,60 @@ func (s *Server) resolveBackend(name string) (backend.Backend, error) {
 		name = "claude"
 	}
 	return backend.New(name)
+}
+
+type backendInfo struct {
+	Name      string `json:"name"`
+	Binary    string `json:"binary"`
+	Installed bool   `json:"installed"`
+	Default   bool   `json:"default"`
+	InReview  bool   `json:"in_review_rotation"`
+}
+
+type backendsResult struct {
+	DefaultBackend string        `json:"default_backend"`
+	ReviewBackends []string      `json:"review_backends"`
+	Backends       []backendInfo `json:"backends"`
+}
+
+// toolBackends reports the backends rick knows about and which are active so a
+// client can discover what it may select without guessing. "Installed" reflects
+// whether the resolved CLI binary is on PATH right now — the only check that
+// tells a caller a backend will actually run, since registration validity
+// (backend.New) does not probe the binary.
+func (s *Server) toolBackends(_ context.Context, _ json.RawMessage) (any, error) {
+	def := s.defaultBackendName()
+
+	review := backend.ParseReviewBackendsEnv(os.Getenv("RICK_REVIEW_BACKENDS"))
+	if len(review) == 0 {
+		review = backend.DefaultReviewBackends
+	}
+	inReview := make(map[string]bool, len(review))
+	for _, n := range review {
+		inReview[n] = true
+	}
+
+	infos := make([]backendInfo, 0, len(backend.Catalog))
+	for _, d := range backend.Catalog {
+		bin := backend.ResolveBinary(d.Name)
+		installed := false
+		if _, err := exec.LookPath(bin); err == nil {
+			installed = true
+		}
+		infos = append(infos, backendInfo{
+			Name:      d.Name,
+			Binary:    bin,
+			Installed: installed,
+			Default:   d.Name == def,
+			InReview:  inReview[d.Name],
+		})
+	}
+
+	return backendsResult{
+		DefaultBackend: def,
+		ReviewBackends: review,
+		Backends:       infos,
+	}, nil
 }
 
 func (s *Server) resolveWorkDir(dir string) string {
