@@ -16,6 +16,11 @@ import (
 type Claude struct {
 	binaryPath   string
 	stallTimeout time.Duration // 0 = no idle watchdog (default)
+	// progressTimeout arms the completion-progress watchdog: the subprocess is
+	// killed if it produces no assistant text delta within the window even
+	// while raw stdout stays active. 0 = disabled (default). Set from
+	// RICK_BACKEND_PROGRESS_TIMEOUT via the factory.
+	progressTimeout time.Duration
 }
 
 // NewClaude creates a Claude backend. binaryPath is the path to the `claude` CLI binary.
@@ -115,7 +120,18 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 	watchCtx, progress, stopWatch := WithIdleTimeout(ctx, c.stallTimeout)
 	defer stopWatch()
 
-	cmd := exec.CommandContext(watchCtx, c.binaryPath, args...)
+	// Completion-progress watchdog (default-off): stacked on top of the byte
+	// idle watchdog as a longer, looser net. Its progress() is driven ONLY by
+	// assistant text deltas (wired into the extractor below), not raw bytes, so
+	// it catches a CLI that is alive and chattering tool-use frames but never
+	// converging to an answer — the failure the byte watchdog is deliberately
+	// blind to (it counts any stdout byte as progress). progCtx is the exec
+	// context; on parent cancellation context.Cause propagates, so the error
+	// block below disambiguates progress vs. idle vs. wall-clock by cause.
+	progCtx, textProgress, stopProgress := WithProgressTimeout(watchCtx, c.progressTimeout)
+	defer stopProgress()
+
+	cmd := exec.CommandContext(progCtx, c.binaryPath, args...)
 	cmd.Dir = req.WorkDir
 	// Kill the whole process group on ctx cancel, not just the direct
 	// child — claude CLI forks a node subprocess that would otherwise
@@ -148,7 +164,23 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 	// just the safety net that fires when the CLI itself has hung. Counting
 	// every stdout byte gives the CLI room to drive its own retries.
 	extractor := NewClaudePrintExtractor()
-	sw := NewStreamWriter(inner, extractor.ExtractFn(), WithResultCheck(ClaudeCheckResult))
+	// The byte watchdog (progress) taps raw stdout below. The completion
+	// watchdog (textProgress) taps the extractor: it fires only when a line
+	// yields a non-empty assistant text delta — the one signal that the model
+	// is producing answer content rather than tool-use protocol noise. A
+	// tool-loop wedge keeps raw stdout (and the byte watchdog) alive but never
+	// trips this, so the longer progressTimeout eventually kills it. Wrapping
+	// the extractor (not duplicating parse logic) keeps token/stop-reason
+	// accounting in one place.
+	baseExtract := extractor.ExtractFn()
+	extractFn := func(line []byte) (string, bool) {
+		text, ok := baseExtract(line)
+		if ok && text != "" {
+			textProgress()
+		}
+		return text, ok
+	}
+	sw := NewStreamWriter(inner, extractFn, WithResultCheck(ClaudeCheckResult))
 	cmd.Stdout = newProgressWriter(sw, progress)
 
 	var stderrBuf bytes.Buffer
@@ -168,6 +200,19 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 		_ = sw.Close()
 		stderr := captureErrorTail(stderrBuf.String(), captured.String())
 		elapsed := time.Since(start)
+		// Completion-progress watchdog fired: the CLI streamed bytes but no
+		// answer text within the window. Checked before ErrIdleTimeout because
+		// progCtx is the exec context — when the byte watchdog fires on the
+		// parent (watchCtx), context.Cause(progCtx) propagates ErrIdleTimeout,
+		// so this branch is reached only for a genuine progress timeout.
+		if errors.Is(context.Cause(progCtx), ErrProgressTimeout) {
+			return nil, &BackendError{
+				Backend:  "claude",
+				Inner:    fmt.Errorf("%w (window=%s)", ErrProgressTimeout, c.progressTimeout),
+				Duration: elapsed,
+				Stderr:   stderr,
+			}
+		}
 		if errors.Is(context.Cause(watchCtx), ErrIdleTimeout) {
 			return nil, &BackendError{
 				Backend:  "claude",

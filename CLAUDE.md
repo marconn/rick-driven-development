@@ -102,6 +102,8 @@ Set in `~/.config/rick/env` or shell.
 | `RICK_REVIEW_BACKENDS` | Comma-separated rotation for review-phase handlers (default `claude,gemini,codex`). Set to a subset to limit to installed CLIs, or one name to disable rotation. `antigravity` and `opencode` are supported but must be opted in explicitly here. |
 | `RICK_BACKEND_TIMEOUT` | Wall-clock cap on developer-phase backend calls (default `20m`). `0` disables. |
 | `RICK_REVIEW_BACKEND_TIMEOUT` | Wall-clock cap on review/commit/feedback-phase backend calls (default `15m`). `0` disables. |
+| `RICK_BACKEND_STALL_TIMEOUT` | Idle (byte-level) watchdog: kills a claude/gemini/codex subprocess that emits no stdout for this long (default `6m`). `0` disables. Catches fully-silent wedges; blind to chatty ones. |
+| `RICK_BACKEND_PROGRESS_TIMEOUT` | Completion-progress watchdog (claude-only, **default-off**): kills a subprocess that keeps emitting bytes but no assistant text for this long. Catches the tool-loop wedge the byte watchdog misses (incident 1a332d59). Set above any legitimate tool-only gap, below `RICK_BACKEND_TIMEOUT` (e.g. `15m`). |
 | `RICK_SERVER_URL` | Agent UI → rick-server URL. |
 | `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN` | Jira integration. |
 | `CONFLUENCE_URL`, `CONFLUENCE_EMAIL`, `CONFLUENCE_TOKEN` | Confluence integration. |

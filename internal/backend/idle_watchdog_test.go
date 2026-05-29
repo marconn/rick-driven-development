@@ -80,6 +80,101 @@ func TestWithIdleTimeout_ParentCancellationPropagates(t *testing.T) {
 	}
 }
 
+func TestWithProgressTimeout_DisabledWhenZero(t *testing.T) {
+	parent := context.Background()
+	ctx, progress, stop := WithProgressTimeout(parent, 0)
+	defer stop()
+	if ctx != parent {
+		t.Fatal("window=0 must return the parent ctx unchanged (default-off)")
+	}
+	progress()
+	progress()
+}
+
+func TestWithProgressTimeout_CancelsWithProgressCause(t *testing.T) {
+	ctx, _, stop := WithProgressTimeout(context.Background(), 30*time.Millisecond)
+	defer stop()
+
+	select {
+	case <-ctx.Done():
+		if !errors.Is(context.Cause(ctx), ErrProgressTimeout) {
+			t.Fatalf("expected ErrProgressTimeout cause, got %v", context.Cause(ctx))
+		}
+		if errors.Is(context.Cause(ctx), ErrIdleTimeout) {
+			t.Fatal("progress watchdog must NOT report ErrIdleTimeout — the two causes must be distinguishable")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("context did not cancel within 500ms despite 30ms window")
+	}
+}
+
+func TestWithProgressTimeout_ProgressResetsTimer(t *testing.T) {
+	ctx, progress, stop := WithProgressTimeout(context.Background(), 80*time.Millisecond)
+	defer stop()
+
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		progress()
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("context cancelled despite continuous progress: %v (cause=%v)", err, context.Cause(ctx))
+	}
+}
+
+// TestWithProgressTimeout_StackedOnIdle is the production wiring shape: the
+// progress watchdog is a child of the idle watchdog. Raw bytes keep the idle
+// watchdog alive (byteProgress) while NO substantive progress arrives, so the
+// inner progress watchdog must still fire ErrProgressTimeout. This is the
+// chatty-but-wedged tool-loop case in miniature.
+func TestWithProgressTimeout_StackedOnIdle(t *testing.T) {
+	idleCtx, byteProgress, stopIdle := WithIdleTimeout(context.Background(), 200*time.Millisecond)
+	defer stopIdle()
+	progCtx, _, stopProg := WithProgressTimeout(idleCtx, 60*time.Millisecond)
+	defer stopProg()
+
+	// Kick ONLY the byte watchdog — simulating stdout chatter with no text.
+	go func() {
+		for i := 0; i < 20; i++ {
+			byteProgress()
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-progCtx.Done():
+		if !errors.Is(context.Cause(progCtx), ErrProgressTimeout) {
+			t.Fatalf("expected ErrProgressTimeout while bytes flow but no progress, got %v", context.Cause(progCtx))
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("progress watchdog did not fire despite 60ms window with no substantive progress")
+	}
+}
+
+func TestProgressTimeoutFromEnv(t *testing.T) {
+	cases := []struct {
+		value string
+		want  time.Duration
+	}{
+		{"", 0}, // default-off, unlike the stall watchdog
+		{"garbage", 0},
+		{"-5s", 0},
+		{"0", 0},
+		{"45s", 45 * time.Second},
+		{"15m", 15 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("RICK_BACKEND_PROGRESS_TIMEOUT", tc.value)
+			got := progressTimeoutFromEnv()
+			if got != tc.want {
+				t.Errorf("progressTimeoutFromEnv(%q) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProgressWriter_FiresOnWrite(t *testing.T) {
 	var count atomic.Int32
 	var buf bytes.Buffer

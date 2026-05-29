@@ -29,8 +29,8 @@ Current settings:
 
 | Handler | Effort | Why |
 |---|---|---|
-| `architect` | `max` | planning cost dominates token cost — wrong plan blows the workflow |
-| `researcher` | `xhigh` | same shape as architect, slightly less depth required |
+| `architect` | `xhigh` | planning cost dominates token cost — wrong plan blows the workflow. Was `max` until incident 1a332d59 (a ~157KB planning prompt deterministically wedged the claude CLI 27+ min at `max`, emitting tool-use chatter with zero text deltas); `xhigh` keeps near-equal depth with a smaller thinking budget / wedge surface |
+| `researcher` | `xhigh` | same shape as architect |
 | `qa` / `reviewer` | `high` | verdict-bearing reviewers must catch defects developer iterations miss |
 | `developer` | `medium` | bounded per-iteration thinking; the feedback loop drives correctness |
 | `committer` | `low` | mechanical step (commit message + push); no analysis needed |

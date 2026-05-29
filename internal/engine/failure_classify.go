@@ -98,6 +98,8 @@ func classifyDispatchFailure(dispatchCtx context.Context, err error) (kind event
 	}
 
 	switch {
+	case errors.Is(err, backend.ErrProgressTimeout):
+		return event.FailureKindProgressTimeout, stderr, backendName
 	case errors.Is(err, backend.ErrIdleTimeout):
 		return event.FailureKindIdleTimeout, stderr, backendName
 	case errors.Is(err, context.DeadlineExceeded):

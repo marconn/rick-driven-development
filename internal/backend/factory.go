@@ -106,6 +106,12 @@ func newRaw(name string) (Backend, error) {
 	case "claude":
 		c := NewClaude(bin)
 		c.stallTimeout = stall
+		// Completion-progress watchdog is claude-only for now: the wedge it
+		// guards (tool-loop chatter with zero text deltas) is claude-specific,
+		// and the "substantive progress" signal is wired from the claude
+		// stream extractor in claude.go. Other drivers parse different stream
+		// shapes and would need their own wiring before honoring it.
+		c.progressTimeout = progressTimeoutFromEnv()
 		return c, nil
 
 	case "gemini":
@@ -147,6 +153,26 @@ func stallTimeoutFromEnv() time.Duration {
 		return defaultStallTimeout
 	}
 	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+// progressTimeoutFromEnv reads RICK_BACKEND_PROGRESS_TIMEOUT, the
+// completion-progress watchdog window. Unlike the stall watchdog it defaults
+// to DISABLED (0): killing a subprocess that is emitting bytes but no answer
+// text is a stronger claim than killing a fully silent one, so it must not
+// change behavior until an operator opts in. Unset / "0" / negative /
+// unparseable all yield 0 (off). A positive duration arms the watchdog at that
+// window — pick a value above any legitimate tool-only gap but below
+// RICK_BACKEND_TIMEOUT.
+func progressTimeoutFromEnv() time.Duration {
+	raw := os.Getenv("RICK_BACKEND_PROGRESS_TIMEOUT")
+	if raw == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
 		return 0
 	}
 	return d

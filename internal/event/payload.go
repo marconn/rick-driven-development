@@ -499,6 +499,12 @@ const (
 	// longer than RICK_BACKEND_STALL_TIMEOUT and was killed by the idle
 	// watchdog. Transient — a retry has a real chance of succeeding.
 	FailureKindIdleTimeout FailureKind = "idle_timeout"
+	// FailureKindProgressTimeout means the backend kept emitting bytes but
+	// produced no assistant answer text within RICK_BACKEND_PROGRESS_TIMEOUT —
+	// the chatty-but-wedged tool-loop case the byte idle watchdog is blind to
+	// (incident 1a332d59). Transient — auto-retry rotates the backend and has a
+	// real chance of succeeding.
+	FailureKindProgressTimeout FailureKind = "progress_timeout"
 	// FailureKindWallTimeout means the backend ran past its wall-clock
 	// budget (RICK_BACKEND_TIMEOUT / RICK_REVIEW_BACKEND_TIMEOUT) and the
 	// context deadline fired. Transient-ish — prompt may genuinely need

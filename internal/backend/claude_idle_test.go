@@ -258,6 +258,141 @@ printf '{"type":"result","subtype":"success","stop_reason":"end_turn","result":"
 	}
 }
 
+// TestClaude_Run_ProgressTimeout_KillsToolLoopWedge reproduces incident
+// 1a332d59: the architect's claude CLI stayed alive emitting tool-use protocol
+// frames (content_block_start tool_use, input_json_delta, system.task_*) for
+// 27+ minutes without ever producing an assistant text delta or a result. Raw
+// stdout never went silent, so the byte idle watchdog (RICK_BACKEND_STALL_TIMEOUT)
+// never fired — the only backstop was the 40m wall-clock, which an operator had
+// to pre-empt manually. The completion-progress watchdog
+// (RICK_BACKEND_PROGRESS_TIMEOUT) closes that gap: it tracks assistant text
+// deltas, not raw bytes, so a textless chatter loop trips it.
+func TestClaude_Run_ProgressTimeout_KillsToolLoopWedge(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("claude backend is linux/macos only — script-based fake binary not portable to windows")
+	}
+
+	// Emit tool-execution chatter forever (no text_delta, no result). At 60ms
+	// intervals raw stdout stays continuously active — the byte idle watchdog
+	// would never fire. The script sleeps far past the test's progress window
+	// so a regression (watchdog not firing) is caught by the elapsed ceiling.
+	script := `#!/bin/sh
+i=0
+while [ $i -lt 200 ]; do
+  printf '{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"tu_01","name":"Bash"}}}\n'
+  printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"x"}}}\n'
+  printf '{"type":"system","subtype":"task_started"}\n'
+  printf '{"type":"system","subtype":"task_notification","status":"running"}\n'
+  sleep 0.06
+  i=$((i+1))
+done
+`
+	binPath := writeFakeBinary(t, "fake-claude-toolloop.sh", script)
+
+	c := NewClaude(binPath)
+	// Byte idle watchdog generously above the 60ms chatter interval so it is
+	// NEVER the watchdog that fires — this test must prove the PROGRESS
+	// watchdog catches what the byte watchdog deliberately misses.
+	c.stallTimeout = 5 * time.Second
+	// Progress window comfortably above the ~150ms cold-start `/bin/sh` exec
+	// floor (see sibling tests) so the only way it fires is genuine absence of
+	// text deltas, not a startup race.
+	c.progressTimeout = 400 * time.Millisecond
+
+	start := time.Now()
+	resp, err := c.Run(context.Background(), Request{
+		SystemPrompt: "sys",
+		UserPrompt:   "plan the thing",
+	})
+	elapsed := time.Since(start)
+
+	if resp != nil {
+		t.Fatalf("want nil response on progress timeout, got %#v", resp)
+	}
+	if err == nil {
+		t.Fatal("want error on progress timeout, got nil")
+	}
+	// Ceiling well under the script's total sleep budget; a few seconds of
+	// slack for loaded CI. Anything large means the watchdog never fired.
+	if elapsed > 3*time.Second {
+		t.Errorf("Run blocked for %s — progress watchdog did not kill the tool-loop wedge", elapsed)
+	}
+
+	var backendErr *BackendError
+	if !errors.As(err, &backendErr) {
+		t.Fatalf("want *BackendError, got %T: %v", err, err)
+	}
+	if backendErr.Backend != "claude" {
+		t.Errorf("Backend = %q; want claude", backendErr.Backend)
+	}
+	if !errors.Is(err, ErrProgressTimeout) {
+		t.Errorf("errors.Is(err, ErrProgressTimeout) = false; classifyDispatchFailure will mislabel this")
+	}
+	// Must NOT masquerade as an idle timeout — the two are distinct failure
+	// kinds with different operator meaning.
+	if errors.Is(err, ErrIdleTimeout) {
+		t.Error("tool-loop wedge reported ErrIdleTimeout; the byte watchdog must not own this failure")
+	}
+	// The window marker travels with the error so operators can grep for which
+	// watchdog fired.
+	if !strings.Contains(backendErr.Inner.Error(), "window=") {
+		t.Errorf("Inner = %q; want window=<duration> marker", backendErr.Inner.Error())
+	}
+}
+
+// TestClaude_Run_ProgressTimeout_TextDeltasKeepAlive is the no-false-positive
+// guard: with the progress watchdog armed, a stream that emits genuine
+// assistant text deltas must run to completion. Text deltas reset the progress
+// timer, so a healthy generation longer than the window still succeeds. This
+// pins that the watchdog keys on substantive progress, not wall-clock.
+func TestClaude_Run_ProgressTimeout_TextDeltasKeepAlive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("claude backend is linux/macos only — script-based fake binary not portable to windows")
+	}
+
+	// Emit a text_delta every 80ms across a window longer than progressTimeout,
+	// then a terminal result. Each text_delta must reset the progress timer.
+	script := `#!/bin/sh
+i=0
+while [ $i -lt 12 ]; do
+  printf '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"chunk "}}}\n'
+  sleep 0.08
+  i=$((i+1))
+done
+printf '{"type":"result","subtype":"success","stop_reason":"end_turn","result":"done","usage":{"input_tokens":1,"output_tokens":1}}\n'
+`
+	binPath := writeFakeBinary(t, "fake-claude-text-progress.sh", script)
+
+	c := NewClaude(binPath)
+	c.stallTimeout = 5 * time.Second
+	// 300ms window < the ~960ms total run, but > the 80ms inter-delta gap, so
+	// continuous text deltas must keep it alive. A regression (watchdog firing
+	// despite text) surfaces as an unexpected ErrProgressTimeout below.
+	c.progressTimeout = 300 * time.Millisecond
+
+	start := time.Now()
+	resp, err := c.Run(context.Background(), Request{
+		SystemPrompt: "sys",
+		UserPrompt:   "write the plan",
+	})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Run errored during healthy text-delta stream: %v (after %s)", err, elapsed)
+	}
+	if resp == nil {
+		t.Fatal("want non-nil response on successful run, got nil")
+	}
+	if resp.Output == "" {
+		t.Error("want captured text output, got empty")
+	}
+	// Sanity: the run actually spanned more than one progress window, so the
+	// reset-on-text-delta behavior was genuinely exercised.
+	if elapsed < c.progressTimeout {
+		t.Errorf("Run completed in %s (< window %s) — text-progress reset path not exercised", elapsed, c.progressTimeout)
+	}
+}
+
 // writeFakeBinary drops a POSIX shell script into t.TempDir and returns its
 // absolute path. The script becomes the "claude binary" passed to NewClaude
 // — the real Run() still exec's it as a child process, so the full chain

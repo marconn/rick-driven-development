@@ -24,8 +24,15 @@ import (
 // (no equivalent flag), so this map is a no-op under those backends.
 //
 // Tuning rationale:
-//   - architect (max) / researcher (xhigh): planning work where the cost of
-//     a wrong plan dwarfs the token cost of deeper reasoning.
+//   - architect / researcher (xhigh): planning work where the cost of a wrong
+//     plan dwarfs the token cost of deeper reasoning. architect was at "max"
+//     until incident 1a332d59, where a large planning prompt (~157KB context)
+//     deterministically wedged the claude CLI for 27+ min at max effort — it
+//     emitted tool-use chatter without ever converging to a result. xhigh
+//     gives near-equal planning depth (researcher runs it reliably on
+//     same-shape inputs) with a materially smaller extended-thinking budget
+//     and wedge surface. Revisit only with the completion-progress watchdog
+//     (RICK_BACKEND_PROGRESS_TIMEOUT) armed as the safety net.
 //   - qa / reviewer (high): verdict-bearing reviewers need strong reasoning
 //     to catch the subtle defects developer iterations miss.
 //   - developer (medium): bounded reasoning keeps iteration latency in
@@ -34,7 +41,7 @@ import (
 //   - committer (low): mechanical step — write the commit message, push.
 //     No analysis required, the work is already merged.
 var personaEffort = map[string]string{
-	"architect":  "max",
+	"architect":  "xhigh",
 	"researcher": "xhigh",
 	"qa":         "high",
 	"reviewer":   "high",
