@@ -14,6 +14,24 @@ golangci-lint run
 golangci-lint run && go test ./...
 ```
 
+### golangci-lint cache false positives (SA5011 on `t.Fatal` guards)
+
+If `make check` reports `staticcheck SA5011: possible nil pointer dereference` on
+test code where the deref is already guarded by `t.Fatal`/`t.Fatalf`
+(e.g. `x := f(); if x == nil { t.Fatal(...) }; x.Field`), **it is a false
+positive — do not "fix" the tests.** golangci-lint's analysis pipeline
+intermittently drops staticcheck's terminating-call fact for `t.Fatal` from its
+cache, so it reports nil derefs that standalone `staticcheck` does not
+(golangci-lint #5979, #1768). The guards are correct. Clear the cache and re-run:
+
+```bash
+golangci-lint cache clean && golangci-lint run
+```
+
+Note `make check`'s default `max-same-issues: 3` hides most instances, so the
+real count is far higher than what the first run prints — another tell that it's
+the cache bug, not a genuine finding.
+
 ## Architecture
 
 Rick is an event-sourced AI workflow system built on **DAG-based orchestration**. All state changes are immutable events in SQLite. Execution topology lives in `WorkflowDef.Graph` — handlers are dumb workers (just `Name()` + `Handle()`, no triggers or join logic). `PersonaRunner` reads the DAG and dispatches accordingly, so the same handler can participate in multiple workflows without name prefixing.
