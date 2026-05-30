@@ -100,8 +100,8 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 	// backend deployments see no change.
 	be = newDeveloperBackend(be, logger, saturation)
 
-	// Review-phase handlers use a configurable rotation (default: claude,
-	// gemini, codex). Override via RICK_REVIEW_BACKENDS=a,b,c.
+	// Review-phase handlers use a configurable rotation (default: codex,
+	// opencode, claude). Override via RICK_REVIEW_BACKENDS=a,b,c.
 	reviewBe := newReviewBackend(logger, saturation)
 
 	personas := persona.DefaultRegistry()

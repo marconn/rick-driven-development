@@ -61,9 +61,10 @@ func parseTimeoutEnv(logger *slog.Logger, name string, fallback time.Duration) t
 // concurrency limiter so observability hits both the primary developer
 // backend and the review rotation through the same collector.
 //
-// Parse/validation errors fall back to gemini (prior default) rather than
-// failing startup — review handlers are critical and we'd rather run with
-// a single backend than refuse to boot. The fallback is logged loudly.
+// Parse/validation errors fall back to claude rather than failing startup —
+// review handlers are critical and we'd rather run with a single backend than
+// refuse to boot. claude is in DefaultReviewBackends and is the always-present
+// CLI, so it's the safest single-backend fallback. The fallback is logged loudly.
 func newReviewBackend(logger *slog.Logger, recorder backend.Recorder) backend.Backend {
 	raw := os.Getenv("RICK_REVIEW_BACKENDS")
 	names := backend.ParseReviewBackendsEnv(raw)
@@ -72,11 +73,11 @@ func newReviewBackend(logger *slog.Logger, recorder backend.Recorder) backend.Ba
 		logger.Info("review backend selected", slog.String("name", be.Name()))
 		return be
 	}
-	logger.Warn("RICK_REVIEW_BACKENDS invalid, falling back to gemini",
+	logger.Warn("RICK_REVIEW_BACKENDS invalid, falling back to claude",
 		slog.String("value", raw),
 		slog.Any("error", err),
 	)
-	fallback, _ := backend.NewWithRecorder("gemini", recorder)
+	fallback, _ := backend.NewWithRecorder("claude", recorder)
 	return fallback
 }
 

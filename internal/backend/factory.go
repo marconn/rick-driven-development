@@ -195,7 +195,7 @@ func concurrencyLimitFor(name string) int {
 
 // DefaultReviewBackends is the fallback rotation order for review-phase
 // handlers when RICK_REVIEW_BACKENDS is unset.
-var DefaultReviewBackends = []string{"claude", "gemini", "codex"}
+var DefaultReviewBackends = []string{"codex", "opencode", "claude"}
 
 // NewReviewBackend builds the backend used by review-phase handlers
 // (reviewer, qa, pr-category reviewers, feedback-analyzer, pr-replier,
