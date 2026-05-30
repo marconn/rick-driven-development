@@ -103,7 +103,8 @@ func defaultTemplate(handlerName string) string {
 	case "pr-security", "pr-concurrency", "pr-error-handling",
 		"pr-observability", "pr-api-contract", "pr-idempotency",
 		"pr-testing", "pr-integration", "pr-performance",
-		"pr-data", "pr-hygiene", "pr-vendor-resilience":
+		"pr-data", "pr-hygiene", "pr-vendor-resilience",
+		"pr-docs-concordance":
 		return "pr-category-review"
 	}
 	return handlerName
