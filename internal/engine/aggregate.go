@@ -212,7 +212,7 @@ func (w *WorkflowAggregate) Apply(env event.Envelope) {
 		if w.WorkflowDef != nil && w.WorkflowDef.PartialReviewOnFailure {
 			var p event.PersonaFailedPayload
 			_ = json.Unmarshal(env.Payload, &p)
-			if p.Persona != "" {
+			if p.Persona != "" && isCategoryReviewer(p.Persona) {
 				w.CompletedPersonas[p.Persona] = true
 				if w.SkippedPersonas == nil {
 					w.SkippedPersonas = make(map[string]bool)
@@ -467,7 +467,7 @@ func (w *WorkflowAggregate) decidePersonaFailed(env event.Envelope) ([]event.Env
 	// pr-concurrency, pr-idempotency when pr-data crashed on
 	// hulilabs/huli#802 (correlation 154ce63a-42d3-41b0-b008-b8c083e538bc,
 	// 2026-04-24).
-	if w.WorkflowDef.PartialReviewOnFailure {
+	if w.WorkflowDef.PartialReviewOnFailure && isCategoryReviewer(p.Persona) {
 		return w.maybeEmitWorkflowCompleted(env), nil
 	}
 
@@ -984,5 +984,18 @@ func (w *WorkflowAggregate) decideHintRejected(env event.Envelope) ([]event.Enve
 		}, nil
 	default:
 		return nil, nil
+	}
+}
+
+func isCategoryReviewer(persona string) bool {
+	switch persona {
+	case "pr-security", "pr-concurrency", "pr-error-handling",
+		"pr-observability", "pr-api-contract", "pr-idempotency",
+		"pr-testing", "pr-integration", "pr-performance",
+		"pr-data", "pr-hygiene", "pr-vendor-resilience",
+		"pr-docs-concordance", "pr-stale-reference":
+		return true
+	default:
+		return false
 	}
 }

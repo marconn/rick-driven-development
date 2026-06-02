@@ -94,3 +94,18 @@ func TestBuild_CommitPhase_WorkspaceSection(t *testing.T) {
 		}
 	})
 }
+
+// TestBuild_PRDocsConcordancePhase verifies the pr-docs-concordance template loads and builds.
+func TestBuild_PRDocsConcordancePhase(t *testing.T) {
+	pb := NewPromptBuilder()
+	out, err := pb.Build("pr-docs-concordance", PromptContext{
+		Task: "Review docs concordance",
+	})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !strings.Contains(out, "specialized Docs/Code Concordance review") {
+		t.Errorf("expected prompt to contain specialized string, got: %s", out)
+	}
+}
+

@@ -374,6 +374,20 @@ func TestSetupWorkspace(t *testing.T) {
 			t.Errorf("expected clone to be cleaned up, but it exists: %s", clonePath)
 		}
 	})
+
+	t.Run("given deleted PR branch when branch override specified then falls back to direct fetch", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("RICK_REPOS_PATH", tmp)
+		setupTestRepo(t, tmp, "myapp")
+
+		_, err := SetupWorkspace("myapp", "", "feature-nonexistent", "", "", "", false, "123")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "fallback PR fetch") {
+			t.Errorf("expected error to mention fallback PR fetch, got: %v", err)
+		}
+	})
 }
 
 // --- CleanupIsolatedWorkspace tests ---

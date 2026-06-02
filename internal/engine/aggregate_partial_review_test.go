@@ -200,6 +200,62 @@ func TestAggregate_FailFast_StillFailsWithoutPartialFlag(t *testing.T) {
 	}
 }
 
+// TestAggregate_PartialReview_BypassesSetupFailure asserts that foundational
+// setup personas like pr-workspace or pr-jira-context do NOT have their failures
+// absorbed as skips even when PartialReviewOnFailure is true. A failure in these
+// personas must fail the workflow immediately.
+func TestAggregate_PartialReview_BypassesSetupFailure(t *testing.T) {
+	agg := NewWorkflowAggregate("wf-partial-setup")
+	agg.Status = StatusRunning
+	def := WorkflowDef{
+		ID:                     "pr-review",
+		Required:               []string{"pr-workspace", "pr-security"},
+		PartialReviewOnFailure: true,
+	}
+	agg.WorkflowDef = &def
+
+	trackedEnv := event.Envelope{
+		Type:          event.PersonaFailedTracked,
+		AggregateID:   "wf-partial-setup",
+		CorrelationID: "corr-partial-setup",
+		Payload: event.MustMarshal(event.PersonaFailedPayload{
+			Persona:     "pr-workspace",
+			Error:       "failed to setup git workspace",
+			FailureKind: event.FailureKindBackendError,
+		}),
+	}
+	agg.Apply(trackedEnv)
+
+	// Since pr-workspace is a setup persona, it should NOT be marked complete or skipped.
+	if agg.CompletedPersonas["pr-workspace"] {
+		t.Error("setup persona pr-workspace must NOT be added to CompletedPersonas on failure")
+	}
+	if agg.SkippedPersonas["pr-workspace"] {
+		t.Error("setup persona pr-workspace must NOT be added to SkippedPersonas on failure")
+	}
+
+	failEnv := event.Envelope{
+		Type:          event.PersonaFailed,
+		AggregateID:   "wf-partial-setup",
+		CorrelationID: "corr-partial-setup",
+		Payload:       trackedEnv.Payload,
+	}
+	events, err := agg.Decide(failEnv)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+
+	var failed bool
+	for _, e := range events {
+		if e.Type == event.WorkflowFailed {
+			failed = true
+		}
+	}
+	if !failed {
+		t.Error("setup persona pr-workspace failure must fail the workflow immediately even under PartialReviewOnFailure")
+	}
+}
+
 func containsBytes(b []byte, substr string) bool {
 	for i := 0; i+len(substr) <= len(b); i++ {
 		match := true

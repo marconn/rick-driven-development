@@ -69,7 +69,7 @@ func (h *PRWorkspaceHandler) Handle(ctx context.Context, env event.Envelope) ([]
 	// `<repo>-rick-ws-<suffix>`, consistent with every other workflow. Feeding
 	// headBranch into the `ticket` slot used to leak slashes like "feature/xyz"
 	// into the directory name.
-	result, err := workspace.SetupWorkspace(repoName, "", headBranch, baseBranch, suffix, env.CorrelationID, true)
+	result, err := workspace.SetupWorkspace(repoName, "", headBranch, baseBranch, suffix, env.CorrelationID, true, prNumber)
 	if err != nil {
 		return nil, fmt.Errorf("pr-workspace: setup workspace: %w", err)
 	}

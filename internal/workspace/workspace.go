@@ -57,7 +57,7 @@ func resolveBasePath() (string, error) {
 // post-checks can correlate a workspace back to its workflow; pass "" for
 // manual setups (e.g., MCP rick_workspace_setup) that have no workflow.
 // Returns the workspace result or an error.
-func SetupWorkspace(repo, ticket, branch, base, suffix, correlationID string, isolate bool) (*WorkspaceResult, error) {
+func SetupWorkspace(repo, ticket, branch, base, suffix, correlationID string, isolate bool, prParams ...string) (*WorkspaceResult, error) {
 	if repo == "" {
 		return nil, fmt.Errorf("repo is required")
 	}
@@ -172,9 +172,25 @@ found:
 		if _, err = runGit(workDir, "checkout", "-b", targetBranch, "origin/"+targetBranch); err != nil {
 			// Local branch may already exist — switch and pull latest.
 			if _, chkErr := runGit(workDir, "checkout", targetBranch); chkErr != nil {
+				if prNumber := getPRNumber(prParams); prNumber != "" {
+					if fallbackErr := tryPRFetchFallback(workDir, prNumber, targetBranch); fallbackErr == nil {
+						err = nil
+						goto checkoutDone
+					} else {
+						return nil, fmt.Errorf("checkout branch %s failed, and fallback fetch failed: %w", targetBranch, fallbackErr)
+					}
+				}
 				return nil, fmt.Errorf("checkout branch %s: %w", targetBranch, err)
 			}
 			if _, err = runGit(workDir, "reset", "--hard", "origin/"+targetBranch); err != nil {
+				if prNumber := getPRNumber(prParams); prNumber != "" {
+					if fallbackErr := tryPRFetchFallback(workDir, prNumber, targetBranch); fallbackErr == nil {
+						err = nil
+						goto checkoutDone
+					} else {
+						return nil, fmt.Errorf("reset to origin/%s failed, and fallback fetch failed: %w", targetBranch, fallbackErr)
+					}
+				}
 				return nil, fmt.Errorf("reset to origin/%s: %w", targetBranch, err)
 			}
 		}
@@ -190,6 +206,7 @@ found:
 			}
 		}
 	}
+checkoutDone:
 
 	// Remove .claude/settings.json to avoid repo-level permission restrictions
 	// blocking backend operations (e.g. git). Mark as assume-unchanged so the
@@ -250,4 +267,22 @@ found:
 // Best-effort — errors are ignored since the workspace is expendable.
 func CleanupIsolatedWorkspace(path string) {
 	_ = os.RemoveAll(path)
+}
+
+func getPRNumber(prParams []string) string {
+	if len(prParams) > 0 {
+		return prParams[0]
+	}
+	return ""
+}
+
+func tryPRFetchFallback(workDir, prNumber, targetBranch string) error {
+	refspec := fmt.Sprintf("+refs/pull/%s/head:refs/heads/%s", prNumber, targetBranch)
+	if _, err := runGit(workDir, "fetch", "origin", refspec); err != nil {
+		return fmt.Errorf("fallback PR fetch: %w", err)
+	}
+	if _, err := runGit(workDir, "checkout", targetBranch); err != nil {
+		return fmt.Errorf("fallback checkout branch %s: %w", targetBranch, err)
+	}
+	return nil
 }
