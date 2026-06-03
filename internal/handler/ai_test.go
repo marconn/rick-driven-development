@@ -78,17 +78,23 @@ func (s *mockStore) Append(_ context.Context, aggregateID string, _ int, events 
 func (s *mockStore) Load(_ context.Context, aggregateID string) ([]event.Envelope, error) {
 	return s.aggregateEvents[aggregateID], nil
 }
-func (s *mockStore) LoadFrom(context.Context, string, int) ([]event.Envelope, error)          { return nil, nil }
-func (s *mockStore) LoadAll(context.Context, int64, int) ([]eventstore.PositionedEvent, error) { return nil, nil }
-func (s *mockStore) LoadEvent(context.Context, string) (*event.Envelope, error)               { return nil, nil }
-func (s *mockStore) SaveSnapshot(context.Context, eventstore.Snapshot) error                  { return nil }
-func (s *mockStore) LoadSnapshot(context.Context, string) (*eventstore.Snapshot, error)       { return nil, nil }
-func (s *mockStore) RecordDeadLetter(context.Context, eventstore.DeadLetter) error            { return nil }
-func (s *mockStore) LoadDeadLetters(context.Context) ([]eventstore.DeadLetter, error)         { return nil, nil }
-func (s *mockStore) DeleteDeadLetter(context.Context, string) error                           { return nil }
-func (s *mockStore) SaveTags(context.Context, string, map[string]string) error                { return nil }
-func (s *mockStore) LoadByTag(context.Context, string, string) ([]string, error)              { return nil, nil }
-func (s *mockStore) Close() error                                                             { return nil }
+func (s *mockStore) LoadFrom(context.Context, string, int) ([]event.Envelope, error) { return nil, nil }
+func (s *mockStore) LoadAll(context.Context, int64, int) ([]eventstore.PositionedEvent, error) {
+	return nil, nil
+}
+func (s *mockStore) LoadEvent(context.Context, string) (*event.Envelope, error) { return nil, nil }
+func (s *mockStore) SaveSnapshot(context.Context, eventstore.Snapshot) error    { return nil }
+func (s *mockStore) LoadSnapshot(context.Context, string) (*eventstore.Snapshot, error) {
+	return nil, nil
+}
+func (s *mockStore) RecordDeadLetter(context.Context, eventstore.DeadLetter) error { return nil }
+func (s *mockStore) LoadDeadLetters(context.Context) ([]eventstore.DeadLetter, error) {
+	return nil, nil
+}
+func (s *mockStore) DeleteDeadLetter(context.Context, string) error              { return nil }
+func (s *mockStore) SaveTags(context.Context, string, map[string]string) error   { return nil }
+func (s *mockStore) LoadByTag(context.Context, string, string) ([]string, error) { return nil, nil }
+func (s *mockStore) Close() error                                                { return nil }
 
 // ---------------------------------------------------------------------------
 // AIHandler construction
@@ -733,7 +739,7 @@ func TestBuildPromptContextWorkspaceReady(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	pctx, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
+	pctx, _, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
 	}
@@ -773,7 +779,7 @@ func TestBuildPromptContextCodebase(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	pctx, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
+	pctx, _, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
 	}
@@ -808,7 +814,7 @@ func TestBuildPromptContextSchema(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	pctx, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
+	pctx, _, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
 	}
@@ -843,7 +849,7 @@ func TestBuildPromptContextGit(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	pctx, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
+	pctx, _, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
 	}
@@ -889,7 +895,7 @@ func TestBuildPromptContextEnrichment(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	pctx, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
+	pctx, _, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
 	}
@@ -934,7 +940,7 @@ func TestBuildPromptContextOperatorGuidanceMatching(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	pctx, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
+	pctx, _, _, err := h.buildPromptContext(context.Background(), event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
 	}
@@ -994,7 +1000,7 @@ func TestBuildPromptContextAutoRetryAttempt(t *testing.T) {
 		Builder:  persona.NewPromptBuilder(),
 	})
 
-	_, attempt, err := h.buildPromptContext(context.Background(),
+	_, attempt, _, err := h.buildPromptContext(context.Background(),
 		event.New(event.WorkflowRetried, 1, nil).WithCorrelation(corrID))
 	if err != nil {
 		t.Fatalf("buildPromptContext: %v", err)
@@ -1109,11 +1115,11 @@ func TestAIHandlerWorkspacePathOverridesWorkDir(t *testing.T) {
 	}
 
 	h := NewAIHandler(AIHandlerConfig{
-		Name:    "developer",
-		Persona: persona.Developer,
-		Backend: mb,
-		Store:   store,
-		WorkDir: "/static/work/dir", // static workDir
+		Name:     "developer",
+		Persona:  persona.Developer,
+		Backend:  mb,
+		Store:    store,
+		WorkDir:  "/static/work/dir", // static workDir
 		Personas: persona.DefaultRegistry(),
 		Builder:  persona.NewPromptBuilder(),
 	})
@@ -1550,4 +1556,160 @@ func TestAIHandlerOmitsRequestEventWhenBusWired(t *testing.T) {
 	if results[0].Type != event.AIResponseReceived {
 		t.Errorf("want AIResponseReceived, got %s", results[0].Type)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Session resume (developer feedback loop)
+// ---------------------------------------------------------------------------
+
+// seedResumeCorrelation builds a correlation chain for a developer that has
+// already run once (producing session "S1" on the given backend) and then
+// received review feedback targeting it. extra events are appended (e.g. an
+// auto-retry marker) to exercise the eligibility gate.
+func seedResumeCorrelation(priorBackend string, extra ...event.Envelope) (*mockStore, string) {
+	store := newMockStore()
+	corrID := "corr-resume"
+	events := []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "Build a REST API for users",
+		})).WithCorrelation(corrID),
+		event.New(event.WorkspaceReady, 1, event.MustMarshal(event.WorkspaceReadyPayload{
+			Path: "/tmp/ws", Branch: "PROJ-1", Base: "main",
+		})).WithCorrelation(corrID),
+		event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
+			Persona:   "developer",
+			Backend:   priorBackend,
+			SessionID: "S1",
+			Output:    event.MustMarshal("first attempt"),
+		})).WithCorrelation(corrID),
+		event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
+			TargetPersona: "developer",
+			SourcePersona: "reviewer",
+			Summary:       "fix the null deref on line 42",
+			Iteration:     1,
+		})).WithCorrelation(corrID),
+	}
+	events = append(events, extra...)
+	store.correlationEvents[corrID] = events
+	return store, corrID
+}
+
+func newDeveloperResumeHandler(store *mockStore, mb *mockBackend, enable bool) *AIHandler {
+	return NewAIHandler(AIHandlerConfig{
+		Name:                 "developer",
+		Persona:              persona.Developer,
+		Backend:              mb,
+		Store:                store,
+		Personas:             persona.DefaultRegistry(),
+		Builder:              persona.NewPromptBuilder(),
+		ResumeInFeedbackLoop: enable,
+	})
+}
+
+func TestAIHandlerSessionResume(t *testing.T) {
+	devTrigger := func(corrID string) event.Envelope {
+		// reviewer's failing verdict drives the developer re-run.
+		return event.New(event.FeedbackGenerated, 1, event.MustMarshal(event.FeedbackGeneratedPayload{
+			TargetPersona: "developer",
+		})).WithCorrelation(corrID)
+	}
+
+	t.Run("resumes_with_minimal_prompt", func(t *testing.T) {
+		store, corrID := seedResumeCorrelation("claude")
+		mb := &mockBackend{name: "claude", response: &backend.Response{Output: "fixed", SessionID: "S1"}}
+		h := newDeveloperResumeHandler(store, mb, true)
+
+		if _, err := h.Handle(context.Background(), devTrigger(corrID)); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if mb.lastReq.SessionID != "S1" {
+			t.Errorf("want resume of session S1, got %q", mb.lastReq.SessionID)
+		}
+		// Minimal prompt: carries the feedback, not the full context template.
+		if !strings.Contains(mb.lastReq.UserPrompt, "Continue from your previous session") {
+			t.Errorf("want resume prompt, got %q", mb.lastReq.UserPrompt)
+		}
+		if !strings.Contains(mb.lastReq.UserPrompt, "null deref on line 42") {
+			t.Errorf("resume prompt missing feedback: %q", mb.lastReq.UserPrompt)
+		}
+	})
+
+	t.Run("no_resume_when_flag_off", func(t *testing.T) {
+		store, corrID := seedResumeCorrelation("claude")
+		mb := &mockBackend{name: "claude", response: &backend.Response{Output: "fixed"}}
+		h := newDeveloperResumeHandler(store, mb, false)
+
+		if _, err := h.Handle(context.Background(), devTrigger(corrID)); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if mb.lastReq.SessionID != "" {
+			t.Errorf("want no resume (flag off), got %q", mb.lastReq.SessionID)
+		}
+	})
+
+	t.Run("no_resume_on_backend_mismatch", func(t *testing.T) {
+		// Prior session was opened on codex; the developer backend is claude.
+		store, corrID := seedResumeCorrelation("codex")
+		mb := &mockBackend{name: "claude", response: &backend.Response{Output: "fixed"}}
+		h := newDeveloperResumeHandler(store, mb, true)
+
+		if _, err := h.Handle(context.Background(), devTrigger(corrID)); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if mb.lastReq.SessionID != "" {
+			t.Errorf("want no cross-backend resume, got %q", mb.lastReq.SessionID)
+		}
+	})
+
+	t.Run("no_resume_on_auto_retry_rotation", func(t *testing.T) {
+		// An automatic retry rotates the backend, so the recorded session id no
+		// longer matches the CLI that will run — resume must be disabled.
+		retry := event.New(event.WorkflowRetried, 1, event.MustMarshal(event.WorkflowRetriedPayload{
+			FromPhase: "developer",
+			Automatic: true,
+		})).WithCorrelation("corr-resume")
+		store, corrID := seedResumeCorrelation("claude", retry)
+		mb := &mockBackend{name: "claude", response: &backend.Response{Output: "fixed"}}
+		h := newDeveloperResumeHandler(store, mb, true)
+
+		if _, err := h.Handle(context.Background(), devTrigger(corrID)); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if mb.lastReq.SessionID != "" {
+			t.Errorf("want no resume under rotation, got %q", mb.lastReq.SessionID)
+		}
+	})
+
+	t.Run("response_carries_session_id", func(t *testing.T) {
+		store := newMockStore()
+		corrID := "corr-fresh"
+		store.correlationEvents[corrID] = []event.Envelope{
+			event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+				Prompt: "Build it",
+			})).WithCorrelation(corrID),
+			event.New(event.WorkspaceReady, 1, event.MustMarshal(event.WorkspaceReadyPayload{
+				Path: "/tmp/ws", Branch: "PROJ-1", Base: "main",
+			})).WithCorrelation(corrID),
+		}
+		mb := &mockBackend{name: "claude", response: &backend.Response{Output: "done", SessionID: "S-new"}}
+		h := newDeveloperResumeHandler(store, mb, true)
+
+		results, err := h.Handle(context.Background(), event.New(event.PersonaCompleted, 1,
+			event.MustMarshal(event.PersonaCompletedPayload{Persona: "context-snapshot"})).WithCorrelation(corrID))
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		// First run (no feedback) must not resume...
+		if mb.lastReq.SessionID != "" {
+			t.Errorf("first run should not resume, got %q", mb.lastReq.SessionID)
+		}
+		// ...but it must record the new session id for a later resume.
+		var resp event.AIResponsePayload
+		if err := json.Unmarshal(results[len(results)-1].Payload, &resp); err != nil {
+			t.Fatalf("unmarshal AIResponsePayload: %v", err)
+		}
+		if resp.SessionID != "S-new" {
+			t.Errorf("want recorded session id %q, got %q", "S-new", resp.SessionID)
+		}
+	})
 }

@@ -141,5 +141,6 @@ func (c *Codex) Run(ctx context.Context, req Request) (*Response, error) {
 		Output:     captured.String(),
 		Duration:   time.Since(start),
 		TokensUsed: extractor.TokensUsed(),
+		SessionID:  extractor.SessionID(),
 	}, nil
 }

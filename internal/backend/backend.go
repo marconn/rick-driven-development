@@ -52,6 +52,12 @@ type Response struct {
 	// message_start + message_delta counters if no result arrives. Zero when
 	// the backend does not report usage (e.g., Gemini — handled separately).
 	TokensUsed int
+	// SessionID is the CLI session/thread id the run produced, for a later
+	// resume (codex `thread.started.thread_id`, claude `session_id`). Empty
+	// when the backend exposes none (gemini, antigravity at integration time).
+	// Callers persist it (AIResponsePayload.SessionID) and feed it back via
+	// Request.SessionID to continue the same session.
+	SessionID string
 }
 
 // maxArgSize is the threshold above which prompts are piped via stdin

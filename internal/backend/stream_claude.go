@@ -112,6 +112,10 @@ type ClaudePrintExtractor struct {
 	// we have an authoritative total and should prefer it over the deltas.
 	resultTokens int
 	hasResult    bool
+
+	// sessionID is the CLI session id, carried on the flat "system"/init event
+	// and echoed on the final "result" event. Captured for a later --resume.
+	sessionID string
 }
 
 // NewClaudePrintExtractor returns a stateful extractor for Claude's verbose print mode.
@@ -144,6 +148,12 @@ func (e *ClaudePrintExtractor) TokensUsed() int {
 		return e.resultTokens
 	}
 	return e.inputTokens + e.outputTokens + e.cacheTokens
+}
+
+// SessionID returns the claude session id (from the "system"/init or "result"
+// event), or "" if none was seen. Callers persist it for a later --resume.
+func (e *ClaudePrintExtractor) SessionID() string {
+	return e.sessionID
 }
 
 // extract processes a single NDJSON line, updating token accumulators and
@@ -239,6 +249,7 @@ func (e *ClaudePrintExtractor) handleFlatEvent(line []byte) (string, bool) {
 		Text       string      `json:"text"`
 		Result     string      `json:"result"`
 		StopReason string      `json:"stop_reason"`
+		SessionID  string      `json:"session_id"`
 		Usage      claudeUsage `json:"usage"`
 		Message    struct {
 			Usage claudeUsage `json:"usage"`
@@ -246,6 +257,13 @@ func (e *ClaudePrintExtractor) handleFlatEvent(line []byte) (string, bool) {
 	}
 	if err := json.Unmarshal(line, &ev); err != nil {
 		return "", false
+	}
+
+	// session_id rides the flat "system"/init event and is echoed on "result".
+	// Capture it wherever it first appears; later non-empty values (result)
+	// just reaffirm the same id.
+	if ev.SessionID != "" {
+		e.sessionID = ev.SessionID
 	}
 
 	switch ev.Type {

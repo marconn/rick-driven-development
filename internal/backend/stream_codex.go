@@ -17,11 +17,12 @@ import "encoding/json"
 
 // codexEvent represents a Codex CLI --json event.
 type codexEvent struct {
-	Type    string      `json:"type"`
-	Item    *codexItem  `json:"item,omitempty"`
-	Usage   *codexUsage `json:"usage,omitempty"`
-	Message string      `json:"message,omitempty"` // populated on top-level "error" events
-	Error   *codexError `json:"error,omitempty"`   // populated on "turn.failed" events
+	Type     string      `json:"type"`
+	Item     *codexItem  `json:"item,omitempty"`
+	Usage    *codexUsage `json:"usage,omitempty"`
+	Message  string      `json:"message,omitempty"`   // populated on top-level "error" events
+	Error    *codexError `json:"error,omitempty"`     // populated on "turn.failed" events
+	ThreadID string      `json:"thread_id,omitempty"` // populated on "thread.started"
 }
 
 type codexItem struct {
@@ -43,6 +44,7 @@ type codexUsage struct {
 type CodexExtractor struct {
 	tokensUsed int
 	errMsg     string
+	sessionID  string
 }
 
 func NewCodexExtractor() *CodexExtractor {
@@ -67,6 +69,13 @@ func (e *CodexExtractor) Err() string {
 	return e.errMsg
 }
 
+// SessionID returns the codex thread id (from the "thread.started" event) the
+// run opened, or "" if none was seen. Callers persist it for a later
+// `exec resume <id>`.
+func (e *CodexExtractor) SessionID() string {
+	return e.sessionID
+}
+
 func (e *CodexExtractor) extract(line []byte) (string, bool) {
 	var ev codexEvent
 	if err := json.Unmarshal(line, &ev); err != nil {
@@ -74,6 +83,10 @@ func (e *CodexExtractor) extract(line []byte) (string, bool) {
 	}
 
 	switch ev.Type {
+	case "thread.started":
+		if ev.ThreadID != "" {
+			e.sessionID = ev.ThreadID
+		}
 	case "item.completed":
 		if ev.Item != nil && ev.Item.Type == "agent_message" {
 			return ev.Item.Text, true

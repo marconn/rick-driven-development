@@ -246,5 +246,6 @@ func (c *Claude) Run(ctx context.Context, req Request) (*Response, error) {
 		StopReason: sw.StopReason(),
 		Duration:   time.Since(start),
 		TokensUsed: extractor.TokensUsed(),
+		SessionID:  extractor.SessionID(),
 	}, nil
 }

@@ -719,6 +719,32 @@ func feedExtractor(t *testing.T, ext *ClaudePrintExtractor, lines []string) {
 	_ = sw.Close()
 }
 
+// TestClaudeSessionIDCapture verifies the session id is captured from the
+// flat "system"/init event (and re-affirmed on "result") for a later --resume.
+func TestClaudeSessionIDCapture(t *testing.T) {
+	t.Run("from_system_init", func(t *testing.T) {
+		ext := NewClaudePrintExtractor()
+		feedExtractor(t, ext, []string{
+			`{"type":"system","subtype":"init","session_id":"sess-abc","tools":[]}`,
+			`{"type":"assistant","subtype":"text","text":"hi"}`,
+			`{"type":"result","subtype":"success","session_id":"sess-abc","usage":{"input_tokens":1,"output_tokens":1}}`,
+		})
+		if got := ext.SessionID(); got != "sess-abc" {
+			t.Errorf("want session id %q, got %q", "sess-abc", got)
+		}
+	})
+
+	t.Run("none_when_absent", func(t *testing.T) {
+		ext := NewClaudePrintExtractor()
+		feedExtractor(t, ext, []string{
+			`{"type":"assistant","subtype":"text","text":"hi"}`,
+		})
+		if got := ext.SessionID(); got != "" {
+			t.Errorf("want empty session id, got %q", got)
+		}
+	})
+}
+
 func TestClaudeTokenExtraction(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -917,6 +943,10 @@ func TestStreamWriterCodex(t *testing.T) {
 	}
 	if got := ext.Err(); got != "" {
 		t.Errorf("want no error on success, got %q", got)
+	}
+	// thread.started.thread_id is captured for a later `exec resume`.
+	if got := ext.SessionID(); got != "123" {
+		t.Errorf("want session id %q, got %q", "123", got)
 	}
 }
 

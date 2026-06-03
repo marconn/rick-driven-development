@@ -190,9 +190,9 @@ type WorkflowRetriedPayload struct {
 
 // OperatorGuidancePayload is emitted when an operator injects context into a workflow.
 type OperatorGuidancePayload struct {
-	Content    string `json:"content"`                // operator's text input
-	Target     string `json:"target,omitempty"`       // target persona (optional)
-	AutoResume bool   `json:"auto_resume,omitempty"`  // resume workflow after injection
+	Content    string `json:"content"`               // operator's text input
+	Target     string `json:"target,omitempty"`      // target persona (optional)
+	AutoResume bool   `json:"auto_resume,omitempty"` // resume workflow after injection
 }
 
 // VerdictOutcome represents the result of a review/QA phase.
@@ -206,8 +206,8 @@ const (
 
 // Issue represents a typed, categorized issue found during review.
 type Issue struct {
-	Severity    string `json:"severity"`    // "critical", "major", "minor"
-	Category    string `json:"category"`    // security, concurrency, error_handling, observability, api_contract, idempotency, testing, integration, performance, data, good_hygiene, correctness
+	Severity    string `json:"severity"` // "critical", "major", "minor"
+	Category    string `json:"category"` // security, concurrency, error_handling, observability, api_contract, idempotency, testing, integration, performance, data, good_hygiene, correctness
 	Description string `json:"description"`
 	File        string `json:"file,omitempty"`
 	Line        int    `json:"line,omitempty"`
@@ -358,7 +358,7 @@ func (p *FeedbackConsumedPayload) UnmarshalJSON(data []byte) error {
 // AIRequestPayload is emitted when an AI backend call is made.
 type AIRequestPayload struct {
 	Persona    string `json:"persona"`
-	Backend    string `json:"backend"` // "claude", "gemini"
+	Backend    string `json:"backend"`     // "claude", "gemini"
 	PromptHash string `json:"prompt_hash"` // for dedup, not the full prompt
 }
 
@@ -425,10 +425,17 @@ type AIResponsePayload struct {
 	Backend    string          `json:"backend"`
 	TokensUsed int             `json:"tokens_used,omitempty"`
 	DurationMS int64           `json:"duration_ms"`
-	Structured bool            `json:"structured"`              // was structured output extracted?
-	Output     json.RawMessage `json:"output,omitempty"`        // canonical text (post-grounding for pr-category-review)
-	OutputRaw  json.RawMessage `json:"output_raw,omitempty"`    // forensics: original LLM text when Output was rewritten
-	OutputRef  string          `json:"output_ref,omitempty"`    // blob storage ref for large outputs
+	Structured bool            `json:"structured"`           // was structured output extracted?
+	Output     json.RawMessage `json:"output,omitempty"`     // canonical text (post-grounding for pr-category-review)
+	OutputRaw  json.RawMessage `json:"output_raw,omitempty"` // forensics: original LLM text when Output was rewritten
+	OutputRef  string          `json:"output_ref,omitempty"` // blob storage ref for large outputs
+	// SessionID is the backend CLI session/thread id this run produced (codex
+	// thread_id, claude session_id). Empty when the backend reports none. The
+	// developer feedback loop reads the latest one for its persona to resume
+	// the prior session instead of re-sending full context — see AIHandler's
+	// session-resume gate. Persisted so resume survives a process restart /
+	// event replay.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // UnmarshalJSON tolerates the legacy `phase` field with verb values.
@@ -474,13 +481,13 @@ func (p *TokenBudgetExceededPayload) UnmarshalJSON(data []byte) error {
 
 // PersonaCompletedPayload is emitted when a persona handler finishes successfully.
 type PersonaCompletedPayload struct {
-	Persona      string `json:"persona"`               // handler name: "developer", "documenter"
-	TriggerEvent string `json:"trigger_event"`         // event type that triggered this
-	TriggerID    string `json:"trigger_id"`            // ID of triggering event
-	Reactive     bool   `json:"reactive"`              // true=bus-triggered, false=DAG-triggered
-	OutputRef    string `json:"output_ref,omitempty"`  // event ID of AIResponseReceived (avoids duplicating large payloads)
+	Persona      string `json:"persona"`              // handler name: "developer", "documenter"
+	TriggerEvent string `json:"trigger_event"`        // event type that triggered this
+	TriggerID    string `json:"trigger_id"`           // ID of triggering event
+	Reactive     bool   `json:"reactive"`             // true=bus-triggered, false=DAG-triggered
+	OutputRef    string `json:"output_ref,omitempty"` // event ID of AIResponseReceived (avoids duplicating large payloads)
 	DurationMS   int64  `json:"duration_ms"`
-	ChainDepth   int    `json:"chain_depth"`           // reactive chain depth (storm protection)
+	ChainDepth   int    `json:"chain_depth"` // reactive chain depth (storm protection)
 }
 
 // FailureKind classifies a persona handler failure so operators can tell a
@@ -557,21 +564,21 @@ const (
 // failure — populated from internal/buildinfo.Version(). It is omitted from
 // PersonaCompletedPayload because fleet drift questions only arise on failures.
 type PersonaFailedPayload struct {
-	Persona        string      `json:"persona"`
-	TriggerEvent   string      `json:"trigger_event"`
-	TriggerID      string      `json:"trigger_id"`
-	Reactive       bool        `json:"reactive"`
-	Error          string      `json:"error"`
-	FailureKind    FailureKind `json:"failure_kind,omitempty"`
+	Persona      string      `json:"persona"`
+	TriggerEvent string      `json:"trigger_event"`
+	TriggerID    string      `json:"trigger_id"`
+	Reactive     bool        `json:"reactive"`
+	Error        string      `json:"error"`
+	FailureKind  FailureKind `json:"failure_kind,omitempty"`
 	// Backend names the driver that produced the failure when the error came
 	// from a BackendError (claude, gemini, codex, or a round-robin composite
 	// name like "round-robin(claude,gemini,codex)"). Empty when the failure
 	// originated outside a backend call (handler-local error, context cancel).
-	Backend        string      `json:"backend,omitempty"`
-	Stderr         string      `json:"stderr,omitempty"`
-	DurationMS     int64       `json:"duration_ms"`
-	ChainDepth     int         `json:"chain_depth"`
-	HandlerVersion string      `json:"handler_version,omitempty"`
+	Backend        string `json:"backend,omitempty"`
+	Stderr         string `json:"stderr,omitempty"`
+	DurationMS     int64  `json:"duration_ms"`
+	ChainDepth     int    `json:"chain_depth"`
+	HandlerVersion string `json:"handler_version,omitempty"`
 }
 
 // CompensationPayload is emitted during rollback.
@@ -603,13 +610,13 @@ func (p *CompensationPayload) UnmarshalJSON(data []byte) error {
 // before full execution. The Engine auto-approves or pauses based on confidence.
 type HintEmittedPayload struct {
 	Persona       string          `json:"persona"`
-	TriggerEvent  string          `json:"trigger_event"`          // original event type
-	TriggerID     string          `json:"trigger_id"`             // original event ID for replay
-	Confidence    float64         `json:"confidence"`             // 0.0-1.0
-	Plan          string          `json:"plan"`                   // what the persona intends to do
-	Blockers      []string        `json:"blockers,omitempty"`     // issues that may prevent success
-	TokenEstimate int             `json:"token_estimate"`         // estimated token usage
-	Metadata      json.RawMessage `json:"metadata,omitempty"`     // handler-specific data
+	TriggerEvent  string          `json:"trigger_event"`      // original event type
+	TriggerID     string          `json:"trigger_id"`         // original event ID for replay
+	Confidence    float64         `json:"confidence"`         // 0.0-1.0
+	Plan          string          `json:"plan"`               // what the persona intends to do
+	Blockers      []string        `json:"blockers,omitempty"` // issues that may prevent success
+	TokenEstimate int             `json:"token_estimate"`     // estimated token usage
+	Metadata      json.RawMessage `json:"metadata,omitempty"` // handler-specific data
 }
 
 // HintApprovedPayload is emitted when a hint is accepted (auto or operator).
@@ -714,9 +721,9 @@ const (
 // VerdictRendered event for the same reviewer. Never published on the bus —
 // observability only, no handler subscribers.
 type VerdictGroundingSummaryPayload struct {
-	Reviewer        string                      `json:"reviewer"`         // handler name, e.g. "pr-data"
-	OriginalCount   int                         `json:"original_count"`   // issues parsed from raw LLM output
-	GroundedCount   int                         `json:"grounded_count"`   // issues that survived the filter
+	Reviewer        string                      `json:"reviewer"`       // handler name, e.g. "pr-data"
+	OriginalCount   int                         `json:"original_count"` // issues parsed from raw LLM output
+	GroundedCount   int                         `json:"grounded_count"` // issues that survived the filter
 	DropReasons     map[GroundingDropReason]int `json:"drop_reasons,omitempty"`
 	RescuedCount    int                         `json:"rescued_count,omitempty"`
 	OriginalOutcome VerdictOutcome              `json:"original_outcome"` // pre-grounding verdict
@@ -732,7 +739,7 @@ type ChildWorkflowCompletedPayload struct {
 	ParentCorrelation string `json:"parent_correlation"`
 	ChildCorrelation  string `json:"child_correlation"`
 	ChildTicket       string `json:"child_ticket,omitempty"`
-	Status            string `json:"status"`                 // "completed", "failed", "cancelled"
+	Status            string `json:"status"` // "completed", "failed", "cancelled"
 	Result            string `json:"result,omitempty"`
 	FailedPhase       string `json:"failed_phase,omitempty"`
 	DurationMS        int64  `json:"duration_ms,omitempty"`
@@ -781,19 +788,19 @@ type ContextGitPayload struct {
 // before-hook systems (e.g., library suggestions, component catalogs).
 // Downstream personas read this from the correlation chain.
 type ContextEnrichmentPayload struct {
-	Source  string              `json:"source"`            // enricher identity: "frontend-enricher"
-	Kind    string              `json:"kind"`              // "libraries", "components", "patterns"
-	Items   []EnrichmentItem    `json:"items"`
-	Summary string              `json:"summary,omitempty"` // human-readable summary
+	Source  string           `json:"source"` // enricher identity: "frontend-enricher"
+	Kind    string           `json:"kind"`   // "libraries", "components", "patterns"
+	Items   []EnrichmentItem `json:"items"`
+	Summary string           `json:"summary,omitempty"` // human-readable summary
 }
 
 // EnrichmentItem is a single suggestion from an enrichment system.
 type EnrichmentItem struct {
-	Name        string `json:"name"`                  // "shadcn/ui", "tanstack-query"
-	Version     string `json:"version,omitempty"`     // "^4.0.0"
-	Reason      string `json:"reason"`                // why this is recommended
-	DocURL      string `json:"doc_url,omitempty"`     // reference link
-	ImportPath  string `json:"import_path,omitempty"` // "@tanstack/react-query"
+	Name       string `json:"name"`                  // "shadcn/ui", "tanstack-query"
+	Version    string `json:"version,omitempty"`     // "^4.0.0"
+	Reason     string `json:"reason"`                // why this is recommended
+	DocURL     string `json:"doc_url,omitempty"`     // reference link
+	ImportPath string `json:"import_path,omitempty"` // "@tanstack/react-query"
 }
 
 // PRCommentPostedPayload records a PR comment Rick posted via its own client.
@@ -805,9 +812,9 @@ type EnrichmentItem struct {
 // Kind values:
 //   - "summary":      top-level PR comment summarising the round (optional).
 //   - "inline-reply": reply on an existing inline review-comment thread;
-//                     InReplyToID points at the thread's root comment.
+//     InReplyToID points at the thread's root comment.
 //   - "reply":        legacy top-level reply comment (pre-inline-reply
-//                     contract). Retained so historical events still parse.
+//     contract). Retained so historical events still parse.
 type PRCommentPostedPayload struct {
 	Repo        string `json:"repo"` // "owner/repo"
 	PRNumber    int    `json:"pr_number"`

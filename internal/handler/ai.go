@@ -26,25 +26,32 @@ import (
 // dispatched, masking dispatch-vs-backend bugs (see incident
 // 2d8b4b99-f8e8-4af4-917c-9102fa6ca33a).
 type AIHandler struct {
-	name     string            // handler name, also the persona key used in events and prompt-output reuse
-	persona  string            // persona name for system prompt
-	template string            // user-prompt template file name (defaults to handler name when empty)
-	backend  backend.Backend   // AI provider (claude, gemini)
-	store    eventstore.Store  // for loading workflow context + inline AIRequestSent persist
-	bus      eventbus.Bus      // optional: publishes AIRequestSent before backend.Run
-	registry *persona.Registry // for system prompt lookup
-	builder  *persona.PromptBuilder
+	name           string            // handler name, also the persona key used in events and prompt-output reuse
+	persona        string            // persona name for system prompt
+	template       string            // user-prompt template file name (defaults to handler name when empty)
+	backend        backend.Backend   // AI provider (claude, gemini)
+	store          eventstore.Store  // for loading workflow context + inline AIRequestSent persist
+	bus            eventbus.Bus      // optional: publishes AIRequestSent before backend.Run
+	registry       *persona.Registry // for system prompt lookup
+	builder        *persona.PromptBuilder
 	workDir        string        // working directory for backend execution
 	yolo           bool          // skip permission checks
 	plainText      bool          // skip structured JSON extraction, store raw text
 	backendTimeout time.Duration // hard cap on backend.Run; 0 disables
 	effort         string        // Claude --effort override; empty = claude.go default ("high")
+	// resumeInFeedbackLoop opts this handler into backend session resume on a
+	// feedback-driven re-run: instead of re-sending the full context prompt,
+	// it resumes the prior CLI session and sends only the feedback delta. Set
+	// only for the developer (the sole code-producing persona that re-runs in
+	// the loop) and only when RICK_ENABLE_SESSION_RESUME is set. See
+	// resolveResume for the strict eligibility gate.
+	resumeInFeedbackLoop bool
 }
 
 // AIHandlerConfig configures an AI handler.
 type AIHandlerConfig struct {
-	Name    string            // handler name, also the persona key (e.g., "developer", "reviewer")
-	Persona string            // persona name for system prompt
+	Name    string // handler name, also the persona key (e.g., "developer", "reviewer")
+	Persona string // persona name for system prompt
 	// Template names the user-prompt template to load (e.g., "develop",
 	// "review", "pr-category-review"). Empty means use Name. Multiple
 	// handlers can share a template — the 12 pr-* category reviewers all
@@ -52,19 +59,19 @@ type AIHandlerConfig struct {
 	// research, commit) are kept so the embedded markdown files don't have
 	// to be renamed alongside the handler-name collapse.
 	Template string
-	Backend backend.Backend   // AI backend to call
-	Store   eventstore.Store  // event store for context loading + inline AIRequestSent persist
+	Backend  backend.Backend  // AI backend to call
+	Store    eventstore.Store // event store for context loading + inline AIRequestSent persist
 	// Bus is optional. When non-nil, AIRequestSent is persisted to the
 	// persona-scoped aggregate AND published on the bus before backend.Run
 	// fires, so a hung backend leaves a forensic trail. Tests that don't
 	// care about observability can omit Bus and the handler falls back to
 	// returning AIRequestSent alongside the response.
-	Bus      eventbus.Bus
-	Personas *persona.Registry // persona registry for system prompts
-	Builder *persona.PromptBuilder
-	WorkDir   string  // working directory for backend execution
-	Yolo      bool    // skip permission checks
-	PlainText bool    // skip structured JSON extraction, store raw text
+	Bus       eventbus.Bus
+	Personas  *persona.Registry // persona registry for system prompts
+	Builder   *persona.PromptBuilder
+	WorkDir   string // working directory for backend execution
+	Yolo      bool   // skip permission checks
+	PlainText bool   // skip structured JSON extraction, store raw text
 	// BackendTimeout caps how long backend.Run may block. Zero means no
 	// timeout (legacy behavior). Production should always set this so a
 	// wedged claude/gemini subprocess fails fast instead of hanging.
@@ -74,6 +81,11 @@ type AIHandlerConfig struct {
 	// through to claude.go's "high" default. No-op on Gemini / Codex
 	// backends — they have no equivalent flag.
 	Effort string
+	// ResumeInFeedbackLoop opts this handler into backend session resume on a
+	// feedback-driven re-run (see AIHandler.resumeInFeedbackLoop). Default
+	// false. handlers.go sets it only for the developer and only when
+	// RICK_ENABLE_SESSION_RESUME is set.
+	ResumeInFeedbackLoop bool
 }
 
 // defaultTemplate returns the prompt-template file name for a handler. The
@@ -117,19 +129,20 @@ func NewAIHandler(cfg AIHandlerConfig) *AIHandler {
 		tmpl = defaultTemplate(cfg.Name)
 	}
 	return &AIHandler{
-		name:     cfg.Name,
-		persona:  cfg.Persona,
-		template: tmpl,
-		backend:  cfg.Backend,
-		store:    cfg.Store,
-		bus:      cfg.Bus,
-		registry: cfg.Personas,
-		builder:  cfg.Builder,
-		workDir:        cfg.WorkDir,
-		yolo:           cfg.Yolo,
-		plainText:      cfg.PlainText,
-		backendTimeout: cfg.BackendTimeout,
-		effort:         cfg.Effort,
+		name:                 cfg.Name,
+		persona:              cfg.Persona,
+		template:             tmpl,
+		backend:              cfg.Backend,
+		store:                cfg.Store,
+		bus:                  cfg.Bus,
+		registry:             cfg.Personas,
+		builder:              cfg.Builder,
+		workDir:              cfg.WorkDir,
+		yolo:                 cfg.Yolo,
+		plainText:            cfg.PlainText,
+		backendTimeout:       cfg.BackendTimeout,
+		effort:               cfg.Effort,
+		resumeInFeedbackLoop: cfg.ResumeInFeedbackLoop,
 	}
 }
 
@@ -139,16 +152,16 @@ func (h *AIHandler) Name() string { return h.name }
 func (h *AIHandler) Subscribes() []event.Type { return nil }
 
 // Handle processes a triggering event by:
-// 1. Loading workflow context from the event store (previous outputs, feedback)
-// 2. Building system + user prompts via the persona system
-// 3. Persisting+publishing AIRequestSent (so a hung handler still leaves a trail)
-// 4. Persisting+publishing AIRequestStarted immediately before backend.Run
-//    (distinguishes pre-spawn stalls from subprocess-side hangs)
-// 5. Calling the AI backend (with optional timeout)
-// 6. Returning AIResponseReceived (or a bundle including request/started events
-//    when no Bus is wired)
+//  1. Loading workflow context from the event store (previous outputs, feedback)
+//  2. Building system + user prompts via the persona system
+//  3. Persisting+publishing AIRequestSent (so a hung handler still leaves a trail)
+//  4. Persisting+publishing AIRequestStarted immediately before backend.Run
+//     (distinguishes pre-spawn stalls from subprocess-side hangs)
+//  5. Calling the AI backend (with optional timeout)
+//  6. Returning AIResponseReceived (or a bundle including request/started events
+//     when no Bus is wired)
 func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Envelope, error) {
-	pctx, autoRetryAttempt, err := h.buildPromptContext(ctx, env)
+	pctx, autoRetryAttempt, resume, err := h.buildPromptContext(ctx, env)
 	if err != nil {
 		return nil, fmt.Errorf("handler %s: build context: %w", h.name, err)
 	}
@@ -158,9 +171,20 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		return nil, fmt.Errorf("handler %s: load system prompt: %w", h.name, err)
 	}
 
-	userPrompt, err := h.builder.Build(h.template, pctx)
-	if err != nil {
-		return nil, fmt.Errorf("handler %s: build prompt: %w", h.name, err)
+	// Session resume: on an eligible feedback re-run, continue the prior CLI
+	// session and send only the feedback delta instead of rebuilding the full
+	// context prompt. resumeSessionID is "" when not resuming (the common case),
+	// which leaves Request.SessionID empty and the prompt path unchanged.
+	resumeSessionID := h.resolveResume(pctx, autoRetryAttempt, resume)
+
+	var userPrompt string
+	if resumeSessionID != "" {
+		userPrompt = buildResumePrompt(pctx)
+	} else {
+		userPrompt, err = h.builder.Build(h.template, pctx)
+		if err != nil {
+			return nil, fmt.Errorf("handler %s: build prompt: %w", h.name, err)
+		}
 	}
 
 	// Build AIRequestSent. When a Bus + Store + correlation are available we
@@ -248,6 +272,7 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		WorkDir:      workDir,
 		Yolo:         h.yolo,
 		Effort:       h.effort,
+		SessionID:    resumeSessionID, // "" = fresh session (the common path)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("handler %s: backend: %w", h.name, err)
@@ -270,6 +295,7 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		DurationMS: resp.Duration.Milliseconds(),
 		Structured: structured,
 		Output:     output,
+		SessionID:  resp.SessionID, // captured for a later feedback-loop resume
 	})).WithSource("handler:" + h.name)
 
 	// Return events not already persisted inline. emittedInline implies
@@ -311,27 +337,90 @@ func (h *AIHandler) persistRequestEvent(ctx context.Context, env event.Envelope,
 	return reqEvt, false
 }
 
+// resumeInfo carries the latest backend session a persona produced earlier in
+// this correlation. The developer feedback loop uses it to continue that
+// session instead of re-sending the full context prompt. Zero value (empty
+// sessionID) means "no resumable session".
+type resumeInfo struct {
+	sessionID string
+	backend   string // the CLI that created the session; a session id is only valid there
+}
+
+// resolveResume decides whether this run should resume a prior backend session
+// rather than start fresh, and returns the session id to resume ("" = don't).
+//
+// Resume trades a smaller prompt (feedback delta only — the session already
+// holds the task + codebase context) for a dependency on the CLI's persisted
+// session. It is gated hard because a wrong resume silently feeds the model
+// stale context. ALL must hold:
+//
+//   - the handler opted in (developer only, behind RICK_ENABLE_SESSION_RESUME);
+//   - a prior session exists for this persona;
+//   - it was created by the SAME backend we're about to call (a codex thread id
+//     is meaningless to claude, and vice versa);
+//   - no auto-retry has fired for this persona — auto-retry deliberately
+//     ROTATES the backend (WithRotateOffset), so the recorded session id no
+//     longer matches the CLI that will run. This also gives a free fallback:
+//     if a resumed run fails transiently, the engine's auto-retry re-runs it
+//     with rotation on → resume disabled → full context is rebuilt;
+//   - this is a feedback-driven re-run (feedback present for this persona) —
+//     the only case where the prior session is the right thing to continue;
+//   - the backend is a single concrete CLI, not a RoundRobin composite, whose
+//     per-call backend choice (and thus session attribution) isn't pinned here.
+func (h *AIHandler) resolveResume(pctx persona.PromptContext, autoRetryAttempt int, r resumeInfo) string {
+	if !h.resumeInFeedbackLoop {
+		return ""
+	}
+	if r.sessionID == "" || r.backend != h.backend.Name() {
+		return ""
+	}
+	if autoRetryAttempt != 0 || pctx.Feedback == "" {
+		return ""
+	}
+	if _, isRoundRobin := h.backend.(*backend.RoundRobin); isRoundRobin {
+		return ""
+	}
+	return r.sessionID
+}
+
+// buildResumePrompt produces the minimal user prompt for a resumed session:
+// only the new feedback delta, since the session already carries the task,
+// codebase context, and the persona's own prior work. This is where the token
+// saving comes from — the full context prompt (codebase snapshot, schema, git,
+// prior outputs) is NOT re-sent.
+func buildResumePrompt(pctx persona.PromptContext) string {
+	var b strings.Builder
+	b.WriteString("Continue from your previous session in this same workspace. ")
+	b.WriteString("Your earlier work is already applied on disk; do not redo it from scratch. ")
+	b.WriteString("Address the following review feedback and update the code accordingly, ")
+	b.WriteString("then report your changes in the same format as before.\n\n")
+	b.WriteString(pctx.Feedback)
+	return b.String()
+}
+
 // buildPromptContext loads workflow state from the event store and constructs
 // a PromptContext for prompt building. It reads the correlation chain to find
 // previous phase outputs and any feedback for the current phase. The second
 // return value is the number of automatic WorkflowRetried events that have
 // already targeted this handler earlier in the correlation — callers fold it
 // into the backend sticky key so RoundRobin rotations pick a fresh CLI on
-// retry instead of re-running the same one that just silently stalled.
-func (h *AIHandler) buildPromptContext(ctx context.Context, env event.Envelope) (persona.PromptContext, int, error) {
+// retry instead of re-running the same one that just silently stalled. The
+// third carries the latest resumable session for this persona (see resumeInfo).
+func (h *AIHandler) buildPromptContext(ctx context.Context, env event.Envelope) (persona.PromptContext, int, resumeInfo, error) {
 	if env.CorrelationID == "" {
-		return persona.PromptContext{}, 0, nil
+		return persona.PromptContext{}, 0, resumeInfo{}, nil
 	}
 
 	events, err := h.store.LoadByCorrelation(ctx, env.CorrelationID)
 	if err != nil {
-		return persona.PromptContext{}, 0, fmt.Errorf("load correlation chain: %w", err)
+		return persona.PromptContext{}, 0, resumeInfo{}, fmt.Errorf("load correlation chain: %w", err)
 	}
 
 	pctx := persona.PromptContext{
 		Outputs: make(map[string]string),
 	}
 	autoRetryAttempt := 0
+	var resume resumeInfo
 
 	for _, e := range events {
 		switch e.Type {
@@ -346,6 +435,13 @@ func (h *AIHandler) buildPromptContext(ctx context.Context, env event.Envelope) 
 			var p event.AIResponsePayload
 			if err := json.Unmarshal(e.Payload, &p); err == nil {
 				pctx.Outputs[p.Persona] = unmarshalOutput(p.Output, p.Structured)
+				// Track the latest session THIS persona opened so a feedback
+				// re-run can resume it. Events are in causal order, so the last
+				// write wins. Backend is recorded alongside because a session
+				// id is only valid on the CLI that created it.
+				if p.Persona == h.name && p.SessionID != "" {
+					resume = resumeInfo{sessionID: p.SessionID, backend: p.Backend}
+				}
 			}
 
 		case event.FeedbackGenerated:
@@ -412,7 +508,7 @@ func (h *AIHandler) buildPromptContext(ctx context.Context, env event.Envelope) 
 		}
 	}
 
-	return pctx, autoRetryAttempt, nil
+	return pctx, autoRetryAttempt, resume, nil
 }
 
 // marshalOutput converts LLM text output to JSON for AIResponsePayload.Output.

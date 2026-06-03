@@ -2,6 +2,7 @@ package handler
 
 import (
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/marconn/rick-event-driven-development/internal/backend"
@@ -71,25 +72,25 @@ func isVerdictBearingReviewer(name string) bool {
 
 // Deps bundles the shared dependencies needed by all handlers.
 type Deps struct {
-	Backend    backend.Backend
-	Store      eventstore.Store
+	Backend backend.Backend
+	Store   eventstore.Store
 	// Bus is the in-process event bus. AI handlers use it to publish
 	// AIRequestSent before backend.Run so a hung subprocess still leaves a
 	// forensic trail (incident 2d8b4b99). May be nil in tests / deprecated
 	// CLI run mode — handlers will fall back to bundling AIRequestSent with
 	// the response.
-	Bus        eventbus.Bus
-	Personas   *persona.Registry
-	Builder    *persona.PromptBuilder
+	Bus         eventbus.Bus
+	Personas    *persona.Registry
+	Builder     *persona.PromptBuilder
 	Jira        *jira.Client              // nil when JIRA env vars are unset (non-fatal)
 	Confluence  *confluence.Client        // nil when CONFLUENCE env vars are unset (non-fatal)
 	Estimation  *estimation.Store         // nil when estimation DB is unavailable (non-fatal)
 	MsMap       *planning.MicroserviceMap // nil when RICK_REPOS_PATH is unset (non-fatal)
-	GitHub      *gh.Client               // nil when GITHUB_TOKEN is unset (non-fatal)
+	GitHub      *gh.Client                // nil when GITHUB_TOKEN is unset (non-fatal)
 	PluginStore *pluginstore.Store        // nil when plugin DB is unavailable (non-fatal)
 	Logger      *slog.Logger
-	WorkDir    string // working directory for AI backend execution
-	Yolo       bool   // skip AI backend permission checks
+	WorkDir     string // working directory for AI backend execution
+	Yolo        bool   // skip AI backend permission checks
 	// ReviewBackend is the backend used for review-related handlers (e.g.,
 	// reviewer, qa, pr-category reviewers, feedback-analyzer, pr-replier,
 	// qa-analyzer). Callers should build this via backend.NewReviewBackend()
@@ -211,12 +212,21 @@ func RegisterAll(reg *Registry, d Deps) error {
 		return cfg
 	}
 
+	// Session resume (RICK_ENABLE_SESSION_RESUME, default off): on a
+	// feedback-driven re-run the developer resumes its prior CLI session and
+	// sends only the feedback delta instead of the full context prompt, cutting
+	// re-sent input tokens. Scoped to the developer — the sole code-producing
+	// persona that re-runs in the loop on a single (non-rotating) backend. The
+	// strict eligibility gate lives in AIHandler.resolveResume.
+	developerCfg := aiCfg("developer", persona.Developer)
+	developerCfg.ResumeInFeedbackLoop = os.Getenv("RICK_ENABLE_SESSION_RESUME") == "1"
+
 	handlers := []Handler{
 		// Core AI handlers — used across default, workspace-dev, jira-dev, pr-review,
 		// pr-feedback, ci-fix workflows via DAG scoping.
 		NewAIHandler(aiCfg("researcher", persona.Researcher)),
 		NewAIHandler(aiCfg("architect", persona.Architect)),
-		NewDeveloperHandler(aiCfg("developer", persona.Developer)),
+		NewDeveloperHandler(developerCfg),
 		NewReviewHandler(ReviewHandlerConfig{
 			AIConfig:      reviewAiCfg("reviewer", persona.Reviewer),
 			TargetPersona: "developer",
