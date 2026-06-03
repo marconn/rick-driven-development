@@ -915,6 +915,91 @@ func TestStreamWriterCodex(t *testing.T) {
 	if got := ext.TokensUsed(); got != 15 {
 		t.Errorf("want tokens 15, got %d", got)
 	}
+	if got := ext.Err(); got != "" {
+		t.Errorf("want no error on success, got %q", got)
+	}
+}
+
+// TestCodexExtractorIgnoresNonMessageItems guards that item types other than
+// agent_message (reasoning, command_execution, etc.) and the cached_input /
+// reasoning_output usage subsets do not leak into the captured text or inflate
+// the token total. Schema verified against codex-cli 0.136.0.
+func TestCodexExtractorIgnoresNonMessageItems(t *testing.T) {
+	var buf bytes.Buffer
+	ext := NewCodexExtractor()
+	sw := NewStreamWriter(&buf, ext.ExtractFn())
+
+	events := []string{
+		`{"type":"item.completed","item":{"type":"reasoning","text":"thinking..."}}`,
+		`{"type":"item.completed","item":{"type":"command_execution","command":"ls","status":"completed"}}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"Done."}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":12}}`,
+	}
+	for _, line := range events {
+		if _, err := sw.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	_ = sw.Close()
+
+	if got := buf.String(); got != "Done." {
+		t.Errorf("want only agent_message text %q, got %q", "Done.", got)
+	}
+	// cached_input is a subset of input, reasoning_output a subset of output;
+	// the total is input+output (100+20), never the inflated 100+80+20+12.
+	if got := ext.TokensUsed(); got != 120 {
+		t.Errorf("want tokens 120, got %d", got)
+	}
+}
+
+// TestCodexExtractorCapturesErrorEvents verifies the parser surfaces the
+// message from codex's stdout-only failure events. Codex emits a top-level
+// "error" event followed by an authoritative "turn.failed", exits non-zero,
+// and leaves stderr empty — so this message is the only diagnostic available.
+func TestCodexExtractorCapturesErrorEvents(t *testing.T) {
+	t.Run("turn_failed_takes_precedence", func(t *testing.T) {
+		var buf bytes.Buffer
+		ext := NewCodexExtractor()
+		sw := NewStreamWriter(&buf, ext.ExtractFn())
+
+		events := []string{
+			`{"type":"thread.started","thread_id":"abc"}`,
+			`{"type":"error","message":"{\"error\":{\"type\":\"rate_limit_exceeded\"}}"}`,
+			`{"type":"turn.failed","error":{"message":"{\"error\":{\"type\":\"rate_limit_exceeded\",\"message\":\"slow down\"}}"}}`,
+		}
+		for _, line := range events {
+			if _, err := sw.Write([]byte(line + "\n")); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+		}
+		_ = sw.Close()
+
+		// turn.failed is the authoritative terminal message.
+		if got := ext.Err(); !strings.Contains(got, "slow down") {
+			t.Errorf("want turn.failed message, got %q", got)
+		}
+		// The provider error `type` must survive verbatim for the rate-limit
+		// classifier (failure_classify.go) to key on it.
+		if got := ext.Err(); !strings.Contains(got, "rate_limit_exceeded") {
+			t.Errorf("want preserved error type, got %q", got)
+		}
+	})
+
+	t.Run("top_level_error_only", func(t *testing.T) {
+		var buf bytes.Buffer
+		ext := NewCodexExtractor()
+		sw := NewStreamWriter(&buf, ext.ExtractFn())
+
+		line := `{"type":"error","message":"stream disconnected"}`
+		if _, err := sw.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		_ = sw.Close()
+
+		if got := ext.Err(); got != "stream disconnected" {
+			t.Errorf("want %q, got %q", "stream disconnected", got)
+		}
+	})
 }
 
 func TestStreamWriterIgnoresToolEvents(t *testing.T) {

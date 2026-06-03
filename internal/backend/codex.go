@@ -39,15 +39,13 @@ func (c *Codex) buildArgs(req Request) (args []string, stdinPrompt string) {
 		args = append(args, "exec")
 	}
 
-	// System prompt integration. Codex doesn't have a direct --system-prompt flag
-	// in 'exec' mode that I saw, but we can prepend it.
-	// Actually, let's check if it has a way to set system instructions.
-	// If not, we'll wrap it like Gemini.
-
-	// Always use --json for structured parsing of the output.
+	// Structured JSONL output for the stream parser.
 	args = append(args, "--json")
 
 	if req.Yolo {
+		// `exec` has no --full-auto alias (that lives in the interactive TUI);
+		// this is the headless full-access escape hatch. We already run inside
+		// an isolated workspace clone, so codex's own sandbox is redundant.
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	}
 	if req.Model != "" {
@@ -104,6 +102,15 @@ func (c *Codex) Run(ctx context.Context, req Request) (*Response, error) {
 	if err := cmd.Run(); err != nil {
 		_ = sw.Close()
 		stderr := captureErrorTail(stderrBuf.String(), captured.String())
+		// Codex reports API/turn failures as JSON events on stdout and leaves
+		// stderr empty. When the stream parser caught such an event, prefer its
+		// message over the raw stdout tail: it isolates the cause from the
+		// surrounding command_execution noise (which can otherwise crowd the
+		// real error out of the bounded tail) while preserving the provider's
+		// error `type` the failure classifier keys on.
+		if msg := extractor.Err(); msg != "" && strings.TrimSpace(stderrBuf.String()) == "" {
+			stderr = tailBytes(msg, MaxStderrCapture)
+		}
 		elapsed := time.Since(start)
 		if errors.Is(context.Cause(watchCtx), ErrIdleTimeout) {
 			return nil, &BackendError{
