@@ -86,6 +86,10 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 	reviewBe := newReviewBackend(logger, saturation)
 
 	personas := persona.DefaultRegistry()
+	// Data-driven persona manifests (opt-in) — see serve.go.
+	if err := personas.LoadManifests(os.Getenv("RICK_PERSONA_MANIFESTS_DIR"), logger); err != nil {
+		return fmt.Errorf("load persona manifests: %w", err)
+	}
 	builder := persona.NewPromptBuilder()
 
 	reg := handler.NewRegistry()

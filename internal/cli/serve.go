@@ -105,6 +105,11 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 	reviewBe := newReviewBackend(logger, saturation)
 
 	personas := persona.DefaultRegistry()
+	// Data-driven persona manifests (opt-in). Unset ⇒ code-only personas
+	// (byte-for-byte prior behavior). A bad manifest fails only itself.
+	if err := personas.LoadManifests(os.Getenv("RICK_PERSONA_MANIFESTS_DIR"), logger); err != nil {
+		return fmt.Errorf("load persona manifests: %w", err)
+	}
 	builder := persona.NewPromptBuilder()
 
 	ghClient := newGitHubClient()
