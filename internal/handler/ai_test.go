@@ -576,6 +576,97 @@ func TestAIHandlerEventSource(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// AIHandler.Handle — RoundRobin attribution (task 0001)
+// ---------------------------------------------------------------------------
+
+// TestAIHandlerRoundRobinAttribution pins the 0001 contract end-to-end: when
+// the handler runs over a RoundRobin rotation, every emitted event records the
+// concrete inner backend that actually executed, never the composite
+// "round-robin(...)" name. Without it, dwell/telemetry (0003) on review-phase
+// handlers is unreadable.
+func TestAIHandlerRoundRobinAttribution(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-rotation"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "Review this change",
+		})).WithCorrelation(corrID),
+	}
+
+	a := &mockBackend{name: "codex", response: &backend.Response{Output: "ok", Duration: time.Second}}
+	b := &mockBackend{name: "claude", response: &backend.Response{Output: "ok", Duration: time.Second}}
+	rr, err := backend.NewRoundRobin(a, b)
+	if err != nil {
+		t.Fatalf("NewRoundRobin: %v", err)
+	}
+
+	h := NewAIHandler(AIHandlerConfig{
+		Name:      "reviewer",
+		Persona:   persona.Reviewer,
+		Backend:   rr,
+		Store:     store,
+		Personas:  persona.DefaultRegistry(),
+		Builder:   persona.NewPromptBuilder(),
+		PlainText: true,
+	})
+
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation(corrID)
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	// No Bus wired → events bundle with the response: [reqEvt, startEvt, respEvt].
+	// The concrete backend the sticky key resolved to must be identical across
+	// all three, and must be one of the rotation members (never the composite).
+	var reqP event.AIRequestPayload
+	if err := json.Unmarshal(results[0].Payload, &reqP); err != nil {
+		t.Fatalf("unmarshal AIRequestPayload: %v", err)
+	}
+	var startP event.AIRequestStartedPayload
+	if err := json.Unmarshal(results[1].Payload, &startP); err != nil {
+		t.Fatalf("unmarshal AIRequestStartedPayload: %v", err)
+	}
+	var respP event.AIResponsePayload
+	if err := json.Unmarshal(results[2].Payload, &respP); err != nil {
+		t.Fatalf("unmarshal AIResponsePayload: %v", err)
+	}
+
+	for label, got := range map[string]string{
+		"AIRequestSent":      reqP.Backend,
+		"AIRequestStarted":   startP.Backend,
+		"AIResponseReceived": respP.Backend,
+	} {
+		if strings.HasPrefix(got, "round-robin(") {
+			t.Errorf("%s recorded composite name %q; want concrete inner backend", label, got)
+		}
+		if got != "codex" && got != "claude" {
+			t.Errorf("%s backend %q is not a rotation member", label, got)
+		}
+	}
+	if reqP.Backend != respP.Backend || startP.Backend != respP.Backend {
+		t.Errorf("attribution diverged across events: sent=%q started=%q resp=%q",
+			reqP.Backend, startP.Backend, respP.Backend)
+	}
+
+	// The backend that was actually invoked must match the attributed one (the
+	// sticky key resolves deterministically, so exactly one member ran).
+	ranName := "codex"
+	if b.lastReq.UserPrompt != "" {
+		ranName = "claude"
+	}
+	if a.lastReq.UserPrompt != "" && b.lastReq.UserPrompt != "" {
+		t.Fatal("both rotation members ran; sticky selection must pick exactly one")
+	}
+	if respP.Backend != ranName {
+		t.Errorf("attributed %q but %q actually ran", respP.Backend, ranName)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // AIHandler.Handle — token count propagation
 // ---------------------------------------------------------------------------
 

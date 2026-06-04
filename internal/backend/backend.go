@@ -23,6 +23,35 @@ type Backend interface {
 	Run(ctx context.Context, req Request) (*Response, error)
 }
 
+// Selector is implemented by backends that pick a concrete inner backend per
+// call (RoundRobin). Resolving the concrete backend before Run lets callers
+// attribute the events emitted before dispatch (AIRequestSent /
+// AIRequestStarted) to the CLI that actually executes, not a composite
+// rotation name.
+type Selector interface {
+	// Select returns the backend a subsequent Run with the same ctx would
+	// dispatch to. It may advance rotation state (see RoundRobin.Select), so
+	// the caller MUST invoke the returned backend rather than calling Run on
+	// the Selector afterwards.
+	Select(ctx context.Context) Backend
+}
+
+// Resolve returns the concrete backend b would dispatch to for ctx. When b is a
+// Selector (RoundRobin), it returns the selected inner backend; otherwise b
+// itself. Callers invoke the returned backend's Run directly so that the
+// per-call backend identity is known before any pre-dispatch event is emitted.
+//
+// In the review-rotation construction the rotation members are the
+// concurrency-limited wrappers (RoundRobin over limitedBackend), so the
+// returned backend still enforces its limiter on Run — Resolve never bypasses
+// concurrency control.
+func Resolve(ctx context.Context, b Backend) Backend {
+	if s, ok := b.(Selector); ok {
+		return s.Select(ctx)
+	}
+	return b
+}
+
 // Request configures an AI backend execution.
 type Request struct {
 	SystemPrompt string    // LLM system prompt (persona instructions).

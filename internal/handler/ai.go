@@ -187,6 +187,43 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		}
 	}
 
+	// Establish the dispatch context up front. The sticky key pins this
+	// persona to one inner backend when the underlying backend is a RoundRobin,
+	// keeping reviewer/qa on the same CLI across all iterations of a feedback
+	// loop so the developer isn't chasing three different backends' opinions on
+	// three different runs. Harmless for non-rotating backends — the key is
+	// simply ignored.
+	//
+	// Auto-retry rotation: when the engine has fired
+	// WorkflowRetried{FromPhase==h.name, Automatic==true} earlier in this
+	// correlation, the retry attempt count is passed as a deterministic
+	// rotation offset so RoundRobin picks a strictly different inner
+	// backend for the retry. We use WithRotateOffset rather than baking the
+	// attempt into the key because FNV % n with n=3 has a 1/3 collision
+	// probability — an operator on their last auto-retry budget can't
+	// afford to land back on the CLI that just silently stalled. Offset of
+	// N shifts to slot (base+N) mod n, guaranteeing a different slot for
+	// N ∈ [1, n-1]. Single-backend deployments are unaffected (n=1 absorbs
+	// any offset).
+	//
+	// This is established BEFORE AIRequestSent so we can resolve which concrete
+	// backend will run and attribute every event to it.
+	dispatchCtx := ctx
+	if env.CorrelationID != "" {
+		dispatchCtx = backend.WithStickyKey(dispatchCtx, env.CorrelationID+":"+h.persona)
+		dispatchCtx = backend.WithRotateOffset(dispatchCtx, autoRetryAttempt)
+	}
+
+	// Resolve the concrete backend that will execute. For a RoundRobin this
+	// selects the inner CLI per the sticky/offset rules above; for a single
+	// backend it is the backend itself. Every event (AIRequestSent /
+	// AIRequestStarted / AIResponseReceived) is attributed to this resolved
+	// name so telemetry records the CLI that actually ran, not the composite
+	// "round-robin(...)" identity. We invoke runBackend directly below so the
+	// rotation is not advanced a second time (see backend.Resolve / Selector).
+	runBackend := backend.Resolve(dispatchCtx, h.backend)
+	backendName := runBackend.Name()
+
 	// Build AIRequestSent. When a Bus + Store + correlation are available we
 	// persist+publish it inline BEFORE calling backend.Run, so a hung
 	// subprocess still leaves a forensic trail in the event log. Otherwise
@@ -195,7 +232,7 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 	promptHash := sha256Short(userPrompt)
 	reqEvt := event.New(event.AIRequestSent, 1, event.MustMarshal(event.AIRequestPayload{
 		Persona:    h.name,
-		Backend:    h.backend.Name(),
+		Backend:    backendName,
 		PromptHash: promptHash,
 	})).WithSource("handler:" + h.name)
 
@@ -217,33 +254,11 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 	// hatch for a wedged claude/gemini subprocess — without it, cmd.Run()
 	// blocks until the per-correlation context is cancelled (i.e., the
 	// operator manually cancels the workflow).
-	backendCtx := ctx
+	backendCtx := dispatchCtx
 	if h.backendTimeout > 0 {
 		var cancel context.CancelFunc
-		backendCtx, cancel = context.WithTimeout(ctx, h.backendTimeout)
+		backendCtx, cancel = context.WithTimeout(dispatchCtx, h.backendTimeout)
 		defer cancel()
-	}
-
-	// Pin this persona to a specific inner backend when the underlying
-	// backend is a RoundRobin. Keeps reviewer/qa on the same CLI across
-	// all iterations of a feedback loop so the developer isn't chasing
-	// three different backends' opinions on three different runs.
-	// Harmless for non-rotating backends — the key is simply ignored.
-	//
-	// Auto-retry rotation: when the engine has fired
-	// WorkflowRetried{FromPhase==h.name, Automatic==true} earlier in this
-	// correlation, the retry attempt count is passed as a deterministic
-	// rotation offset so RoundRobin picks a strictly different inner
-	// backend for the retry. We use WithRotateOffset rather than baking the
-	// attempt into the key because FNV % n with n=3 has a 1/3 collision
-	// probability — an operator on their last auto-retry budget can't
-	// afford to land back on the CLI that just silently stalled. Offset of
-	// N shifts to slot (base+N) mod n, guaranteeing a different slot for
-	// N ∈ [1, n-1]. Single-backend deployments are unaffected (n=1 absorbs
-	// any offset).
-	if env.CorrelationID != "" {
-		backendCtx = backend.WithStickyKey(backendCtx, env.CorrelationID+":"+h.persona)
-		backendCtx = backend.WithRotateOffset(backendCtx, autoRetryAttempt)
 	}
 
 	// AIRequestStarted: marks the exact moment before backend.Run is invoked
@@ -253,7 +268,7 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 	// pre-spawn vs. subprocess-side stalls by which gap dominates.
 	startEvt := event.New(event.AIRequestStarted, 1, event.MustMarshal(event.AIRequestStartedPayload{
 		Persona:       h.name,
-		Backend:       h.backend.Name(),
+		Backend:       backendName,
 		PromptHash:    promptHash,
 		SpawnUnixNano: time.Now().UnixNano(),
 	})).WithSource("handler:" + h.name)
@@ -266,7 +281,7 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 	}
 
 	// Call backend
-	resp, err := h.backend.Run(backendCtx, backend.Request{
+	resp, err := runBackend.Run(backendCtx, backend.Request{
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
 		WorkDir:      workDir,
@@ -290,7 +305,7 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 	// AIResponseReceived
 	respEvt := event.New(event.AIResponseReceived, 1, event.MustMarshal(event.AIResponsePayload{
 		Persona:    h.name,
-		Backend:    h.backend.Name(),
+		Backend:    backendName,
 		TokensUsed: resp.TokensUsed,
 		DurationMS: resp.Duration.Milliseconds(),
 		Structured: structured,

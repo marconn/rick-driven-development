@@ -35,11 +35,47 @@ func NewRoundRobin(backends ...Backend) (*RoundRobin, error) {
 }
 
 // Name returns a composite identifier, e.g. "round-robin(claude,gemini,codex)".
-// Per-call inner backend selection is NOT surfaced through the AIHandler event
-// stream today — AIRequestSent.Backend records this composite name, not the
-// chosen inner backend. Operators needing per-call attribution should rely on
-// process listing / CLI subprocess logs until the payload is extended.
+// This is the rotation's *identity* for registry/config use, not the backend
+// that runs any given call. For per-call attribution, callers resolve the
+// concrete inner backend via Select (or backend.Resolve) and read its Name —
+// the AIHandler does this so AIRequestSent/AIResponseReceived record the CLI
+// that actually executed, not the composite.
 func (r *RoundRobin) Name() string { return r.name }
+
+// Select returns the concrete inner backend this RoundRobin would dispatch to
+// for ctx, advancing rotation state exactly as Run would. Callers that need to
+// attribute events BEFORE invoking the backend (AIRequestSent/AIRequestStarted
+// are emitted before Run) resolve the backend here and then invoke the returned
+// backend's Run directly.
+//
+// CONTRACT: the returned backend MUST be the one the caller invokes. On the
+// non-sticky atomic-counter path Select advances the counter, so calling Select
+// and then RoundRobin.Run would advance twice and run a different slot than was
+// attributed. The sticky path is purely deterministic (no counter advance), so
+// Select is idempotent there.
+func (r *RoundRobin) Select(ctx context.Context) Backend {
+	return r.backends[r.selectIndex(ctx)]
+}
+
+// selectIndex picks the slot for ctx. Sticky key (+ optional rotation offset)
+// is deterministic and advances no shared state; absent a key it advances the
+// atomic counter. Centralized here so Select and Run share one selection rule
+// and cannot drift.
+func (r *RoundRobin) selectIndex(ctx context.Context) int {
+	n := len(r.backends)
+	if key := stickyKey(ctx); key != "" {
+		idx := stickyIndex(key, n)
+		// Auto-retry path: the AIHandler passes a non-zero rotation offset
+		// so the retry lands on a different slot deterministically instead
+		// of re-hashing a modified key (which has a 1/n chance of colliding
+		// back to the same slot when n is small).
+		if off := rotateOffset(ctx); off > 0 {
+			idx = (idx + off) % n
+		}
+		return idx
+	}
+	return int((r.counter.Add(1) - 1) % uint64(n))
+}
 
 // Run selects a backend and delegates. When the context carries a sticky key
 // (see WithStickyKey), selection is deterministic based on the key — same key
@@ -51,22 +87,12 @@ func (r *RoundRobin) Name() string { return r.name }
 // across feedback-loop iterations, avoiding the "three iterations, three
 // different backends, three different sets of issues, developer never
 // converges" failure mode seen in production.
+//
+// Run is retained for callers that dispatch through the rotation directly
+// (tests, non-attributing call sites). The AIHandler instead resolves the
+// concrete backend via Select and invokes it directly to attribute events.
 func (r *RoundRobin) Run(ctx context.Context, req Request) (*Response, error) {
-	n := len(r.backends)
-	var idx int
-	if key := stickyKey(ctx); key != "" {
-		idx = stickyIndex(key, n)
-		// Auto-retry path: the AIHandler passes a non-zero rotation offset
-		// so the retry lands on a different slot deterministically instead
-		// of re-hashing a modified key (which has a 1/n chance of colliding
-		// back to the same slot when n is small).
-		if off := rotateOffset(ctx); off > 0 {
-			idx = (idx + off) % n
-		}
-	} else {
-		idx = int((r.counter.Add(1) - 1) % uint64(n))
-	}
-	return r.backends[idx].Run(ctx, req)
+	return r.backends[r.selectIndex(ctx)].Run(ctx, req)
 }
 
 // Backends exposes the underlying list for inspection (primarily for logs
