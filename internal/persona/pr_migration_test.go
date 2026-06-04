@@ -92,6 +92,51 @@ func TestPRReviewerManifestsEquivalent(t *testing.T) {
 	}
 }
 
+// suppressionMarkers are phrases that instruct the model to WITHHOLD a finding
+// (as opposed to scope rules like "do not flag outside your domain", which are
+// legitimate and present in the embedded prompts). A skill must never introduce
+// one of these — grounding/scoping is enforced by the code-side filter, not by
+// telling the LLM to self-censor. This guards the regression where the
+// diff-grounding skill added "if you cannot point at a changed line, do not
+// raise it", which dropped reviewer candidate-finding rate ~8x in production.
+var suppressionMarkers = []string{
+	"do not raise", "don't raise", "do not report", "do not surface",
+	"withhold", "suppress", "stay silent", "do not mention",
+}
+
+// TestPRReviewerManifestsNoNewSuppression is the additions-catching counterpart
+// to the superset equivalence test: a migrated reviewer's COMPOSED prompt must
+// not contain a finding-suppression instruction that its embedded prompt did
+// not already have. Superset tests catch removed domain rules; this catches
+// harmful added instructions — the class that silently narrowed engagement and
+// that only production telemetry caught the first time.
+func TestPRReviewerManifestsNoNewSuppression(t *testing.T) {
+	src, errs := LoadManifestDir(".")
+	if len(errs) != 0 {
+		t.Fatalf("manifest load errors: %v", errs)
+	}
+	for _, name := range prReviewerManifests {
+		t.Run(name, func(t *testing.T) {
+			composed, err := src.ComposeSystemPrompt(name)
+			if err != nil {
+				t.Fatalf("compose %q: %v", name, err)
+			}
+			embedded, err := loadEmbeddedPrompt(name)
+			if err != nil {
+				t.Fatalf("load embedded %q: %v", name, err)
+			}
+			lc, le := strings.ToLower(composed), strings.ToLower(embedded)
+			for _, m := range suppressionMarkers {
+				if strings.Contains(lc, m) && !strings.Contains(le, m) {
+					t.Errorf("%s: composed prompt introduces a finding-suppression instruction %q "+
+						"absent from the embedded prompt — skills describe HOW to review, they must not "+
+						"tell the model to withhold findings (the grounding filter does that in code)", name, m)
+				}
+			}
+		})
+	}
+}
+
 // TestPRReviewerBoilerplateDedupedOnce asserts the shared boilerplate exists
 // ONCE (in the skills), not copy-pasted across the migrated identities: the
 // bare generic citation line must not remain in any migrated persona identity.

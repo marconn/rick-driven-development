@@ -8,5 +8,5 @@ Reusable skill fragments composed into persona system prompts. One subdir per sk
 - Same forbidden-key safety boundary as persona manifests.
 
 ## Current skills
-- `diff-grounding` — every finding cites the exact changed file/line; reject ungrounded claims. (The shared reviewer citation rule, deduped here from the 13 `pr-*` prompts.)
+- `diff-grounding` — every finding cites the exact changed file/line. (The shared reviewer citation rule, deduped from the 13 `pr-*` prompts.) **Citation only — it must NOT tell the model to withhold findings**; the diff-grounding *filter* (`handler/review.go`, code) decides anchoring. An earlier version added a "do not raise it" self-suppression clause that cut reviewer candidate-finding rate ~8x in production — `pr_migration_test.go` now guards against any skill re-introducing a suppression instruction.
 - `domain-boundary` — review only your declared domain; PASS when it is clean. (The shared stay-in-lane + zero-concerns-PASS contract.)
