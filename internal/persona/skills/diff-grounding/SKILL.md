@@ -1,9 +1,12 @@
 ---
 name: diff-grounding
-description: Ground every finding on a specific changed line; reject ungrounded claims.
+description: Cite the exact changed file and line for every finding.
 ---
 ## Grounding
 
-- Every finding must cite the exact file and line.
-- Anchor each finding on a line the diff actually changed; if you cannot point
-  at a changed line, do not raise it.
+- Every finding must cite the exact file and line it occurs on.
+
+The citation lets each finding be anchored to the diff; it is purely a
+formatting requirement. Report every concern you have in your domain — a
+separate grounding filter, in code rather than your own judgment, decides
+whether a finding anchors to a changed line.
