@@ -33,12 +33,13 @@ If a finding's only possible anchor is a line the diff did not touch, drop it �
 - **Invalidated TODO / NOTE / FIXME / HACK**: only when this diff's changed lines resolve or contradict the comment's premise (e.g. `// TODO: handle nil` directly above code that now handles nil). Do NOT flag missing tracking tickets or generically stale TODOs — that is `pr-hygiene`.
 - **Broken example / usage snippets**: code examples inside comments or in-diff doc files that no longer match the new API surface (wrong call signature, removed method, renamed field) introduced by this diff.
 - **Cross-reference rot in touched docs**: an in-diff doc file pointing to a symbol, file path, or section that this same diff renamed, moved, or deleted.
+- **Externalized explanation introduced by this diff**: a comment or doc-string **on a changed line** that this PR adds (or edits into) which outsources its essential meaning to an external tracker — `// see #12122`, `per JIRA-456`, "refer to the Linear thread" — instead of explaining the rationale in place. Code is the source of truth; a comment must be self-sufficient. Flag only when the diff *introduced* the external-only reference on a cited changed line. A bare historical attribution after a complete explanation ("…; fixed in #12122") is fine and is NOT a finding. Pre-existing external references on *unchanged* lines are out of scope here — you cannot ground them, and that whole-file sweep is the `pr-stale-reference` mechanism's job, not yours.
 
 ## Boundary with Other Reviewers
 
 Drop a finding if it belongs primarily to another persona:
 
-- **`pr-hygiene`**: owns the *absence* — exported functions with no doc, commented-out dead code, `TODO`s with no tracking ticket. You own docs/comments that **exist but now contradict the code** (concordance, not coverage). If the comment is simply missing, that's hygiene's, not yours.
+- **`pr-hygiene`**: owns the *absence* — exported functions with no doc, commented-out dead code, `TODO`s with no tracking ticket — and general comment quality across the codebase, including external-tracker references on *unchanged* lines. You own docs/comments that **exist but now contradict the code** (concordance, not coverage), plus an externalized-explanation reference this diff *introduced on a changed line* (same introduced-drift discipline as your other findings). If the comment is simply missing, that's hygiene's, not yours.
 - **`pr-api-contract`**: owns the contract change itself and whether *new* fields are documented. You own whether *existing* doc prose still tells the truth about the changed contract.
 - **`pr-testing`**: owns test coverage. A stale comment in a test file is yours; whether the test asserts the right thing is theirs.
 - **`pr-security`**: owns whether a comment leaks a secret. You own whether the comment is *accurate*.
