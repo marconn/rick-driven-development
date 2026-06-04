@@ -82,6 +82,29 @@ func Resolve(ctx context.Context, b Backend) Backend {
 	return b
 }
 
+// CapableSelector is implemented by rotation backends that can pick a member
+// whose capabilities satisfy a predicate (RoundRobin). Used by required-
+// knowledge pinning to reach a capable member of an otherwise-mixed rotation.
+type CapableSelector interface {
+	SelectCapable(ctx context.Context, want func(Capabilities) bool) (Backend, bool)
+}
+
+// ResolveCapable returns a concrete backend whose capabilities satisfy want for
+// ctx. For a rotation it intersects the members with want and picks a capable
+// one (preferring the normally-selected member); for a single backend it
+// returns that backend iff it qualifies. ok is false when nothing qualifies —
+// the caller fails dispatch rather than run blind. A nil predicate accepts any.
+func ResolveCapable(ctx context.Context, b Backend, want func(Capabilities) bool) (Backend, bool) {
+	if cs, ok := b.(CapableSelector); ok {
+		return cs.SelectCapable(ctx, want)
+	}
+	chosen := Resolve(ctx, b)
+	if want == nil || want(chosen.Capabilities()) {
+		return chosen, true
+	}
+	return nil, false
+}
+
 // Request configures an AI backend execution.
 type Request struct {
 	SystemPrompt string    // LLM system prompt (persona instructions).

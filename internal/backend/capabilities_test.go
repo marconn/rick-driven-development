@@ -1,8 +1,73 @@
 package backend
 
 import (
+	"context"
 	"testing"
 )
+
+// wantMCP is the predicate required-knowledge pinning uses.
+func wantMCP(c Capabilities) bool { return c.MCP }
+
+// TestSelectCapable_PinsToCapableMemberOfMixedRotation is the core pinning
+// case: a rotation of mostly non-MCP backends still resolves to its single
+// MCP-capable member (claude) when knowledge is required.
+func TestSelectCapable_PinsToCapableMemberOfMixedRotation(t *testing.T) {
+	rr, err := NewRoundRobin(&Codex{}, &Opencode{}, &Claude{})
+	if err != nil {
+		t.Fatalf("NewRoundRobin: %v", err)
+	}
+	got, ok := rr.SelectCapable(context.Background(), wantMCP)
+	if !ok {
+		t.Fatal("expected a capable member (claude) in the rotation")
+	}
+	if got.Name() != "claude" {
+		t.Errorf("pinned to %q, want claude", got.Name())
+	}
+}
+
+// TestSelectCapable_EmptyIntersectionFails: a rotation with no MCP-capable
+// member must report ok=false so the caller fails dispatch instead of running
+// required knowledge blind.
+func TestSelectCapable_EmptyIntersectionFails(t *testing.T) {
+	rr, err := NewRoundRobin(&Codex{}, &Opencode{}, &Gemini{})
+	if err != nil {
+		t.Fatalf("NewRoundRobin: %v", err)
+	}
+	if _, ok := rr.SelectCapable(context.Background(), wantMCP); ok {
+		t.Fatal("no MCP-capable member exists; SelectCapable must report ok=false")
+	}
+}
+
+// TestSelectCapable_PrefersStickyMemberWhenCapable: when the sticky-selected
+// member already qualifies, keep it (don't gratuitously re-pin and lose
+// rotation stickiness).
+func TestSelectCapable_PrefersStickyMemberWhenCapable(t *testing.T) {
+	rr, err := NewRoundRobin(&Claude{}, &Codex{}, &Claude{})
+	if err != nil {
+		t.Fatalf("NewRoundRobin: %v", err)
+	}
+	// Find a sticky key that lands on a claude slot, then assert SelectCapable
+	// keeps that exact slot rather than jumping to slot 0.
+	ctx := WithStickyKey(context.Background(), "corr:reviewer")
+	sticky := rr.Select(ctx)
+	if sticky.Name() == "claude" {
+		got, ok := rr.SelectCapable(ctx, wantMCP)
+		if !ok || got.Name() != "claude" {
+			t.Fatalf("sticky claude should be kept, got %q ok=%v", got.Name(), ok)
+		}
+	}
+}
+
+// TestResolveCapable_SingleBackend: a single backend is returned iff it
+// qualifies; otherwise ok=false.
+func TestResolveCapable_SingleBackend(t *testing.T) {
+	if _, ok := ResolveCapable(context.Background(), &Claude{}, wantMCP); !ok {
+		t.Error("claude satisfies MCP; ResolveCapable should return it")
+	}
+	if _, ok := ResolveCapable(context.Background(), &Codex{}, wantMCP); ok {
+		t.Error("codex lacks MCP; ResolveCapable must report ok=false")
+	}
+}
 
 // TestBackendCapabilitiesMatrix locks the documented capability matrix (task
 // 0002). A wrong row silently changes knowledge negotiation (0008): e.g. if

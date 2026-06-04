@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +27,7 @@ type mockBackend struct {
 	response *backend.Response
 	err      error
 	lastReq  backend.Request
+	caps     backend.Capabilities // capability matrix this fake reports
 	// lastStickyKey + lastRotateOffset capture the backend-context routing
 	// hints AIHandler plants before calling Run. Tests assert these so the
 	// auto-retry rotation contract (different key/offset on retry) is
@@ -35,7 +38,7 @@ type mockBackend struct {
 
 func (m *mockBackend) Name() string { return m.name }
 
-func (m *mockBackend) Capabilities() backend.Capabilities { return backend.Capabilities{} }
+func (m *mockBackend) Capabilities() backend.Capabilities { return m.caps }
 
 func (m *mockBackend) Run(ctx context.Context, req backend.Request) (*backend.Response, error) {
 	m.lastReq = req
@@ -1806,4 +1809,196 @@ func TestAIHandlerSessionResume(t *testing.T) {
 			t.Errorf("want recorded session id %q, got %q", "S-new", resp.SessionID)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// AIHandler.Handle — knowledge layer (task 0008)
+// ---------------------------------------------------------------------------
+
+// knowledgeRegistry builds a registry whose persona is manifest-defined and
+// declares one knowledge pack at the given criticality.
+func knowledgeRegistry(t *testing.T, personaName, criticality, pack string) *persona.Registry {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "personas", personaName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "---\nschema_version: 1\nname: " + personaName +
+		"\ndescription: a knowledge persona\n" +
+		"knowledge:\n  - pack: " + pack + "\n    load: on-demand\n    criticality: " + criticality + "\n---\n" +
+		"You are " + personaName + ". Be terse.\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := persona.DefaultRegistry()
+	if err := reg.LoadManifests(root, nil); err != nil {
+		t.Fatalf("LoadManifests: %v", err)
+	}
+	return reg
+}
+
+func knowledgeStore(t *testing.T, corr string) *mockStore {
+	t.Helper()
+	store := newMockStore()
+	store.correlationEvents[corr] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "do the thing",
+		})).WithCorrelation(corr),
+	}
+	return store
+}
+
+// Required knowledge on a non-MCP-capable backend must FAIL dispatch — never
+// run the persona blind without knowledge it was told it requires.
+func TestAIHandler_RequiredKnowledgeNonCapableFails(t *testing.T) {
+	t.Setenv("RICK_KNOWLEDGE_DIR", t.TempDir())
+	reg := knowledgeRegistry(t, "kdev", "required", "go-conv")
+	store := knowledgeStore(t, "corr-kreq")
+
+	h := NewAIHandler(AIHandlerConfig{
+		Name: "kdev", Persona: "kdev", Template: "develop",
+		Backend:  &mockBackend{name: "codex", response: &backend.Response{Output: "ok"}},
+		Store:    store,
+		Personas: reg, Builder: persona.NewPromptBuilder(), PlainText: true,
+	})
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation("corr-kreq")
+
+	if _, err := h.Handle(context.Background(), env); err == nil || !strings.Contains(err.Error(), "MCP-capable") {
+		t.Fatalf("required knowledge on non-capable backend must fail with a clear message, got: %v", err)
+	}
+}
+
+// Optional knowledge on a non-capable backend runs degraded and emits a
+// knowledge_unavailable diagnostic (the deferred-eager-policy signal).
+func TestAIHandler_OptionalKnowledgeNonCapableDegradesAndSignals(t *testing.T) {
+	t.Setenv("RICK_KNOWLEDGE_DIR", t.TempDir())
+	reg := knowledgeRegistry(t, "kqa", "optional", "domain")
+	store := knowledgeStore(t, "corr-kopt")
+
+	mb := &mockBackend{name: "codex", response: &backend.Response{Output: "ok"}}
+	h := NewAIHandler(AIHandlerConfig{
+		Name: "kqa", Persona: "kqa", Template: "develop",
+		Backend:  mb,
+		Store:    store,
+		Personas: reg, Builder: persona.NewPromptBuilder(), PlainText: true,
+	})
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation("corr-kopt")
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("optional knowledge must NOT fail on a non-capable backend: %v", err)
+	}
+	if mb.lastReq.MCPConfig != "" {
+		t.Errorf("non-capable backend must not receive a knowledge MCP config, got %q", mb.lastReq.MCPConfig)
+	}
+	var found *event.KnowledgeUnavailablePayload
+	for _, e := range results {
+		if e.Type == event.KnowledgeUnavailable {
+			var p event.KnowledgeUnavailablePayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatalf("unmarshal KnowledgeUnavailablePayload: %v", err)
+			}
+			found = &p
+		}
+	}
+	if found == nil {
+		t.Fatal("expected a knowledge_unavailable event for the optional pack")
+	}
+	if found.Backend != "codex" || len(found.Packs) != 1 || found.Packs[0] != "domain" {
+		t.Errorf("knowledge_unavailable payload = %+v", found)
+	}
+}
+
+// An MCP-capable backend receives a retrieval MCP config that references the
+// resolved pack directory (progressive disclosure).
+func TestAIHandler_CapableBackendGetsRetrievalConfig(t *testing.T) {
+	kdir := t.TempDir()
+	t.Setenv("RICK_KNOWLEDGE_DIR", kdir)
+	// Use a non-git workspace with a known basename so repo identity is
+	// deterministic ("myrepo") — an empty workDir would make detectRepoIdentity
+	// shell out to git in the test's own CWD (the rick repo).
+	workDir := filepath.Join(t.TempDir(), "myrepo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Pack resolves at <root>/<repo>/<pack>/SKILL.md.
+	packDir := filepath.Join(kdir, "myrepo", "go-conv")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "SKILL.md"), []byte("# go conventions"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := knowledgeRegistry(t, "kdev", "optional", "go-conv")
+	store := knowledgeStore(t, "corr-kcap")
+
+	mb := &mockBackend{
+		name:     "claude",
+		caps:     backend.Capabilities{MCP: true},
+		response: &backend.Response{Output: "ok"},
+	}
+	h := NewAIHandler(AIHandlerConfig{
+		Name: "kdev", Persona: "kdev", Template: "develop",
+		Backend:  mb,
+		Store:    store,
+		WorkDir:  workDir,
+		Personas: reg, Builder: persona.NewPromptBuilder(), PlainText: true,
+	})
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation("corr-kcap")
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if mb.lastReq.MCPConfig == "" {
+		t.Fatal("capable backend must receive a knowledge MCP config")
+	}
+	if !strings.Contains(mb.lastReq.MCPConfig, packDir) {
+		t.Errorf("MCP config should reference the pack dir %q, got %q", packDir, mb.lastReq.MCPConfig)
+	}
+	for _, e := range results {
+		if e.Type == event.KnowledgeUnavailable {
+			t.Error("capable backend delivered knowledge; must NOT emit knowledge_unavailable")
+		}
+	}
+}
+
+// Knowledge layer is dormant when RICK_KNOWLEDGE_DIR is unset: no pinning, no
+// MCP config, no signal — even if a persona declares packs.
+func TestAIHandler_KnowledgeDormantWhenDirUnset(t *testing.T) {
+	t.Setenv("RICK_KNOWLEDGE_DIR", "")
+	reg := knowledgeRegistry(t, "kdev", "required", "go-conv")
+	store := knowledgeStore(t, "corr-kdorm")
+
+	mb := &mockBackend{name: "codex", response: &backend.Response{Output: "ok"}}
+	h := NewAIHandler(AIHandlerConfig{
+		Name: "kdev", Persona: "kdev", Template: "develop",
+		Backend:  mb,
+		Store:    store,
+		Personas: reg, Builder: persona.NewPromptBuilder(), PlainText: true,
+	})
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation("corr-kdorm")
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("knowledge layer must be dormant (no fail) when dir unset: %v", err)
+	}
+	if mb.lastReq.MCPConfig != "" {
+		t.Errorf("no MCP config expected when knowledge layer off, got %q", mb.lastReq.MCPConfig)
+	}
+	for _, e := range results {
+		if e.Type == event.KnowledgeUnavailable {
+			t.Error("no knowledge_unavailable expected when layer off")
+		}
+	}
 }

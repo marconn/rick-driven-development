@@ -131,6 +131,15 @@ const (
 	// Never published on the bus — diagnostic only, no handler subscribers.
 	DispatchStarted Type = "dispatch.started"
 
+	// KnowledgeUnavailable records that a persona declared one or more OPTIONAL
+	// knowledge packs but ran on a backend that cannot deliver them (no MCP tool
+	// retrieval, and eager inlining is deferred). It is the signal that
+	// quantifies how often the deferred eager-delivery policy actually matters —
+	// the input that decides whether to build eager inlining / RAG. Required
+	// packs never produce this: they pin to a capable backend or fail dispatch.
+	// Emitted by the AI handler as part of its result; diagnostic only.
+	KnowledgeUnavailable Type = "knowledge.unavailable"
+
 	// VerdictGroundingSummary records how a pr-category-review handler's LLM
 	// findings fared against the diff-grounding filter — how many were parsed,
 	// how many survived, and why each rejection happened. Emitted once per

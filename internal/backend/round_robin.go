@@ -57,6 +57,51 @@ func (r *RoundRobin) Select(ctx context.Context) Backend {
 	return r.backends[r.selectIndex(ctx)]
 }
 
+// SelectCapable returns a concrete rotation member whose capabilities satisfy
+// want, preferring the member ctx would normally select when it already
+// qualifies (so a sticky reviewer keeps its backend when that backend is
+// capable), otherwise the first qualifying member in rotation order. ok is
+// false when NO member qualifies — the caller fails dispatch rather than run
+// blind (required-knowledge pinning: intersect rotation with capable backends;
+// empty intersection ⇒ fail).
+//
+// This is the capability-filtered selection the aggregate Capabilities() cannot
+// express: round-robin(codex,opencode,claude).Capabilities().MCP is false, yet
+// claude is a capable member that pinning must be able to reach.
+func (r *RoundRobin) SelectCapable(ctx context.Context, want func(Capabilities) bool) (Backend, bool) {
+	if want == nil {
+		return r.Select(ctx), true
+	}
+	// Prefer the normally-selected member when it already qualifies. This reads
+	// the sticky/offset selection WITHOUT advancing the non-sticky counter — we
+	// only peek, the caller may still Select to actually dispatch.
+	if idx := r.peekIndex(ctx); idx >= 0 {
+		if b := r.backends[idx]; want(b.Capabilities()) {
+			return b, true
+		}
+	}
+	for _, b := range r.backends {
+		if want(b.Capabilities()) {
+			return b, true
+		}
+	}
+	return nil, false
+}
+
+// peekIndex returns the sticky/offset-selected slot WITHOUT advancing the
+// non-sticky atomic counter (returns -1 when there is no sticky key, so the
+// caller does not perturb rotation just to peek for a capable member).
+func (r *RoundRobin) peekIndex(ctx context.Context) int {
+	if key := stickyKey(ctx); key != "" {
+		idx := stickyIndex(key, len(r.backends))
+		if off := rotateOffset(ctx); off > 0 {
+			idx = (idx + off) % len(r.backends)
+		}
+		return idx
+	}
+	return -1
+}
+
 // selectIndex picks the slot for ctx. Sticky key (+ optional rotation offset)
 // is deterministic and advances no shared state; absent a key it advances the
 // atomic counter. Centralized here so Select and Run share one selection rule

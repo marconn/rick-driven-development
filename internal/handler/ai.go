@@ -214,6 +214,12 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		dispatchCtx = backend.WithRotateOffset(dispatchCtx, autoRetryAttempt)
 	}
 
+	// Knowledge layer (opt-in: RICK_KNOWLEDGE_DIR + a persona manifest that
+	// declares knowledge packs). Dormant otherwise — knowledgeRefs is nil for
+	// every code-registered persona, so this whole section is a no-op by default.
+	knowledgeRefs := h.registry.KnowledgeRefs(h.persona)
+	knowledgeActive := len(knowledgeRefs) > 0 && persona.KnowledgeEnabled()
+
 	// Resolve the concrete backend that will execute. For a RoundRobin this
 	// selects the inner CLI per the sticky/offset rules above; for a single
 	// backend it is the backend itself. Every event (AIRequestSent /
@@ -221,7 +227,23 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 	// name so telemetry records the CLI that actually ran, not the composite
 	// "round-robin(...)" identity. We invoke runBackend directly below so the
 	// rotation is not advanced a second time (see backend.Resolve / Selector).
-	runBackend := backend.Resolve(dispatchCtx, h.backend)
+	//
+	// Required-knowledge pinning (Spec §3.4.1): when the persona declares any
+	// REQUIRED pack, the backend must be MCP-capable to deliver it. Pin to a
+	// capable rotation member; if the rotation has none, FAIL dispatch rather
+	// than run the persona blind without knowledge it was told it needs.
+	var runBackend backend.Backend
+	if knowledgeActive && persona.HasRequiredKnowledge(knowledgeRefs) {
+		rb, ok := backend.ResolveCapable(dispatchCtx, h.backend, func(c backend.Capabilities) bool { return c.MCP })
+		if !ok {
+			return nil, fmt.Errorf("handler %s: required knowledge needs an MCP-capable backend, "+
+				"but none is available in the rotation — set RICK_REVIEW_BACKENDS to include claude or "+
+				"make the pack optional", h.name)
+		}
+		runBackend = rb
+	} else {
+		runBackend = backend.Resolve(dispatchCtx, h.backend)
+	}
 	backendName := runBackend.Name()
 
 	// Build AIRequestSent. When a Bus + Store + correlation are available we
@@ -248,6 +270,46 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 	workDir := h.workDir
 	if pctx.WorkspacePath != "" {
 		workDir = pctx.WorkspacePath
+	}
+
+	// Knowledge negotiation against the chosen backend's capability. Dormant
+	// unless the persona declares packs AND RICK_KNOWLEDGE_DIR is set. On an
+	// MCP-capable backend the declared packs are exposed as a retrieval tool
+	// (progressive disclosure); optional packs on a non-capable backend degrade
+	// and emit knowledge_unavailable (the deferred-eager-policy signal). Required
+	// packs were already pinned to a capable backend above, or dispatch failed.
+	var knowledgeMCPConfig string
+	var knowledgeUnavailableEvt *event.Envelope
+	if knowledgeActive {
+		plan := persona.NegotiateKnowledge(knowledgeRefs, runBackend.Capabilities().MCP)
+		if len(plan.FailRequired) > 0 {
+			// Defensive: required pinning above should have selected a capable
+			// backend or failed. Reaching here means a single non-MCP backend
+			// carries required knowledge — fail rather than run it blind.
+			return nil, fmt.Errorf("handler %s: backend %q cannot deliver required knowledge %v",
+				h.name, backendName, plan.FailRequired)
+		}
+		repo := knowledgeRepo(workDir)
+		if len(plan.DeliverPacks) > 0 {
+			var dirs []string
+			for _, pack := range plan.DeliverPacks {
+				if dir, ok := persona.ResolvePackDir(persona.KnowledgeDir(), repo, pack); ok {
+					dirs = append(dirs, dir)
+				}
+			}
+			if cfg, cfgErr := persona.BuildRetrievalMCPConfig(dirs); cfgErr == nil {
+				knowledgeMCPConfig = cfg
+			}
+		}
+		if len(plan.UnavailableOptional) > 0 {
+			evt := event.New(event.KnowledgeUnavailable, 1, event.MustMarshal(event.KnowledgeUnavailablePayload{
+				Persona: h.name,
+				Backend: backendName,
+				Repo:    repo,
+				Packs:   plan.UnavailableOptional,
+			})).WithSource("handler:" + h.name)
+			knowledgeUnavailableEvt = &evt
+		}
 	}
 
 	// Wrap with a backend timeout when configured. This is the only escape
@@ -287,7 +349,8 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		WorkDir:      workDir,
 		Yolo:         h.yolo,
 		Effort:       h.effort,
-		SessionID:    resumeSessionID, // "" = fresh session (the common path)
+		MCPConfig:    knowledgeMCPConfig, // "" unless the knowledge layer is active on a capable backend
+		SessionID:    resumeSessionID,    // "" = fresh session (the common path)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("handler %s: backend: %w", h.name, err)
@@ -316,13 +379,32 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 	// Return events not already persisted inline. emittedInline implies
 	// reqEvt was published; startEmittedInline implies startEvt was published.
 	// When the Bus isn't wired (tests), bundle everything with the response.
-	if emittedInline {
-		if startEmittedInline {
-			return []event.Envelope{respEvt}, nil
-		}
-		return []event.Envelope{startEvt, respEvt}, nil
+	// The knowledge_unavailable diagnostic (when present) rides alongside the
+	// response so it lands on the persona aggregate for the telemetry signal.
+	var results []event.Envelope
+	switch {
+	case emittedInline && startEmittedInline:
+		results = []event.Envelope{respEvt}
+	case emittedInline:
+		results = []event.Envelope{startEvt, respEvt}
+	default:
+		results = []event.Envelope{reqEvt, startEvt, respEvt}
 	}
-	return []event.Envelope{reqEvt, startEvt, respEvt}, nil
+	if knowledgeUnavailableEvt != nil {
+		results = append(results, *knowledgeUnavailableEvt)
+	}
+	return results, nil
+}
+
+// knowledgeRepo derives the <owner>/<repo> identity used to scope knowledge
+// packs, from the workspace git origin (falling back to the workspace basename
+// when there is no remote). Empty when neither is derivable.
+func knowledgeRepo(workDir string) string {
+	id := detectRepoIdentity(workDir)
+	if id.owner != "" && id.name != "" {
+		return id.owner + "/" + id.name
+	}
+	return id.name
 }
 
 // persistRequestEvent appends AIRequestSent to the persona-scoped aggregate
