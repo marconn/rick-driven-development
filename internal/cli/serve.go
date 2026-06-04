@@ -171,6 +171,11 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 	projRunner.Register(tokens)
 	projRunner.Register(timelines)
 	projRunner.Register(verdicts)
+	// Dwell analytic (telemetry gate for the dispatch-projection track). Read
+	// model only; authoritative data comes from its catch-up rebuild over the
+	// log, since the DispatchDropped/DispatchStarted diagnostics it folds are
+	// store-only (never on the live bus).
+	projRunner.Register(projection.NewDwellProjection())
 	if err := projRunner.Start(ctx); err != nil {
 		return fmt.Errorf("start projections: %w", err)
 	}

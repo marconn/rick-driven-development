@@ -147,6 +147,8 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 	runner.Register(tokens)
 	runner.Register(timelines)
 	runner.Register(verdicts)
+	// Dwell analytic — see serve.go for the read-model / rebuild rationale.
+	runner.Register(projection.NewDwellProjection())
 	if err := runner.Start(ctx); err != nil {
 		return fmt.Errorf("start projections: %w", err)
 	}
