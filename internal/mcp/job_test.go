@@ -21,7 +21,8 @@ type stubBackend struct {
 	gotReq *backend.Request // last request seen by Run (nil until called)
 }
 
-func (b *stubBackend) Name() string { return b.name }
+func (b *stubBackend) Name() string                       { return b.name }
+func (b *stubBackend) Capabilities() backend.Capabilities { return backend.Capabilities{} }
 
 func (b *stubBackend) Run(ctx context.Context, req backend.Request) (*backend.Response, error) {
 	b.mu.Lock()

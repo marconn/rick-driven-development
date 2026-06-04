@@ -128,6 +128,8 @@ func DefaultRegistry() *Registry {
 	r.Register(PersonaFailed, "Persona handler fails", 1)
 	r.Register(PRCommentPosted, "Rick posted a PR comment", 1)
 	r.Register(DispatchDropped, "PersonaRunner admission-gate drop (diagnostic)", 1)
+	r.Register(DispatchStarted, "PersonaRunner handler-execution start (diagnostic)", 1)
+	r.Register(KnowledgeUnavailable, "persona ran without optional knowledge (backend not tool-capable)", 1)
 	r.Register(VerdictGroundingSummary, "pr-category-review grounding filter outcome (forensics)", 1)
 	return r
 }

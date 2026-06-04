@@ -21,6 +21,88 @@ type Backend interface {
 	// The full LLM output is captured regardless of whether streaming
 	// is enabled via Request.Output.
 	Run(ctx context.Context, req Request) (*Response, error)
+
+	// Capabilities reports which optional features this backend supports.
+	// The persona resolver (knowledge negotiation) consults these so
+	// tool-only request fields are not sent to backends that ignore them,
+	// and so required knowledge can pin to a tool-capable backend. Every
+	// backend declares its matrix explicitly — there is no silent default,
+	// so a missing capability is a deliberate "no", not an oversight.
+	Capabilities() Capabilities
+}
+
+// Capabilities describes the optional features a backend supports. Consumers
+// must not assume a feature the backend does not report — e.g. sending an
+// MCP tool config to a backend with MCP=false silently no-ops, which is the
+// footgun this surface exists to remove.
+type Capabilities struct {
+	// MCP: retrieves knowledge via MCP tool calls (progressive disclosure).
+	// Only MCP-capable backends can do lazy knowledge retrieval; others need
+	// eager inlining (deferred) or pin/degrade per knowledge criticality.
+	MCP bool
+	// SystemPrompt: accepts a native system prompt flag. Backends without it
+	// fold the system prompt into the user message (the <system_instructions>
+	// wrapper used by gemini/codex/opencode/antigravity).
+	SystemPrompt bool
+	// SessionResume: can resume a prior CLI session by id (Request.SessionID).
+	SessionResume bool
+	// TokenAccounting: reports authoritative token usage on Response.TokensUsed.
+	TokenAccounting bool
+	// ReasoningEffort: honors the Request.Effort reasoning knob (Claude
+	// --effort). Backends without it ignore the field.
+	ReasoningEffort bool
+}
+
+// Selector is implemented by backends that pick a concrete inner backend per
+// call (RoundRobin). Resolving the concrete backend before Run lets callers
+// attribute the events emitted before dispatch (AIRequestSent /
+// AIRequestStarted) to the CLI that actually executes, not a composite
+// rotation name.
+type Selector interface {
+	// Select returns the backend a subsequent Run with the same ctx would
+	// dispatch to. It may advance rotation state (see RoundRobin.Select), so
+	// the caller MUST invoke the returned backend rather than calling Run on
+	// the Selector afterwards.
+	Select(ctx context.Context) Backend
+}
+
+// Resolve returns the concrete backend b would dispatch to for ctx. When b is a
+// Selector (RoundRobin), it returns the selected inner backend; otherwise b
+// itself. Callers invoke the returned backend's Run directly so that the
+// per-call backend identity is known before any pre-dispatch event is emitted.
+//
+// In the review-rotation construction the rotation members are the
+// concurrency-limited wrappers (RoundRobin over limitedBackend), so the
+// returned backend still enforces its limiter on Run — Resolve never bypasses
+// concurrency control.
+func Resolve(ctx context.Context, b Backend) Backend {
+	if s, ok := b.(Selector); ok {
+		return s.Select(ctx)
+	}
+	return b
+}
+
+// CapableSelector is implemented by rotation backends that can pick a member
+// whose capabilities satisfy a predicate (RoundRobin). Used by required-
+// knowledge pinning to reach a capable member of an otherwise-mixed rotation.
+type CapableSelector interface {
+	SelectCapable(ctx context.Context, want func(Capabilities) bool) (Backend, bool)
+}
+
+// ResolveCapable returns a concrete backend whose capabilities satisfy want for
+// ctx. For a rotation it intersects the members with want and picks a capable
+// one (preferring the normally-selected member); for a single backend it
+// returns that backend iff it qualifies. ok is false when nothing qualifies —
+// the caller fails dispatch rather than run blind. A nil predicate accepts any.
+func ResolveCapable(ctx context.Context, b Backend, want func(Capabilities) bool) (Backend, bool) {
+	if cs, ok := b.(CapableSelector); ok {
+		return cs.SelectCapable(ctx, want)
+	}
+	chosen := Resolve(ctx, b)
+	if want == nil || want(chosen.Capabilities()) {
+		return chosen, true
+	}
+	return nil, false
 }
 
 // Request configures an AI backend execution.

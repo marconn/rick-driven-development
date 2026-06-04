@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +27,7 @@ type mockBackend struct {
 	response *backend.Response
 	err      error
 	lastReq  backend.Request
+	caps     backend.Capabilities // capability matrix this fake reports
 	// lastStickyKey + lastRotateOffset capture the backend-context routing
 	// hints AIHandler plants before calling Run. Tests assert these so the
 	// auto-retry rotation contract (different key/offset on retry) is
@@ -34,6 +37,8 @@ type mockBackend struct {
 }
 
 func (m *mockBackend) Name() string { return m.name }
+
+func (m *mockBackend) Capabilities() backend.Capabilities { return m.caps }
 
 func (m *mockBackend) Run(ctx context.Context, req backend.Request) (*backend.Response, error) {
 	m.lastReq = req
@@ -572,6 +577,97 @@ func TestAIHandlerEventSource(t *testing.T) {
 		if r.Source != "handler:developer" {
 			t.Errorf("want source %q, got %q", "handler:developer", r.Source)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AIHandler.Handle — RoundRobin attribution (task 0001)
+// ---------------------------------------------------------------------------
+
+// TestAIHandlerRoundRobinAttribution pins the 0001 contract end-to-end: when
+// the handler runs over a RoundRobin rotation, every emitted event records the
+// concrete inner backend that actually executed, never the composite
+// "round-robin(...)" name. Without it, dwell/telemetry (0003) on review-phase
+// handlers is unreadable.
+func TestAIHandlerRoundRobinAttribution(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-rotation"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "Review this change",
+		})).WithCorrelation(corrID),
+	}
+
+	a := &mockBackend{name: "codex", response: &backend.Response{Output: "ok", Duration: time.Second}}
+	b := &mockBackend{name: "claude", response: &backend.Response{Output: "ok", Duration: time.Second}}
+	rr, err := backend.NewRoundRobin(a, b)
+	if err != nil {
+		t.Fatalf("NewRoundRobin: %v", err)
+	}
+
+	h := NewAIHandler(AIHandlerConfig{
+		Name:      "reviewer",
+		Persona:   persona.Reviewer,
+		Backend:   rr,
+		Store:     store,
+		Personas:  persona.DefaultRegistry(),
+		Builder:   persona.NewPromptBuilder(),
+		PlainText: true,
+	})
+
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation(corrID)
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	// No Bus wired → events bundle with the response: [reqEvt, startEvt, respEvt].
+	// The concrete backend the sticky key resolved to must be identical across
+	// all three, and must be one of the rotation members (never the composite).
+	var reqP event.AIRequestPayload
+	if err := json.Unmarshal(results[0].Payload, &reqP); err != nil {
+		t.Fatalf("unmarshal AIRequestPayload: %v", err)
+	}
+	var startP event.AIRequestStartedPayload
+	if err := json.Unmarshal(results[1].Payload, &startP); err != nil {
+		t.Fatalf("unmarshal AIRequestStartedPayload: %v", err)
+	}
+	var respP event.AIResponsePayload
+	if err := json.Unmarshal(results[2].Payload, &respP); err != nil {
+		t.Fatalf("unmarshal AIResponsePayload: %v", err)
+	}
+
+	for label, got := range map[string]string{
+		"AIRequestSent":      reqP.Backend,
+		"AIRequestStarted":   startP.Backend,
+		"AIResponseReceived": respP.Backend,
+	} {
+		if strings.HasPrefix(got, "round-robin(") {
+			t.Errorf("%s recorded composite name %q; want concrete inner backend", label, got)
+		}
+		if got != "codex" && got != "claude" {
+			t.Errorf("%s backend %q is not a rotation member", label, got)
+		}
+	}
+	if reqP.Backend != respP.Backend || startP.Backend != respP.Backend {
+		t.Errorf("attribution diverged across events: sent=%q started=%q resp=%q",
+			reqP.Backend, startP.Backend, respP.Backend)
+	}
+
+	// The backend that was actually invoked must match the attributed one (the
+	// sticky key resolves deterministically, so exactly one member ran).
+	ranName := "codex"
+	if b.lastReq.UserPrompt != "" {
+		ranName = "claude"
+	}
+	if a.lastReq.UserPrompt != "" && b.lastReq.UserPrompt != "" {
+		t.Fatal("both rotation members ran; sticky selection must pick exactly one")
+	}
+	if respP.Backend != ranName {
+		t.Errorf("attributed %q but %q actually ran", respP.Backend, ranName)
 	}
 }
 
@@ -1236,7 +1332,8 @@ type hangingBackend struct {
 	gotPrompt chan struct{} // closed once Run is reached
 }
 
-func (b *hangingBackend) Name() string { return b.name }
+func (b *hangingBackend) Name() string                       { return b.name }
+func (b *hangingBackend) Capabilities() backend.Capabilities { return backend.Capabilities{} }
 
 func (b *hangingBackend) Run(ctx context.Context, _ backend.Request) (*backend.Response, error) {
 	close(b.gotPrompt)
@@ -1712,4 +1809,196 @@ func TestAIHandlerSessionResume(t *testing.T) {
 			t.Errorf("want recorded session id %q, got %q", "S-new", resp.SessionID)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// AIHandler.Handle — knowledge layer (task 0008)
+// ---------------------------------------------------------------------------
+
+// knowledgeRegistry builds a registry whose persona is manifest-defined and
+// declares one knowledge pack at the given criticality.
+func knowledgeRegistry(t *testing.T, personaName, criticality, pack string) *persona.Registry {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "personas", personaName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := "---\nschema_version: 1\nname: " + personaName +
+		"\ndescription: a knowledge persona\n" +
+		"knowledge:\n  - pack: " + pack + "\n    load: on-demand\n    criticality: " + criticality + "\n---\n" +
+		"You are " + personaName + ". Be terse.\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := persona.DefaultRegistry()
+	if err := reg.LoadManifests(root, nil); err != nil {
+		t.Fatalf("LoadManifests: %v", err)
+	}
+	return reg
+}
+
+func knowledgeStore(t *testing.T, corr string) *mockStore {
+	t.Helper()
+	store := newMockStore()
+	store.correlationEvents[corr] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "do the thing",
+		})).WithCorrelation(corr),
+	}
+	return store
+}
+
+// Required knowledge on a non-MCP-capable backend must FAIL dispatch — never
+// run the persona blind without knowledge it was told it requires.
+func TestAIHandler_RequiredKnowledgeNonCapableFails(t *testing.T) {
+	t.Setenv("RICK_KNOWLEDGE_DIR", t.TempDir())
+	reg := knowledgeRegistry(t, "kdev", "required", "go-conv")
+	store := knowledgeStore(t, "corr-kreq")
+
+	h := NewAIHandler(AIHandlerConfig{
+		Name: "kdev", Persona: "kdev", Template: "develop",
+		Backend:  &mockBackend{name: "codex", response: &backend.Response{Output: "ok"}},
+		Store:    store,
+		Personas: reg, Builder: persona.NewPromptBuilder(), PlainText: true,
+	})
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation("corr-kreq")
+
+	if _, err := h.Handle(context.Background(), env); err == nil || !strings.Contains(err.Error(), "MCP-capable") {
+		t.Fatalf("required knowledge on non-capable backend must fail with a clear message, got: %v", err)
+	}
+}
+
+// Optional knowledge on a non-capable backend runs degraded and emits a
+// knowledge_unavailable diagnostic (the deferred-eager-policy signal).
+func TestAIHandler_OptionalKnowledgeNonCapableDegradesAndSignals(t *testing.T) {
+	t.Setenv("RICK_KNOWLEDGE_DIR", t.TempDir())
+	reg := knowledgeRegistry(t, "kqa", "optional", "domain")
+	store := knowledgeStore(t, "corr-kopt")
+
+	mb := &mockBackend{name: "codex", response: &backend.Response{Output: "ok"}}
+	h := NewAIHandler(AIHandlerConfig{
+		Name: "kqa", Persona: "kqa", Template: "develop",
+		Backend:  mb,
+		Store:    store,
+		Personas: reg, Builder: persona.NewPromptBuilder(), PlainText: true,
+	})
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation("corr-kopt")
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("optional knowledge must NOT fail on a non-capable backend: %v", err)
+	}
+	if mb.lastReq.MCPConfig != "" {
+		t.Errorf("non-capable backend must not receive a knowledge MCP config, got %q", mb.lastReq.MCPConfig)
+	}
+	var found *event.KnowledgeUnavailablePayload
+	for _, e := range results {
+		if e.Type == event.KnowledgeUnavailable {
+			var p event.KnowledgeUnavailablePayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatalf("unmarshal KnowledgeUnavailablePayload: %v", err)
+			}
+			found = &p
+		}
+	}
+	if found == nil {
+		t.Fatal("expected a knowledge_unavailable event for the optional pack")
+	}
+	if found.Backend != "codex" || len(found.Packs) != 1 || found.Packs[0] != "domain" {
+		t.Errorf("knowledge_unavailable payload = %+v", found)
+	}
+}
+
+// An MCP-capable backend receives a retrieval MCP config that references the
+// resolved pack directory (progressive disclosure).
+func TestAIHandler_CapableBackendGetsRetrievalConfig(t *testing.T) {
+	kdir := t.TempDir()
+	t.Setenv("RICK_KNOWLEDGE_DIR", kdir)
+	// Use a non-git workspace with a known basename so repo identity is
+	// deterministic ("myrepo") — an empty workDir would make detectRepoIdentity
+	// shell out to git in the test's own CWD (the rick repo).
+	workDir := filepath.Join(t.TempDir(), "myrepo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Pack resolves at <root>/<repo>/<pack>/SKILL.md.
+	packDir := filepath.Join(kdir, "myrepo", "go-conv")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "SKILL.md"), []byte("# go conventions"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := knowledgeRegistry(t, "kdev", "optional", "go-conv")
+	store := knowledgeStore(t, "corr-kcap")
+
+	mb := &mockBackend{
+		name:     "claude",
+		caps:     backend.Capabilities{MCP: true},
+		response: &backend.Response{Output: "ok"},
+	}
+	h := NewAIHandler(AIHandlerConfig{
+		Name: "kdev", Persona: "kdev", Template: "develop",
+		Backend:  mb,
+		Store:    store,
+		WorkDir:  workDir,
+		Personas: reg, Builder: persona.NewPromptBuilder(), PlainText: true,
+	})
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation("corr-kcap")
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if mb.lastReq.MCPConfig == "" {
+		t.Fatal("capable backend must receive a knowledge MCP config")
+	}
+	if !strings.Contains(mb.lastReq.MCPConfig, packDir) {
+		t.Errorf("MCP config should reference the pack dir %q, got %q", packDir, mb.lastReq.MCPConfig)
+	}
+	for _, e := range results {
+		if e.Type == event.KnowledgeUnavailable {
+			t.Error("capable backend delivered knowledge; must NOT emit knowledge_unavailable")
+		}
+	}
+}
+
+// Knowledge layer is dormant when RICK_KNOWLEDGE_DIR is unset: no pinning, no
+// MCP config, no signal — even if a persona declares packs.
+func TestAIHandler_KnowledgeDormantWhenDirUnset(t *testing.T) {
+	t.Setenv("RICK_KNOWLEDGE_DIR", "")
+	reg := knowledgeRegistry(t, "kdev", "required", "go-conv")
+	store := knowledgeStore(t, "corr-kdorm")
+
+	mb := &mockBackend{name: "codex", response: &backend.Response{Output: "ok"}}
+	h := NewAIHandler(AIHandlerConfig{
+		Name: "kdev", Persona: "kdev", Template: "develop",
+		Backend:  mb,
+		Store:    store,
+		Personas: reg, Builder: persona.NewPromptBuilder(), PlainText: true,
+	})
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation("corr-kdorm")
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("knowledge layer must be dormant (no fail) when dir unset: %v", err)
+	}
+	if mb.lastReq.MCPConfig != "" {
+		t.Errorf("no MCP config expected when knowledge layer off, got %q", mb.lastReq.MCPConfig)
+	}
+	for _, e := range results {
+		if e.Type == event.KnowledgeUnavailable {
+			t.Error("no knowledge_unavailable expected when layer off")
+		}
+	}
 }

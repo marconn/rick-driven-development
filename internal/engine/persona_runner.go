@@ -810,6 +810,14 @@ func (r *PersonaRunner) executeDispatch(h handler.Handler, env event.Envelope, c
 	}
 	defer r.releaseSlot(env.CorrelationID)
 
+	// DispatchStarted: observability-only marker that this handler began
+	// executing. Emitted asynchronously and best-effort so it adds NO control
+	// flow and NO I/O latency to the dispatch path — fast deterministic
+	// handlers (workspace, quality-gate) must not pay a synchronous store
+	// append for a diagnostic (F16). Captured here, at the top, so it is
+	// recorded once per handler execution regardless of which branch runs.
+	go r.emitDispatchStarted(h.Name(), env, chainDepth)
+
 	// Two-phase hint: if handler implements Hinter and this isn't a
 	// HintApproved replay, run the hint phase instead of full dispatch.
 	if hinter, ok := r.hinters[h.Name()]; ok && env.Type != event.HintApproved {
@@ -1526,6 +1534,60 @@ func (r *PersonaRunner) emitDispatchDropped(handlerName string, trigger event.En
 	}
 	// Persistence failed after retries — log but don't fail the dispatch.
 	r.logger.Debug("persona runner: failed to persist DispatchDropped",
+		slog.String("handler", handlerName),
+		slog.String("correlation", trigger.CorrelationID),
+	)
+}
+
+// emitDispatchStarted persists a DispatchStarted diagnostic to the dedicated
+// aggregate {correlationID}:dispatch when a handler begins executing. It gives
+// non-AI handlers the "started" signal AI handlers already get from
+// AIRequestStarted, so 0003's dwell/duration projection can measure
+// deterministic-handler execution time.
+//
+// Called as `go r.emitDispatchStarted(...)` — fully asynchronous so the store
+// I/O never sits on the dispatch hot path (F16: observability must not slow a
+// dispatch). Best-effort: errors are swallowed. Writing to a separate
+// aggregate (not the workflow aggregate) avoids version contention with the
+// result-event write path, mirroring emitDispatchDropped.
+func (r *PersonaRunner) emitDispatchStarted(handlerName string, trigger event.Envelope, chainDepth int) {
+	if trigger.CorrelationID == "" {
+		return // no correlation → no diagnostic aggregate to write to
+	}
+	if r.store == nil {
+		return
+	}
+	payload := event.DispatchStartedPayload{
+		Persona:       handlerName,
+		TriggerEvent:  string(trigger.Type),
+		TriggerID:     string(trigger.ID),
+		ChainDepth:    chainDepth,
+		SpawnUnixNano: time.Now().UnixNano(),
+	}
+	evt := event.New(event.DispatchStarted, 1, event.MustMarshal(payload)).
+		WithCorrelation(trigger.CorrelationID).
+		WithCausation(trigger.ID).
+		WithSource("persona-runner")
+
+	// Short-lived background context so the record survives runner shutdown /
+	// cancellation of the per-correlation context, exactly as emitDispatchDropped.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	aggregateID := trigger.CorrelationID + ":dispatch"
+	const maxAttempts = 3
+	for range maxAttempts {
+		currentVersion := 0
+		if existing, err := r.store.Load(ctx, aggregateID); err == nil && len(existing) > 0 {
+			currentVersion = existing[len(existing)-1].Version
+		}
+		versioned := evt.WithAggregate(aggregateID, currentVersion+1)
+		if err := r.store.Append(ctx, aggregateID, currentVersion, []event.Envelope{versioned}); err == nil {
+			return
+		}
+	}
+	// Persistence failed after retries — log but don't fail the dispatch.
+	r.logger.Debug("persona runner: failed to persist DispatchStarted",
 		slog.String("handler", handlerName),
 		slog.String("correlation", trigger.CorrelationID),
 	)

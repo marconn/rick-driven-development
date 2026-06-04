@@ -356,6 +356,108 @@ func TestPersonaRunnerDispatchDroppedOnEventDedup(t *testing.T) {
 	}
 }
 
+// TestEmitDispatchStarted exercises the emitter directly so payload/schema
+// breakage is caught deterministically (the production call site is async via
+// `go r.emitDispatchStarted(...)`). One call → exactly one DispatchStarted in
+// the {correlationID}:dispatch diagnostic aggregate, carrying persona +
+// trigger + chain depth.
+func TestEmitDispatchStarted(t *testing.T) {
+	runner, store, _, _ := newTestPersonaRunner(t)
+	runner.Start(context.Background(), handler.NewRegistry())
+
+	trigger := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation("corr-started").WithSource("test")
+
+	runner.emitDispatchStarted("quality-gate", trigger, 3)
+
+	started, err := store.Load(context.Background(), "corr-started:dispatch")
+	if err != nil {
+		t.Fatalf("load dispatch aggregate: %v", err)
+	}
+	if len(started) != 1 {
+		t.Fatalf("expected exactly 1 DispatchStarted event, got %d", len(started))
+	}
+	if started[0].Type != event.DispatchStarted {
+		t.Errorf("want DispatchStarted, got %s", started[0].Type)
+	}
+
+	var p event.DispatchStartedPayload
+	if err := json.Unmarshal(started[0].Payload, &p); err != nil {
+		t.Fatalf("unmarshal DispatchStartedPayload: %v", err)
+	}
+	if p.Persona != "quality-gate" {
+		t.Errorf("want persona=quality-gate, got %q", p.Persona)
+	}
+	if p.TriggerEvent != string(event.PersonaCompleted) {
+		t.Errorf("want trigger_event=%s, got %q", event.PersonaCompleted, p.TriggerEvent)
+	}
+	if p.TriggerID != string(trigger.ID) {
+		t.Errorf("want trigger_id=%s, got %q", trigger.ID, p.TriggerID)
+	}
+	if p.ChainDepth != 3 {
+		t.Errorf("want chain_depth=3, got %d", p.ChainDepth)
+	}
+	if p.SpawnUnixNano == 0 {
+		t.Error("want non-zero spawn_unix_nano")
+	}
+}
+
+// TestPersonaRunnerDispatchStartedOnDispatch verifies that a real handler
+// dispatch produces exactly one DispatchStarted in the dispatch diagnostic
+// aggregate — the non-AI "started" signal 0003's dwell projection needs. The
+// emit is asynchronous and best-effort, so the assertion polls.
+func TestPersonaRunnerDispatchStartedOnDispatch(t *testing.T) {
+	runner, store, bus, reg := newTestPersonaRunner(t)
+
+	h := &stubHandler{
+		name: "documenter",
+		subs: []event.Type{event.PersonaCompleted},
+		handle: func(_ context.Context, _ event.Envelope) ([]event.Envelope, error) {
+			return nil, nil
+		},
+	}
+	if err := reg.Register(h); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	runner.Start(context.Background(), reg)
+
+	evt := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer", ChainDepth: 0,
+	})).WithCorrelation("corr-dispatch-start").WithSource("test")
+	if err := bus.Publish(context.Background(), evt); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	var started []event.Envelope
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var err error
+		started, err = store.Load(context.Background(), "corr-dispatch-start:dispatch")
+		if err != nil {
+			t.Fatalf("load dispatch aggregate: %v", err)
+		}
+		if len(started) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(started) != 1 {
+		t.Fatalf("expected exactly 1 DispatchStarted, got %d", len(started))
+	}
+
+	var p event.DispatchStartedPayload
+	if err := json.Unmarshal(started[0].Payload, &p); err != nil {
+		t.Fatalf("unmarshal DispatchStartedPayload: %v", err)
+	}
+	if p.Persona != "documenter" {
+		t.Errorf("want persona=documenter, got %q", p.Persona)
+	}
+	if p.TriggerID != string(evt.ID) {
+		t.Errorf("want trigger_id=%s, got %q", evt.ID, p.TriggerID)
+	}
+}
+
 // TestEmitDispatchDroppedAllReasons directly exercises the emitter across
 // every drop_reason constant so schema/payload breakage is caught regardless
 // of which full-dispatch path actually fires the reason in a given commit.

@@ -30,6 +30,20 @@ func NewClaude(binaryPath string) *Claude {
 
 func (c *Claude) Name() string { return "claude" }
 
+// Capabilities: claude is the only fully-featured CLI — MCP tool retrieval, a
+// native --system-prompt flag, --resume session continuation, authoritative
+// token accounting from the stream-json result event, and an --effort
+// reasoning knob.
+func (c *Claude) Capabilities() Capabilities {
+	return Capabilities{
+		MCP:             true,
+		SystemPrompt:    true,
+		SessionResume:   true,
+		TokenAccounting: true,
+		ReasoningEffort: true,
+	}
+}
+
 // buildArgs returns CLI arguments and, when the user prompt exceeds maxArgSize,
 // the prompt content to pipe via stdin (avoiding OS ARG_MAX limits).
 func (c *Claude) buildArgs(req Request) (args []string, stdinPrompt string) {

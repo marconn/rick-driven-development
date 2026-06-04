@@ -678,6 +678,45 @@ type DispatchDroppedPayload struct {
 	Detail              string   `json:"detail,omitempty"`
 }
 
+// KnowledgeUnavailablePayload records that a persona ran without one or more
+// OPTIONAL knowledge packs it declared, because the backend lacks tool-based
+// retrieval (Phase 1 delivers knowledge lazily on MCP-capable backends only;
+// eager inlining is deferred). Fields:
+//
+//   - Persona: the handler/persona that ran degraded.
+//   - Backend: the concrete backend that could not deliver the knowledge.
+//   - Repo: the <owner>/<repo> the packs were scoped to (empty when unknown).
+//   - Packs: the optional pack names that were not delivered.
+//
+// This event is the deferred-eager-policy decision input (0003/0005). Required
+// packs never emit it — they pin to a capable backend or fail dispatch.
+type KnowledgeUnavailablePayload struct {
+	Persona string   `json:"persona"`
+	Backend string   `json:"backend"`
+	Repo    string   `json:"repo,omitempty"`
+	Packs   []string `json:"packs"`
+}
+
+// DispatchStartedPayload records the start of a handler execution by the
+// PersonaRunner. Written to the dedicated diagnostic aggregate
+// {correlationID}:dispatch so 0003's dwell/duration projection can measure
+// non-AI handler execution time (AI handlers are already covered by
+// AIRequestStarted). Mirrors the AIRequestStarted shape for consistency.
+// Fields:
+//
+//   - Persona: the handler name that is about to execute.
+//   - TriggerEvent: the type of the event that triggered this dispatch.
+//   - TriggerID: that event's ID, so the start can be correlated to its cause.
+//   - ChainDepth: dispatch chain depth at execution time (loop-detection depth).
+//   - SpawnUnixNano: time.Now().UnixNano() captured at the top of executeDispatch.
+type DispatchStartedPayload struct {
+	Persona       string `json:"persona"`
+	TriggerEvent  string `json:"trigger_event"`
+	TriggerID     string `json:"trigger_id"`
+	ChainDepth    int    `json:"chain_depth"`
+	SpawnUnixNano int64  `json:"spawn_unix_nano"`
+}
+
 // GroundingDropReason classifies why a pr-category-review issue was rejected
 // by the diff-grounding filter (handler/review.go:groundIssue). Aggregated in
 // VerdictGroundingSummaryPayload.DropReasons so operators can see whether

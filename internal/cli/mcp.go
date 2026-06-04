@@ -81,11 +81,15 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 	// behavior.
 	be = newDeveloperBackend(be, logger, saturation)
 
-	// Review-phase handlers use a configurable rotation (default: codex,
-	// opencode, claude). Override via RICK_REVIEW_BACKENDS=a,b,c.
+	// Review-phase handlers use a configurable rotation (default:
+	// antigravity, claude). Override via RICK_REVIEW_BACKENDS=a,b,c.
 	reviewBe := newReviewBackend(logger, saturation)
 
 	personas := persona.DefaultRegistry()
+	// Data-driven persona manifests (opt-in) — see serve.go.
+	if err := personas.LoadManifests(os.Getenv("RICK_PERSONA_MANIFESTS_DIR"), logger); err != nil {
+		return fmt.Errorf("load persona manifests: %w", err)
+	}
 	builder := persona.NewPromptBuilder()
 
 	reg := handler.NewRegistry()
@@ -147,6 +151,8 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 	runner.Register(tokens)
 	runner.Register(timelines)
 	runner.Register(verdicts)
+	// Dwell analytic — see serve.go for the read-model / rebuild rationale.
+	runner.Register(projection.NewDwellProjection())
 	if err := runner.Start(ctx); err != nil {
 		return fmt.Errorf("start projections: %w", err)
 	}

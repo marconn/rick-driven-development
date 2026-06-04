@@ -144,3 +144,30 @@ func TestRegisterAllDuplicate(t *testing.T) {
 		t.Error("expected error on duplicate RegisterAll")
 	}
 }
+
+// TestPRReviewerSafetyConfigUnchanged is the migration safety net for task
+// 0009: moving the 13 category reviewers to manifests must NOT change their
+// safety configuration. Verdict-bearing reviewers stay PlainText=true (so
+// ExtractJSON cannot steal an in-prose JSON snippet and drop the VERDICT tail —
+// the default-optimistic-pass class). Persona manifests own prompt composition
+// ONLY; this safety knob is code-owned and independent of the migration.
+func TestPRReviewerSafetyConfigUnchanged(t *testing.T) {
+	prReviewers := []string{
+		"pr-security", "pr-concurrency", "pr-error-handling", "pr-observability",
+		"pr-api-contract", "pr-idempotency", "pr-testing", "pr-integration",
+		"pr-performance", "pr-data", "pr-hygiene", "pr-vendor-resilience",
+		"pr-docs-concordance",
+	}
+	for _, name := range prReviewers {
+		if !isVerdictBearingReviewer(name) {
+			t.Errorf("%s must remain verdict-bearing (PlainText=true) after the manifest migration", name)
+		}
+	}
+	// reviewer/qa are also verdict-bearing; pr-consolidator/pr-replier are not.
+	if !isVerdictBearingReviewer("reviewer") || !isVerdictBearingReviewer("qa") {
+		t.Error("reviewer/qa must stay verdict-bearing")
+	}
+	if isVerdictBearingReviewer("pr-consolidator") || isVerdictBearingReviewer("pr-replier") {
+		t.Error("pr-consolidator/pr-replier must NOT be verdict-bearing")
+	}
+}

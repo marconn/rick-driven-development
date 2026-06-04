@@ -100,11 +100,16 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 	// backend deployments see no change.
 	be = newDeveloperBackend(be, logger, saturation)
 
-	// Review-phase handlers use a configurable rotation (default: codex,
-	// opencode, claude). Override via RICK_REVIEW_BACKENDS=a,b,c.
+	// Review-phase handlers use a configurable rotation (default:
+	// antigravity, claude). Override via RICK_REVIEW_BACKENDS=a,b,c.
 	reviewBe := newReviewBackend(logger, saturation)
 
 	personas := persona.DefaultRegistry()
+	// Data-driven persona manifests (opt-in). Unset ⇒ code-only personas
+	// (byte-for-byte prior behavior). A bad manifest fails only itself.
+	if err := personas.LoadManifests(os.Getenv("RICK_PERSONA_MANIFESTS_DIR"), logger); err != nil {
+		return fmt.Errorf("load persona manifests: %w", err)
+	}
 	builder := persona.NewPromptBuilder()
 
 	ghClient := newGitHubClient()
@@ -171,6 +176,11 @@ func runServe(ctx context.Context, opts *serveOpts) error {
 	projRunner.Register(tokens)
 	projRunner.Register(timelines)
 	projRunner.Register(verdicts)
+	// Dwell analytic (telemetry gate for the dispatch-projection track). Read
+	// model only; authoritative data comes from its catch-up rebuild over the
+	// log, since the DispatchDropped/DispatchStarted diagnostics it folds are
+	// store-only (never on the live bus).
+	projRunner.Register(projection.NewDwellProjection())
 	if err := projRunner.Start(ctx); err != nil {
 		return fmt.Errorf("start projections: %w", err)
 	}

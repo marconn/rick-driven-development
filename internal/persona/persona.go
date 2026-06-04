@@ -3,6 +3,7 @@ package persona
 import (
 	"embed"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -59,6 +60,12 @@ type Registry struct {
 	mu        sync.RWMutex
 	personas  map[string]*Persona
 	customDir string // optional override directory for system prompts
+	// manifests is the data-driven persona source (RICK_PERSONA_MANIFESTS_DIR),
+	// nil unless LoadManifests was called. When a persona name exists here, its
+	// composed prompt (identity + skills) WINS over the embedded/code prompt —
+	// this is what lets an operator override or recompose a persona without a
+	// recompile. nil ⇒ byte-for-byte the prior code-only behavior.
+	manifests *ManifestSource
 }
 
 // NewRegistry creates an empty persona registry.
@@ -112,6 +119,51 @@ func (r *Registry) SetCustomDir(dir string) {
 	r.customDir = dir
 }
 
+// LoadManifests loads data-driven persona/skill manifests from root (the
+// operator-local RICK_PERSONA_MANIFESTS_DIR) and merges them into the registry.
+// Manifest personas WIN on name collision: a manifest named "developer"
+// overrides the embedded developer prompt, with no recompile. Any persona named
+// only by a manifest is registered so Get/Names see it too.
+//
+// Resilient by design: a malformed or invalid single manifest fails only
+// itself — its error is logged and loading continues (the validator's
+// "fail-one-not-the-process" contract). Returns an error only for a fatal
+// problem reading the root itself. Calling with an empty root is a no-op, so
+// callers can pass an unset env var unconditionally.
+func (r *Registry) LoadManifests(root string, logger *slog.Logger) error {
+	if root == "" {
+		return nil
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	src, errs := LoadManifestDir(root)
+	for _, e := range errs {
+		// Each is a single bad manifest — surface it loudly but never abort the
+		// process; the rest of the registry stays usable.
+		logger.Error("persona manifest rejected", slog.String("error", e.Error()))
+	}
+
+	r.mu.Lock()
+	r.manifests = src
+	r.mu.Unlock()
+
+	// Register a Persona record for any manifest-only persona so Get/Names work.
+	// Existing code-registered personas are left in place; manifest composition
+	// still wins in LoadSystemPrompt regardless of which record is present.
+	for _, name := range src.PersonaNames() {
+		if _, err := r.Get(name); err != nil {
+			_ = r.Register(&Persona{Name: name, Description: "manifest persona"})
+		}
+	}
+	if n := len(src.PersonaNames()); n > 0 {
+		logger.Info("loaded persona manifests",
+			slog.String("dir", root), slog.Int("count", n))
+	}
+	return nil
+}
+
 // Register adds a persona to the registry.
 func (r *Registry) Register(p *Persona) error {
 	r.mu.Lock()
@@ -146,17 +198,37 @@ func (r *Registry) Names() []string {
 	return names
 }
 
-// LoadSystemPrompt reads the system prompt for the named persona.
-// If a custom directory is set and contains <name>.md, that file is used.
-// Otherwise, the embedded default is returned.
+// LoadSystemPrompt reads the system prompt for the named persona. Resolution
+// precedence:
+//
+//  1. Manifest composition (identity + ordered skill fragments) when a persona
+//     manifest of this name was loaded — the data-driven path. WINS over the
+//     embedded/code prompt so an operator can override/recompose without a
+//     recompile.
+//  2. Custom-dir override file <customDir>/<name>.md, if present.
+//  3. The embedded default prompt.
+//
+// This is the single shared persona-resolution path: every consumer
+// (AIHandler, PRConsolidator, the rick_consult/rick_run MCP jobs) goes through
+// it, so manifest composition applies uniformly without per-call-site wiring
+// (F8). With no manifests loaded and no custom dir, behavior is byte-for-byte
+// the prior embedded-only path.
 func (r *Registry) LoadSystemPrompt(name string) (string, error) {
 	r.mu.RLock()
 	_, ok := r.personas[name]
 	customDir := r.customDir
+	manifests := r.manifests
 	r.mu.RUnlock()
 
 	if !ok {
 		return "", fmt.Errorf("unknown persona: %s", name)
+	}
+
+	if manifests.Has(name) {
+		// A composition error (e.g. a missing skill ref) is loud, not a silent
+		// fallback to the embedded prompt — the operator authored a manifest and
+		// must see why it failed rather than get surprising stale behavior.
+		return manifests.ComposeSystemPrompt(name)
 	}
 
 	if customDir != "" {

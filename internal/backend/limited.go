@@ -33,6 +33,12 @@ func NewLimitedBackend(b Backend, limit int, recorder Recorder) Backend {
 
 func (lb *limitedBackend) Name() string { return lb.inner.Name() }
 
+// Capabilities delegates to the inner backend — the concurrency limiter is
+// orthogonal to what the underlying CLI can do. Without this delegation a
+// limited(claude) would report the zero matrix and the resolver would refuse
+// to send it an MCP tool config (F10).
+func (lb *limitedBackend) Capabilities() Capabilities { return lb.inner.Capabilities() }
+
 func (lb *limitedBackend) Run(ctx context.Context, req Request) (*Response, error) {
 	name := lb.inner.Name()
 	if err := lb.limiter.Acquire(ctx, name); err != nil {

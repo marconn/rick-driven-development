@@ -15,7 +15,8 @@ type stubBackend struct {
 	calls int
 }
 
-func (s *stubBackend) Name() string { return s.name }
+func (s *stubBackend) Name() string               { return s.name }
+func (s *stubBackend) Capabilities() Capabilities { return Capabilities{} }
 func (s *stubBackend) Run(_ context.Context, _ Request) (*Response, error) {
 	s.mu.Lock()
 	s.calls++
@@ -130,6 +131,78 @@ func TestRoundRobinRotateOffset_ZeroIsNoOp(t *testing.T) {
 	if want.calls != 1 {
 		t.Errorf("base slot %d (%s) not hit: a=%d b=%d — offset=0 must be a no-op",
 			base, want.Name(), a.calls, b.calls)
+	}
+}
+
+// TestRoundRobinSelect_AttributesConcreteBackend locks the 0001 contract: two
+// successive non-sticky Select calls resolve the two distinct inner backends
+// the rotation would dispatch to, so the AIHandler can attribute events to the
+// concrete CLI before Run. The selected backend must NOT have been invoked yet
+// (Select resolves, it does not Run).
+func TestRoundRobinSelect_AttributesConcreteBackend(t *testing.T) {
+	a := &stubBackend{name: "a"}
+	b := &stubBackend{name: "b"}
+	rr, err := NewRoundRobin(a, b)
+	if err != nil {
+		t.Fatalf("NewRoundRobin: %v", err)
+	}
+
+	ctx := context.Background()
+	first := rr.Select(ctx)
+	second := rr.Select(ctx)
+	if first.Name() == second.Name() {
+		t.Fatalf("two successive Select calls resolved same backend %q; want distinct rotation", first.Name())
+	}
+	if a.calls != 0 || b.calls != 0 {
+		t.Fatalf("Select must not invoke the backend: a=%d b=%d", a.calls, b.calls)
+	}
+
+	// The names cover both members.
+	got := map[string]bool{first.Name(): true, second.Name(): true}
+	if !got["a"] || !got["b"] {
+		t.Fatalf("Select did not cover both members: %v", got)
+	}
+}
+
+// TestRoundRobinSelect_StickyMatchesRun verifies that the concrete backend
+// resolved via Select on the sticky path is the same one Run would dispatch to,
+// and that Select does not advance the deterministic sticky selection.
+func TestRoundRobinSelect_StickyMatchesRun(t *testing.T) {
+	a := &stubBackend{name: "a"}
+	b := &stubBackend{name: "b"}
+	c := &stubBackend{name: "c"}
+	rr, err := NewRoundRobin(a, b, c)
+	if err != nil {
+		t.Fatalf("NewRoundRobin: %v", err)
+	}
+
+	ctx := WithStickyKey(context.Background(), "corr-9:reviewer")
+	selected := rr.Select(ctx)
+	// Repeated Select is idempotent on the sticky path.
+	if again := rr.Select(ctx); again.Name() != selected.Name() {
+		t.Fatalf("sticky Select not idempotent: %q then %q", selected.Name(), again.Name())
+	}
+
+	resp, err := rr.Run(ctx, Request{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if resp.Output != selected.Name() {
+		t.Fatalf("Run dispatched %q but Select resolved %q", resp.Output, selected.Name())
+	}
+}
+
+// TestResolve_NonSelectorReturnsBackend confirms backend.Resolve is a no-op for
+// a plain (non-rotating) backend: attribution falls back to that backend's own
+// name with no selection side effects.
+func TestResolve_NonSelectorReturnsBackend(t *testing.T) {
+	a := &stubBackend{name: "solo"}
+	got := Resolve(context.Background(), a)
+	if got.Name() != "solo" {
+		t.Fatalf("Resolve(non-selector) = %q, want solo", got.Name())
+	}
+	if a.calls != 0 {
+		t.Fatalf("Resolve must not invoke the backend: calls=%d", a.calls)
 	}
 }
 

@@ -238,7 +238,8 @@ type capturingBackend struct {
 	captured []string
 }
 
-func (b *capturingBackend) Name() string { return b.name }
+func (b *capturingBackend) Name() string                       { return b.name }
+func (b *capturingBackend) Capabilities() backend.Capabilities { return backend.Capabilities{} }
 func (b *capturingBackend) Run(_ context.Context, req backend.Request) (*backend.Response, error) {
 	b.mu.Lock()
 	b.captured = append(b.captured, req.UserPrompt)
@@ -264,7 +265,8 @@ type programmableBackend struct {
 	next func() string
 }
 
-func (b *programmableBackend) Name() string { return b.name }
+func (b *programmableBackend) Name() string                       { return b.name }
+func (b *programmableBackend) Capabilities() backend.Capabilities { return backend.Capabilities{} }
 func (b *programmableBackend) Run(_ context.Context, _ backend.Request) (*backend.Response, error) {
 	return &backend.Response{Output: b.next(), Duration: time.Millisecond}, nil
 }

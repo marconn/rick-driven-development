@@ -17,7 +17,8 @@ type fakeBackend struct {
 	runs  atomic.Int32
 }
 
-func (f *fakeBackend) Name() string { return f.name }
+func (f *fakeBackend) Name() string               { return f.name }
+func (f *fakeBackend) Capabilities() Capabilities { return Capabilities{} }
 
 func (f *fakeBackend) Run(ctx context.Context, _ Request) (*Response, error) {
 	cur := f.inUse.Add(1)
