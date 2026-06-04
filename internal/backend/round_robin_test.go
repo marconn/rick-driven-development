@@ -15,7 +15,8 @@ type stubBackend struct {
 	calls int
 }
 
-func (s *stubBackend) Name() string { return s.name }
+func (s *stubBackend) Name() string               { return s.name }
+func (s *stubBackend) Capabilities() Capabilities { return Capabilities{} }
 func (s *stubBackend) Run(_ context.Context, _ Request) (*Response, error) {
 	s.mu.Lock()
 	s.calls++

@@ -24,6 +24,17 @@ func NewCodex(binaryPath string) *Codex {
 
 func (c *Codex) Name() string { return "codex" }
 
+// Capabilities: codex resumes sessions (exec resume / thread id) and reports
+// authoritative token usage (turn.completed.usage). It has no system-prompt
+// flag (folded into an XML wrapper), no MCP tool retrieval, and no
+// reasoning-effort knob.
+func (c *Codex) Capabilities() Capabilities {
+	return Capabilities{
+		SessionResume:   true,
+		TokenAccounting: true,
+	}
+}
+
 // buildArgs returns CLI arguments and, when the user prompt exceeds maxArgSize,
 // the prompt content to pipe via stdin (avoiding OS ARG_MAX limits).
 func (c *Codex) buildArgs(req Request) (args []string, stdinPrompt string) {

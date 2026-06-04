@@ -21,6 +21,36 @@ type Backend interface {
 	// The full LLM output is captured regardless of whether streaming
 	// is enabled via Request.Output.
 	Run(ctx context.Context, req Request) (*Response, error)
+
+	// Capabilities reports which optional features this backend supports.
+	// The persona resolver (knowledge negotiation) consults these so
+	// tool-only request fields are not sent to backends that ignore them,
+	// and so required knowledge can pin to a tool-capable backend. Every
+	// backend declares its matrix explicitly — there is no silent default,
+	// so a missing capability is a deliberate "no", not an oversight.
+	Capabilities() Capabilities
+}
+
+// Capabilities describes the optional features a backend supports. Consumers
+// must not assume a feature the backend does not report — e.g. sending an
+// MCP tool config to a backend with MCP=false silently no-ops, which is the
+// footgun this surface exists to remove.
+type Capabilities struct {
+	// MCP: retrieves knowledge via MCP tool calls (progressive disclosure).
+	// Only MCP-capable backends can do lazy knowledge retrieval; others need
+	// eager inlining (deferred) or pin/degrade per knowledge criticality.
+	MCP bool
+	// SystemPrompt: accepts a native system prompt flag. Backends without it
+	// fold the system prompt into the user message (the <system_instructions>
+	// wrapper used by gemini/codex/opencode/antigravity).
+	SystemPrompt bool
+	// SessionResume: can resume a prior CLI session by id (Request.SessionID).
+	SessionResume bool
+	// TokenAccounting: reports authoritative token usage on Response.TokensUsed.
+	TokenAccounting bool
+	// ReasoningEffort: honors the Request.Effort reasoning knob (Claude
+	// --effort). Backends without it ignore the field.
+	ReasoningEffort bool
 }
 
 // Selector is implemented by backends that pick a concrete inner backend per

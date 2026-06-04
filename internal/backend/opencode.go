@@ -86,6 +86,14 @@ func NewOpencode(binaryPath string) *Opencode {
 
 func (o *Opencode) Name() string { return "opencode" }
 
+// Capabilities: opencode resumes sessions (-c/--session). It has no
+// system-prompt flag (folded into a <system_instructions> wrapper), no MCP tool
+// retrieval surfaced here, leaves token usage empty, and has no
+// reasoning-effort knob.
+func (o *Opencode) Capabilities() Capabilities {
+	return Capabilities{SessionResume: true}
+}
+
 func (o *Opencode) combinePrompt(systemPrompt, userPrompt string) string {
 	return fmt.Sprintf("<system_instructions>\n%s\n</system_instructions>\n\n%s", systemPrompt, userPrompt)
 }

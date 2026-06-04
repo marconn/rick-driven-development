@@ -35,6 +35,8 @@ type mockBackend struct {
 
 func (m *mockBackend) Name() string { return m.name }
 
+func (m *mockBackend) Capabilities() backend.Capabilities { return backend.Capabilities{} }
+
 func (m *mockBackend) Run(ctx context.Context, req backend.Request) (*backend.Response, error) {
 	m.lastReq = req
 	m.lastStickyKey = backend.StickyKeyFromContext(ctx)
@@ -1327,7 +1329,8 @@ type hangingBackend struct {
 	gotPrompt chan struct{} // closed once Run is reached
 }
 
-func (b *hangingBackend) Name() string { return b.name }
+func (b *hangingBackend) Name() string                       { return b.name }
+func (b *hangingBackend) Capabilities() backend.Capabilities { return backend.Capabilities{} }
 
 func (b *hangingBackend) Run(ctx context.Context, _ backend.Request) (*backend.Response, error) {
 	close(b.gotPrompt)

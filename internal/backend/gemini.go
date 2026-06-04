@@ -26,6 +26,13 @@ func NewGemini(binaryPath string) *Gemini {
 
 func (g *Gemini) Name() string { return "gemini" }
 
+// Capabilities: gemini can only resume a session. It has no system-prompt flag
+// (the prompt is folded into a <system_instructions> wrapper), no MCP tool
+// retrieval, exposes no token usage, and no reasoning-effort knob.
+func (g *Gemini) Capabilities() Capabilities {
+	return Capabilities{SessionResume: true}
+}
+
 func (g *Gemini) combinePrompt(systemPrompt, userPrompt string) string {
 	return fmt.Sprintf("<system_instructions>\n%s\n</system_instructions>\n\n%s", systemPrompt, userPrompt)
 }

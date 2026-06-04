@@ -98,8 +98,8 @@ func runWorkflow(ctx context.Context, opts *runOpts, args []string) error {
 		return err
 	}
 
-	// Review-phase handlers use a configurable rotation (default: codex,
-	// opencode, claude). Override via RICK_REVIEW_BACKENDS=a,b,c.
+	// Review-phase handlers use a configurable rotation (default:
+	// antigravity, claude). Override via RICK_REVIEW_BACKENDS=a,b,c.
 	// run.go is deprecated; pass nil recorder rather than plumb observe here.
 	reviewBe := newReviewBackend(logger, nil)
 

@@ -52,6 +52,14 @@ func NewAntigravity(binaryPath string) *Antigravity {
 
 func (a *Antigravity) Name() string { return "antigravity" }
 
+// Capabilities: antigravity resumes conversations (--continue / --conversation).
+// It has no system-prompt flag (folded into a <system_instructions> wrapper),
+// no MCP tool retrieval, captures stdout as plain text (no token usage), and
+// has no reasoning-effort knob.
+func (a *Antigravity) Capabilities() Capabilities {
+	return Capabilities{SessionResume: true}
+}
+
 func (a *Antigravity) combinePrompt(systemPrompt, userPrompt string) string {
 	return fmt.Sprintf("<system_instructions>\n%s\n</system_instructions>\n\n%s", systemPrompt, userPrompt)
 }

@@ -97,4 +97,34 @@ func (r *RoundRobin) Run(ctx context.Context, req Request) (*Response, error) {
 
 // Backends exposes the underlying list for inspection (primarily for logs
 // and tests). The returned slice aliases internal state — do not mutate.
+//
+// 0008's required-knowledge pinning ranges over these and calls Capabilities()
+// per member to find the capable subset — the conservative aggregate from
+// Capabilities() below is the wrong lens for "pin to a capable member".
 func (r *RoundRobin) Backends() []Backend { return r.backends }
+
+// Capabilities returns the conservative INTERSECTION of its members'
+// capabilities: a caller may only assume a feature that EVERY rotation member
+// supports, because any member can serve a given call. So
+// round-robin(codex,opencode,claude).Capabilities().MCP is false even though
+// claude alone supports MCP — sending an MCP tool config to the rotation would
+// no-op on 2 of 3 backends. (Per-member capabilities for capable-member
+// selection are read via Backends().)
+func (r *RoundRobin) Capabilities() Capabilities {
+	caps := Capabilities{
+		MCP:             true,
+		SystemPrompt:    true,
+		SessionResume:   true,
+		TokenAccounting: true,
+		ReasoningEffort: true,
+	}
+	for _, b := range r.backends {
+		c := b.Capabilities()
+		caps.MCP = caps.MCP && c.MCP
+		caps.SystemPrompt = caps.SystemPrompt && c.SystemPrompt
+		caps.SessionResume = caps.SessionResume && c.SessionResume
+		caps.TokenAccounting = caps.TokenAccounting && c.TokenAccounting
+		caps.ReasoningEffort = caps.ReasoningEffort && c.ReasoningEffort
+	}
+	return caps
+}

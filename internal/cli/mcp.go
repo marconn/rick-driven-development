@@ -81,8 +81,8 @@ func runMCP(ctx context.Context, opts *mcpOpts) error {
 	// behavior.
 	be = newDeveloperBackend(be, logger, saturation)
 
-	// Review-phase handlers use a configurable rotation (default: codex,
-	// opencode, claude). Override via RICK_REVIEW_BACKENDS=a,b,c.
+	// Review-phase handlers use a configurable rotation (default:
+	// antigravity, claude). Override via RICK_REVIEW_BACKENDS=a,b,c.
 	reviewBe := newReviewBackend(logger, saturation)
 
 	personas := persona.DefaultRegistry()
