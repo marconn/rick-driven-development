@@ -26,7 +26,7 @@ Defines the canonical immutable `Envelope`, all event `Type` constants, and the 
 - **Workspace**: `WorkspaceReady`
 - **Budget**: `TokenBudgetExceeded`
 - **Sentinel**: `UnhandledEventDetected`
-- **Diagnostics / forensics** (storage-only, never published on the bus, no handler subscribers): `DispatchDropped`, `VerdictGroundingSummary`
+- **Diagnostics / forensics** (storage-only, never published on the bus, no handler subscribers): `DispatchDropped`, `DispatchStarted`, `VerdictGroundingSummary`
 - **Child workflow**: `ChildWorkflowCompleted`
 
 ## Key payload structs

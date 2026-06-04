@@ -121,6 +121,16 @@ const (
 	// workflow write path. Never published on the bus — diagnostic only.
 	DispatchDropped Type = "dispatch.dropped"
 
+	// DispatchStarted records the moment PersonaRunner begins executing a
+	// handler. AI handlers already emit AIRequestStarted at subprocess spawn,
+	// but deterministic (non-AI) handlers — workspace, context-snapshot,
+	// quality-gate, pr-* non-AI steps — had no "started" signal, so dwell /
+	// execution-duration telemetry could not measure them. Written to the
+	// dedicated diagnostic aggregate {correlationID}:dispatch, best-effort and
+	// asynchronously so it never adds I/O latency to the dispatch hot path.
+	// Never published on the bus — diagnostic only, no handler subscribers.
+	DispatchStarted Type = "dispatch.started"
+
 	// VerdictGroundingSummary records how a pr-category-review handler's LLM
 	// findings fared against the diff-grounding filter — how many were parsed,
 	// how many survived, and why each rejection happened. Emitted once per
