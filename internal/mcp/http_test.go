@@ -12,12 +12,10 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/event"
 )
 
-// httpHandler returns an http.Handler for the MCP server under test.
+// httpHandler returns an http.Handler for the MCP server under test. It reuses
+// the production router (httpMux) so test coverage tracks the real routing.
 func httpHandler(s *Server) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /mcp", s.handleHTTPPost)
-	mux.HandleFunc("GET /mcp", s.handleHTTPGet)
-	return withCORS(mux)
+	return withCORS(s.httpMux())
 }
 
 func postMCP(t *testing.T, handler http.Handler, req jsonRPCRequest) *httptest.ResponseRecorder {
@@ -218,6 +216,56 @@ func TestHTTPGetHealthCheck_ReportsInjectedBackend(t *testing.T) {
 	}
 	if info.DefaultBackend != "gemini" {
 		t.Errorf("expected default_backend 'gemini', got %q", info.DefaultBackend)
+	}
+}
+
+func TestHTTPGetEventStreamReturns405(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	h := httpHandler(s)
+
+	// MCP Streamable HTTP clients open GET /mcp with Accept: text/event-stream
+	// to receive server-initiated messages. Rick has no such stream, so it must
+	// answer 405 — not a 200 JSON body that the client mistakes for an
+	// immediately-closed stream and then reconnect-loops on (dropping rick's
+	// tools from the model's callable set during each drop window).
+	r := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	r.Header.Set("Accept", "text/event-stream")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET /mcp with text/event-stream, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("expected application/json body, got %s", ct)
+	}
+}
+
+func TestHTTPUnknownPathReturnsJSON404(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	h := httpHandler(s)
+
+	// Clients probe OAuth discovery endpoints (/.well-known/oauth-*) on connect.
+	// The 404 body must be valid JSON: a plain-text body crashes the client's
+	// OAuth error parser, failing auth completion and dropping rick's tools from
+	// the model's callable set even though the connection itself is healthy.
+	r := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("expected application/json, got %s", ct)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("404 body must be valid JSON for the client's OAuth parser: %v", err)
 	}
 }
 
