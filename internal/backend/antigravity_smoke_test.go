@@ -181,6 +181,53 @@ exit 7
 	}
 }
 
+// TestAntigravity_Factory_NoIdleWatchdog: `agy -p` flushes stdout only when
+// the model finishes generating, so the byte-level idle watchdog has no
+// liveness signal to reset against and false-kills any healthy long run
+// past RICK_BACKEND_STALL_TIMEOUT. The factory deliberately leaves
+// Antigravity.stallTimeout at zero (watchdog disabled) regardless of the env
+// override. This test fakes a quiet agy that stays silent for longer than
+// the configured stall, then prints — a regression that re-wires the
+// watchdog turns this red with `idle timeout exceeded`.
+func TestAntigravity_Factory_NoIdleWatchdog(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("script-based fake binary is unix-only")
+	}
+
+	script := `#!/bin/sh
+sleep 0.8
+echo 'antigravity quiet then done'
+`
+	binPath := writeFakeBinary(t, "fake-agy-quiet.sh", script)
+
+	// Short stall window that any quiet >200ms run would trip if the
+	// watchdog were armed. Combined with the 800ms sleep, a regression that
+	// honors this env var on antigravity fails fast and unambiguously.
+	t.Setenv("RICK_BACKEND_STALL_TIMEOUT", "200ms")
+	t.Setenv("RICK_ANTIGRAVITY_BIN", binPath)
+
+	b, err := New("antigravity")
+	if err != nil {
+		t.Fatalf("New(antigravity): %v", err)
+	}
+
+	resp, err := b.Run(context.Background(), Request{
+		SystemPrompt: "sys",
+		UserPrompt:   "hello",
+	})
+	if err != nil {
+		// If we got an idle timeout, name the specific regression so the
+		// failure points at factory.go wiring rather than the agy driver.
+		if errors.Is(err, ErrIdleTimeout) {
+			t.Fatalf("idle watchdog armed for antigravity (factory.go regression): %v", err)
+		}
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(resp.Output, "antigravity quiet then done") {
+		t.Errorf("Output = %q; want fake CLI's post-sleep line", resp.Output)
+	}
+}
+
 // TestAntigravity_Run_Smoke_ContextCancellation: parent ctx cancel must
 // terminate the subprocess and return a BackendError whose Inner unwraps
 // to context.Canceled. This is the path PersonaRunner takes when a

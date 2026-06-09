@@ -40,8 +40,12 @@ import (
 //   - `--mcp-config` → MCPConfig on the Request is ignored. If/when agy
 //     adds an MCP flag, wire it here.
 type Antigravity struct {
-	binaryPath   string
-	stallTimeout time.Duration // 0 = no idle watchdog (default)
+	binaryPath string
+	// stallTimeout stays at 0 (idle watchdog disabled) in production wiring:
+	// `agy -p` emits no incremental stdout, so the byte watchdog cannot
+	// distinguish a wedge from a healthy long run. Field is kept for tests
+	// that need to assert the watchdog behavior in isolation.
+	stallTimeout time.Duration
 }
 
 // NewAntigravity creates an Antigravity backend. binaryPath is the path to

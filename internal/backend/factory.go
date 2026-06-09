@@ -126,7 +126,13 @@ func newRaw(name string) (Backend, error) {
 
 	case "antigravity":
 		a := NewAntigravity(bin)
-		a.stallTimeout = stall
+		// Idle byte watchdog is intentionally NOT armed for antigravity:
+		// `agy -p` emits plain text on stdout only when the model finishes
+		// generating (no incremental stream), so the watchdog has no
+		// liveness signal to reset against and false-kills any healthy run
+		// past RICK_BACKEND_STALL_TIMEOUT. `--print-timeout 30m` plus the
+		// outer rick wall-clock (RICK_BACKEND_TIMEOUT / RICK_REVIEW_BACKEND_TIMEOUT)
+		// are the binding deadlines instead.
 		return a, nil
 
 	case "opencode":
