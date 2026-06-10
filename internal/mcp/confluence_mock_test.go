@@ -60,7 +60,8 @@ func TestToolConfluenceRead_WithMockServer(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_confluence_read", map[string]any{
+	result, err := callTool(t, s, "rick_confluence", map[string]any{
+		"action":  "read",
 		"page_id": "12345",
 	})
 	if err != nil {
@@ -99,7 +100,8 @@ func TestToolConfluenceRead_WithURL(t *testing.T) {
 
 	// Pass a Confluence URL — extractPageID should extract the numeric ID.
 	confluenceURL := mockSrv.server.URL + "/wiki/spaces/ENG/pages/98765/Page-Title"
-	result, err := callTool(t, s, "rick_confluence_read", map[string]any{
+	result, err := callTool(t, s, "rick_confluence", map[string]any{
+		"action":  "read",
 		"page_id": confluenceURL,
 	})
 	if err != nil {
@@ -139,7 +141,8 @@ func TestToolConfluenceWrite_WithMockServer(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_confluence_write", map[string]any{
+	result, err := callTool(t, s, "rick_confluence", map[string]any{
+		"action":        "write",
 		"page_id":       pageID,
 		"content":       "<p>New technical plan content</p>",
 		"after_heading": "Plan Tecnico",
@@ -175,7 +178,8 @@ func TestToolConfluenceWrite_HeadingNotFound(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	_, err := callTool(t, s, "rick_confluence_write", map[string]any{
+	_, err := callTool(t, s, "rick_confluence", map[string]any{
+		"action":        "write",
 		"page_id":       "11111",
 		"content":       "new content",
 		"after_heading": "Nonexistent Section",
@@ -194,7 +198,8 @@ func TestToolConfluenceWrite_MissingRequiredFields(t *testing.T) {
 	defer cleanup()
 
 	// Missing content.
-	_, err := callTool(t, s, "rick_confluence_write", map[string]any{
+	_, err := callTool(t, s, "rick_confluence", map[string]any{
+		"action":        "write",
 		"page_id":       "12345",
 		"after_heading": "Section",
 	})
@@ -218,7 +223,8 @@ func TestToolConfluenceWrite_MissingAfterHeading(t *testing.T) {
 	defer s.Close()
 
 	// Empty after_heading should fail with "after_heading is required" error.
-	_, err := callTool(t, s, "rick_confluence_write", map[string]any{
+	_, err := callTool(t, s, "rick_confluence", map[string]any{
+		"action":        "write",
 		"page_id": "22222",
 		"content": "some content",
 		// after_heading intentionally omitted

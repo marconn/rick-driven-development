@@ -89,7 +89,8 @@ func TestToolRetryWorkflow_FailedWorkflow(t *testing.T) {
 	}
 
 	// Now retry the failed workflow.
-	result, err := callTool(t, s, "rick_retry_workflow", map[string]any{
+	result, err := callTool(t, s, "rick_workflow_control", map[string]any{
+		"action":      "retry",
 		"workflow_id": wfID,
 	})
 	if err != nil {
@@ -135,7 +136,8 @@ func TestToolRetryWorkflow_CancelledWorkflow(t *testing.T) {
 	}
 
 	// Retry the cancelled workflow.
-	result, err := callTool(t, s, "rick_retry_workflow", map[string]any{
+	result, err := callTool(t, s, "rick_workflow_control", map[string]any{
+		"action":      "retry",
 		"workflow_id": wfID,
 	})
 	if err != nil {
@@ -161,7 +163,8 @@ func TestToolRetryWorkflow_RunningWorkflow(t *testing.T) {
 	waitForWorkflowStatus(t, s, wfID, engine.StatusRunning, 2*time.Second)
 
 	// Retry a running workflow should fail.
-	_, err := callTool(t, s, "rick_retry_workflow", map[string]any{
+	_, err := callTool(t, s, "rick_workflow_control", map[string]any{
+		"action":      "retry",
 		"workflow_id": wfID,
 	})
 	if err == nil {
@@ -576,10 +579,10 @@ func TestTools_InvalidJSON(t *testing.T) {
 		"rick_workflow_control",
 		"rick_diff_viewer",
 		"rick_job_inspect",
-		"rick_inject_guidance",
 		"rick_jira_read",
 		"rick_wave_manager",
-		"rick_workspace_cleanup",
+		"rick_workspace",
+		"rick_confluence",
 	}
 
 	for _, toolName := range tools {

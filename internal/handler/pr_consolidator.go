@@ -260,7 +260,7 @@ func downgradeApproveOnSkippedReviewers(aiOutput string, skipped []string) strin
 	// Build caveat regardless of prior event — operators need to see
 	// which dimensions are missing even on a REQUEST_CHANGES result.
 	caveat := fmt.Sprintf(
-		"> ⚠️ **Partial review.** %d reviewer(s) could not produce a verdict and were skipped: %s. Those dimensions were NOT evaluated. Retry via `rick_retry_workflow` if they are load-bearing for this PR.\n\n",
+		"> ⚠️ **Partial review.** %d reviewer(s) could not produce a verdict and were skipped: %s. Those dimensions were NOT evaluated. Retry via `rick_workflow_control action=retry` if they are load-bearing for this PR.\n\n",
 		len(skipped), strings.Join(skipped, ", "))
 	payload.Summary = caveat + payload.Summary
 	if payload.Event == "APPROVE" {

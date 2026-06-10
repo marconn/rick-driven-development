@@ -16,9 +16,11 @@ func TestToolBackends(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	raw, err := callTool(t, s, "rick_backends", map[string]any{})
+	// Backends are now exposed through the rick_job_inspect facade's "backends"
+	// panel (no job_id), so the result is wrapped under that panel key.
+	raw, err := callTool(t, s, "rick_job_inspect", map[string]any{"include": []string{"backends"}})
 	if err != nil {
-		t.Fatalf("rick_backends: %v", err)
+		t.Fatalf("rick_job_inspect backends: %v", err)
 	}
 
 	// Round-trip through JSON to assert the serialized shape clients receive.
@@ -26,10 +28,13 @@ func TestToolBackends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var res backendsResult
-	if err := json.Unmarshal(b, &res); err != nil {
+	var wrapper struct {
+		Backends backendsResult `json:"backends"`
+	}
+	if err := json.Unmarshal(b, &wrapper); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
+	res := wrapper.Backends
 
 	if res.DefaultBackend != "codex" {
 		t.Errorf("default_backend: want codex, got %q", res.DefaultBackend)

@@ -26,6 +26,6 @@ Thin REST client for Confluence Cloud — reads pages, updates page sections by 
 - **No retries / no rate limiting**: Caller is responsible. The `httpClient` is a bare `&http.Client{}` with default timeouts.
 
 ## Related
-- `../mcp/tools_confluence.go` — `rick_confluence_read` / `rick_confluence_write` MCP tools that wrap this client.
+- `../mcp/tools_confluence.go` — the `rick_confluence` MCP tool (read/write via `action`) that wraps this client.
 - `../planning` — BTU planning workflow's `confluence-reader` and `confluence-writer` handlers consume this client; the writer uses `UpdatePageSection` to inject the generated plan after the "🛠️ Plan Técnico" heading.
 - Root `/CLAUDE.md` — `plan-btu` and `plan-jira` workflow descriptions and env-var requirements.

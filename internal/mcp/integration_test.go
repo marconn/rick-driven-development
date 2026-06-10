@@ -188,10 +188,9 @@ func TestIntegrationToolsList(t *testing.T) {
 	}
 
 	required := []string{
-		"rick_run_workflow", "rick_workflow_inspect", "rick_list_workflows",
-		"rick_list_events", "rick_workflow_control", "rick_diff_viewer",
-		"rick_job_inspect", "rick_wave_manager",
-		"rick_list_dead_letters", "rick_inject_guidance",
+		"rick_run_workflow", "rick_workflow_inspect", "rick_workflow_control",
+		"rick_diff_viewer", "rick_job_inspect", "rick_wave_manager",
+		"rick_workspace", "rick_confluence",
 	}
 	for _, name := range required {
 		if !toolNames[name] {
@@ -284,8 +283,9 @@ func TestIntegrationWorkflowLifecycle(t *testing.T) {
 
 	// 4. Inject guidance.
 	guideResp := rpcPost(t, baseURL, "tools/call", map[string]any{
-		"name": "rick_inject_guidance",
+		"name": "rick_workflow_control",
 		"arguments": map[string]any{
+			"action":      "inject_guidance",
 			"workflow_id": wfID,
 			"content":     "use PostgreSQL",
 			"auto_resume": true,
@@ -337,8 +337,8 @@ func TestIntegrationListEventsGlobal(t *testing.T) {
 
 	// List global events.
 	resp := rpcPost(t, baseURL, "tools/call", map[string]any{
-		"name":      "rick_list_events",
-		"arguments": map[string]any{"limit": 100},
+		"name":      "rick_workflow_inspect",
+		"arguments": map[string]any{"include": []string{"events"}, "limit": 100},
 	})
 	data, _ := json.Marshal(resp.Result)
 	var result toolsCallResult
@@ -347,10 +347,12 @@ func TestIntegrationListEventsGlobal(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var list listEventsResult
-	_ = json.Unmarshal([]byte(result.Content[0].Text), &list)
-	if list.Count < 2 {
-		t.Errorf("expected at least 2 global events, got %d", list.Count)
+	var inspect struct {
+		Events listEventsResult `json:"events"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	if inspect.Events.Count < 2 {
+		t.Errorf("expected at least 2 global events, got %d", inspect.Events.Count)
 	}
 }
 
@@ -386,7 +388,8 @@ func TestIntegrationDeadLetters(t *testing.T) {
 	defer cleanup()
 
 	resp := rpcPost(t, baseURL, "tools/call", map[string]any{
-		"name": "rick_list_dead_letters",
+		"name":      "rick_workflow_inspect",
+		"arguments": map[string]any{"include": []string{"dead_letters"}},
 	})
 	data, _ := json.Marshal(resp.Result)
 	var result toolsCallResult
@@ -395,8 +398,11 @@ func TestIntegrationDeadLetters(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var dls listDeadLettersResult
-	_ = json.Unmarshal([]byte(result.Content[0].Text), &dls)
+	var inspect struct {
+		DeadLetters listDeadLettersResult `json:"dead_letters"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	dls := inspect.DeadLetters
 	if dls.Count != 0 {
 		t.Errorf("expected 0 dead letters on fresh server, got %d", dls.Count)
 	}
@@ -547,7 +553,8 @@ func TestIntegrationSeedAndQueryProjections(t *testing.T) {
 
 	// List workflows should include the new one.
 	listResp := rpcPost(t, baseURL, "tools/call", map[string]any{
-		"name": "rick_list_workflows",
+		"name":      "rick_workflow_inspect",
+		"arguments": map[string]any{"include": []string{"list"}},
 	})
 	data, _ = json.Marshal(listResp.Result)
 	var listResult toolsCallResult
@@ -556,8 +563,11 @@ func TestIntegrationSeedAndQueryProjections(t *testing.T) {
 		t.Fatalf("list workflows error: %s", listResult.Content[0].Text)
 	}
 
-	var workflows listWorkflowsResult
-	_ = json.Unmarshal([]byte(listResult.Content[0].Text), &workflows)
+	var listInspect struct {
+		List listWorkflowsResult `json:"list"`
+	}
+	_ = json.Unmarshal([]byte(listResult.Content[0].Text), &listInspect)
+	workflows := listInspect.List
 
 	found := false
 	for _, wf := range workflows.Workflows {
@@ -570,8 +580,8 @@ func TestIntegrationSeedAndQueryProjections(t *testing.T) {
 
 	// List events for the workflow.
 	eventsResp := rpcPost(t, baseURL, "tools/call", map[string]any{
-		"name":      "rick_list_events",
-		"arguments": map[string]any{"workflow_id": run.WorkflowID},
+		"name":      "rick_workflow_inspect",
+		"arguments": map[string]any{"workflow_id": run.WorkflowID, "include": []string{"events"}},
 	})
 	data, _ = json.Marshal(eventsResp.Result)
 	var eventsResult toolsCallResult
@@ -580,8 +590,11 @@ func TestIntegrationSeedAndQueryProjections(t *testing.T) {
 		t.Fatalf("list events error: %s", eventsResult.Content[0].Text)
 	}
 
-	var events listEventsResult
-	_ = json.Unmarshal([]byte(eventsResult.Content[0].Text), &events)
+	var eventsInspect struct {
+		Events listEventsResult `json:"events"`
+	}
+	_ = json.Unmarshal([]byte(eventsResult.Content[0].Text), &eventsInspect)
+	events := eventsInspect.Events
 	if events.Count < 1 {
 		t.Errorf("expected at least 1 event, got %d", events.Count)
 	}

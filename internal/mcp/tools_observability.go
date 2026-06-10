@@ -20,57 +20,10 @@ var safeRepoRe = regexp.MustCompile(`^[a-zA-Z0-9_.\-]+/[a-zA-Z0-9_.\-]+$`)
 
 func (s *Server) registerObservabilityTools() {
 
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_search_workflows",
-			Description: "Find workflows by business key (ticket, source, repo). Uses the event_tags SQLite table for O(1) lookup.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"ticket": map[string]any{
-						"type":        "string",
-						"description": "Jira ticket key.",
-					},
-					"source": map[string]any{
-						"type":        "string",
-						"description": "Source reference (e.g., gh:owner/repo#123).",
-					},
-					"repo": map[string]any{
-						"type":        "string",
-						"description": "Repository name.",
-					},
-					"status": map[string]any{
-						"type":        "string",
-						"enum":        []string{"running", "completed", "failed", "paused", "cancelled"},
-						"description": "Filter by workflow status.",
-					},
-				},
-			},
-		},
-		Handler: s.toolSearchWorkflows,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_retry_workflow",
-			Description: "Resume a failed or cancelled workflow. With from_phase set, the original workflow is re-dispatched at that phase — every upstream PersonaCompleted is preserved, so only from_phase and its DAG-downstream re-run (no token re-bill for already-done work). Without from_phase, a brand-new workflow is started with the original prompt/dag/source/ticket.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The failed workflow's aggregate ID.",
-					},
-					"from_phase": map[string]any{
-						"type":        "string",
-						"description": "Handler name to restart at. Must be present in the workflow's DAG. When set, the original correlation is reused and upstream completions are preserved.",
-					},
-				},
-				"required": []string{"workflow_id"},
-			},
-		},
-		Handler: s.toolRetryWorkflow,
-	})
+	// rick_search_workflows is folded into rick_workflow_inspect's "list" panel
+	// (filter by ticket/source/repo/status) and rick_retry_workflow into
+	// rick_workflow_control's "retry" action; both handlers (toolSearchWorkflows,
+	// toolRetryWorkflow) remain below as the implementation the facades call.
 
 	s.register(Tool{
 		Definition: ToolDefinition{

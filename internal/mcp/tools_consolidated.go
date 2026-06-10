@@ -16,21 +16,21 @@ func (s *Server) registerConsolidatedTools() {
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_workflow_inspect",
-			Description: "Inspect a workflow's observability data. Pass an include list to fetch exactly the panels you need in one call: status, timeline, tokens, verdicts, output, persona_output. Defaults to status when include is omitted.",
+			Description: "Read workflow data. With workflow_id: per-workflow panels (status, timeline, tokens, verdicts, output, persona_output). Without workflow_id: global panels (list = workflow runs + DAG definitions, filterable by ticket/source/repo/status; events = event stream; dead_letters = failed deliveries). Pass an include list to pick panels; defaults to status when a workflow_id is given, otherwise list.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"workflow_id": map[string]any{
 						"type":        "string",
-						"description": "The workflow aggregate ID.",
+						"description": "The workflow aggregate ID. Required for per-workflow panels; omit for global panels (list/events/dead_letters).",
 					},
 					"include": map[string]any{
 						"type": "array",
 						"items": map[string]any{
 							"type": "string",
-							"enum": []string{"status", "timeline", "tokens", "verdicts", "output", "persona_output"},
+							"enum": []string{"status", "timeline", "tokens", "verdicts", "output", "persona_output", "list", "events", "dead_letters"},
 						},
-						"description": "Which panels to include. 'status' is the default if omitted. 'output' returns all persona outputs; 'persona_output' returns one persona (requires the persona arg).",
+						"description": "Which panels to include. Per-workflow: status (default w/ id), timeline, tokens, verdicts, output (all persona outputs), persona_output (one persona, requires persona). Global: list (default w/o id), events, dead_letters.",
 					},
 					"persona": map[string]any{
 						"type":        "string",
@@ -46,8 +46,16 @@ func (s *Server) registerConsolidatedTools() {
 						"items":       map[string]any{"type": "string"},
 						"description": "Filter 'output' to specific phases (optional).",
 					},
+					"ticket": map[string]any{"type": "string", "description": "list panel: filter runs by Jira ticket key."},
+					"source": map[string]any{"type": "string", "description": "list panel: filter runs by source reference (e.g. gh:owner/repo#123)."},
+					"repo":   map[string]any{"type": "string", "description": "list panel: filter runs by repository name."},
+					"status": map[string]any{
+						"type":        "string",
+						"enum":        []string{"running", "completed", "failed", "paused", "cancelled"},
+						"description": "list panel: filter runs by status (only applies when a ticket/source/repo filter is also set).",
+					},
+					"limit": map[string]any{"type": "integer", "description": "events panel: max events to return.", "default": 50},
 				},
-				"required": []string{"workflow_id"},
 			},
 		},
 		Handler: s.toolWorkflowInspect,
@@ -56,7 +64,7 @@ func (s *Server) registerConsolidatedTools() {
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_workflow_control",
-			Description: "Control a workflow's execution. Set action to pause, resume, or cancel. In-flight personas always complete; the action only governs new dispatches.",
+			Description: "Act on a workflow. action=pause|resume|cancel governs dispatch (in-flight personas always complete). action=retry restarts a failed/cancelled workflow (from_phase to re-dispatch at a phase, preserving upstream completions). action=inject_guidance feeds operator guidance to the next persona (content required; target/auto_resume optional). action=approve_hint triggers full persona execution (persona required; optional guidance). action=reject_hint skips or fails a pending hint (persona required; reject_action=skip|fail).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -66,13 +74,43 @@ func (s *Server) registerConsolidatedTools() {
 					},
 					"action": map[string]any{
 						"type":        "string",
-						"enum":        []string{"pause", "resume", "cancel"},
-						"description": "pause: block new dispatches; resume: replay blocked dispatches; cancel: stop dispatching new personas.",
+						"enum":        []string{"pause", "resume", "cancel", "retry", "inject_guidance", "approve_hint", "reject_hint"},
+						"description": "The control verb. See the tool description for per-action arguments.",
 					},
 					"reason": map[string]any{
 						"type":        "string",
-						"description": "Reason for the action.",
+						"description": "pause/resume/cancel/reject_hint: reason for the action.",
 						"default":     "operator requested",
+					},
+					"from_phase": map[string]any{
+						"type":        "string",
+						"description": "retry only: handler name to re-dispatch at (must be in the DAG). Omit to start a fresh run with the original parameters.",
+					},
+					"content": map[string]any{
+						"type":        "string",
+						"description": "inject_guidance only: guidance text for the next persona.",
+					},
+					"target": map[string]any{
+						"type":        "string",
+						"description": "inject_guidance only: target persona (defaults to next in chain).",
+					},
+					"auto_resume": map[string]any{
+						"type":        "boolean",
+						"description": "inject_guidance only: resume the workflow after injecting (default true).",
+						"default":     true,
+					},
+					"persona": map[string]any{
+						"type":        "string",
+						"description": "approve_hint/reject_hint only: the persona whose hint to act on.",
+					},
+					"guidance": map[string]any{
+						"type":        "string",
+						"description": "approve_hint only: optional guidance to adjust the persona before full execution.",
+					},
+					"reject_action": map[string]any{
+						"type":        "string",
+						"enum":        []string{"skip", "fail"},
+						"description": "reject_hint only: skip (mark persona complete) or fail (fail the workflow). Defaults to skip.",
 					},
 				},
 				"required": []string{"workflow_id", "action"},
@@ -114,34 +152,33 @@ func (s *Server) registerConsolidatedTools() {
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_job_inspect",
-			Description: "Inspect an async job spawned by rick_consult or rick_run. Returns status and output by default; pass include to narrow to one. Output supports incremental reads via offset.",
+			Description: "Inspect async jobs spawned by rick_consult or rick_run. With job_id: status and output for that job (output supports incremental reads via offset). Without job_id: include=list returns all tracked jobs, include=backends returns the AI backends rick knows about and which are active. Defaults to status+output when a job_id is given, otherwise list.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"job_id": map[string]any{
 						"type":        "string",
-						"description": "The job ID returned by rick_consult or rick_run.",
+						"description": "The job ID returned by rick_consult or rick_run. Omit for the global list/backends panels.",
 					},
 					"include": map[string]any{
 						"type": "array",
 						"items": map[string]any{
 							"type": "string",
-							"enum": []string{"status", "output"},
+							"enum": []string{"status", "output", "list", "backends"},
 						},
-						"description": "Which panels to include. Defaults to both status and output.",
+						"description": "Which panels to include. With job_id: status, output (default both). Without job_id: list (all jobs, default), backends (known/active AI backends).",
 					},
 					"offset": map[string]any{
 						"type":        "integer",
 						"default":     0,
-						"description": "Character offset to start reading output from (incremental reads).",
+						"description": "output only: character offset to start reading from (incremental reads).",
 					},
 					"max_length": map[string]any{
 						"type":        "integer",
 						"default":     50000,
-						"description": "Maximum characters of output to return.",
+						"description": "output only: maximum characters to return.",
 					},
 				},
-				"required": []string{"job_id"},
 			},
 		},
 		Handler: s.toolJobInspect,
@@ -150,18 +187,19 @@ func (s *Server) registerConsolidatedTools() {
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_wave_manager",
-			Description: "Manage parallel development waves for a Jira epic or GitHub parent/project. Set action to plan (compute waves via topological sort), launch (start workflows for a wave), status (monitor progress), or cleanup (remove wave workspaces). All actions accept the same source shape: epic shorthand, or source={type,parent|project|epic,...}. Action-specific args: launch takes wave/dag/tickets/dry_run; status takes wave; cleanup takes wave/force.",
+			Description: "Manage parallel development waves for a Jira epic or GitHub parent/project. action=plan computes waves via topological sort; launch starts a wave's workflows; status monitors progress; cleanup removes wave workspaces; pr_links returns cross-referenced PRs per child (issue for a single ref, or a wave source). All actions accept the same source shape: epic shorthand, or source={type,parent|project|epic,...}. Action-specific args: launch takes wave/dag/tickets/dry_run; status takes wave; cleanup takes wave/force; pr_links takes issue/wave.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"action": map[string]any{
 						"type":        "string",
-						"enum":        []string{"plan", "launch", "status", "cleanup"},
-						"description": "plan: compute waves; launch: start a wave's workflows; status: monitor; cleanup: remove workspaces.",
+						"enum":        []string{"plan", "launch", "status", "cleanup", "pr_links"},
+						"description": "plan: compute waves; launch: start a wave's workflows; status: monitor; cleanup: remove workspaces; pr_links: cross-referenced PRs per child.",
 					},
 					"epic":   map[string]any{"type": "string", "description": "Jira epic key (back-compat shorthand for source.type='jira')."},
 					"source": waveSourceSchema(),
-					"wave":   map[string]any{"type": "integer", "description": "Wave number. For launch: omit for next ready wave. For status/cleanup: optional."},
+					"issue":  map[string]any{"type": "string", "description": "pr_links only: single GitHub issue ref 'owner/repo#N'. Mutually exclusive with source/epic."},
+					"wave":   map[string]any{"type": "integer", "description": "Wave number. For launch: omit for next ready wave. For status/cleanup/pr_links: optional."},
 					"dag":    map[string]any{"type": "string", "description": "launch only: workflow DAG for each child (defaults by source kind)."},
 					"tickets": map[string]any{
 						"type":        "array",
@@ -176,6 +214,54 @@ func (s *Server) registerConsolidatedTools() {
 		},
 		Handler: s.toolWaveManager,
 	})
+
+	s.register(Tool{
+		Definition: ToolDefinition{
+			Name:        "rick_workspace",
+			Description: "Manage isolated local repository clones under $RICK_REPOS_PATH. action=setup creates a clone and checks out a branch (repo + ticket required; optional isolate/suffix/base) — ALWAYS use before code-writing jobs. action=cleanup removes a workspace (path OR correlation_id). action=list shows every workspace with branch + dirty status. Deletion is guarded to *-rick-ws-* paths under $RICK_REPOS_PATH.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action": map[string]any{
+						"type":        "string",
+						"enum":        []string{"setup", "cleanup", "list"},
+						"description": "setup: create an isolated clone; cleanup: remove a workspace; list: show all workspaces.",
+					},
+					"repo":           map[string]any{"type": "string", "description": "setup: repository name under $RICK_REPOS_PATH (e.g. 'backend')."},
+					"ticket":         map[string]any{"type": "string", "description": "setup: Jira ticket ID for the branch name (e.g. 'PROJ-12345')."},
+					"isolate":        map[string]any{"type": "boolean", "default": true, "description": "setup: create isolated local clone (ALWAYS true for code-writing jobs)."},
+					"suffix":         map[string]any{"type": "string", "description": "setup: optional suffix for parallel tasks on the same repo."},
+					"base":           map[string]any{"type": "string", "default": "main", "description": "setup: base branch to create from (branch created from origin/<base>)."},
+					"path":           map[string]any{"type": "string", "description": "cleanup: absolute workspace path. Mutually exclusive with correlation_id."},
+					"correlation_id": map[string]any{"type": "string", "description": "cleanup: workflow correlation ID; resolves the path from the WorkspaceReady event. Mutually exclusive with path."},
+				},
+				"required": []string{"action"},
+			},
+		},
+		Handler: s.toolWorkspace,
+	})
+
+	s.register(Tool{
+		Definition: ToolDefinition{
+			Name:        "rick_confluence",
+			Description: "Read or write a Confluence page. action=read returns title, body, version, space key for a page (page_id required, accepts a numeric ID or full URL). action=write replaces the content under a heading (page_id + content + after_heading required; content is markdown converted to storage format). Requires CONFLUENCE_URL/EMAIL/TOKEN.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action": map[string]any{
+						"type":        "string",
+						"enum":        []string{"read", "write"},
+						"description": "read: fetch a page; write: replace the section under a heading.",
+					},
+					"page_id":       map[string]any{"type": "string", "description": "Confluence page ID (numeric) or full page URL."},
+					"content":       map[string]any{"type": "string", "description": "write only: content to write (markdown or HTML)."},
+					"after_heading": map[string]any{"type": "string", "description": "write only: insert after this heading (e.g. 'Plan Tecnico')."},
+				},
+				"required": []string{"action", "page_id"},
+			},
+		},
+		Handler: s.toolConfluence,
+	})
 }
 
 // --- rick_workflow_inspect ---
@@ -184,6 +270,10 @@ type workflowInspectArgs struct {
 	WorkflowID string   `json:"workflow_id"`
 	Include    []string `json:"include"`
 	Persona    string   `json:"persona"`
+	Ticket     string   `json:"ticket"`
+	Source     string   `json:"source"`
+	Repo       string   `json:"repo"`
+	Status     string   `json:"status"`
 }
 
 func (s *Server) toolWorkflowInspect(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -191,16 +281,20 @@ func (s *Server) toolWorkflowInspect(ctx context.Context, raw json.RawMessage) (
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
-	if args.WorkflowID == "" {
-		return nil, fmt.Errorf("workflow_id is required")
-	}
 
 	include := args.Include
 	if len(include) == 0 {
-		include = []string{"status"}
+		if args.WorkflowID != "" {
+			include = []string{"status"}
+		} else {
+			include = []string{"list"}
+		}
 	}
 
-	result := map[string]any{"workflow_id": args.WorkflowID}
+	result := map[string]any{}
+	if args.WorkflowID != "" {
+		result["workflow_id"] = args.WorkflowID
+	}
 	errs := map[string]string{}
 
 	// run dispatches one sub-handler and records its output or error under
@@ -216,24 +310,51 @@ func (s *Server) toolWorkflowInspect(ctx context.Context, raw json.RawMessage) (
 		result[panel] = out
 	}
 
+	// requireID guards the per-workflow panels: without a workflow_id they have
+	// nothing to read, so record a panel error rather than dispatching.
+	requireID := func(panel string, fn func(context.Context, json.RawMessage) (any, error)) {
+		if args.WorkflowID == "" {
+			errs[panel] = fmt.Sprintf("workflow_id is required for panel %q", panel)
+			return
+		}
+		run(panel, fn)
+	}
+
 	for _, inc := range include {
 		switch inc {
 		case "status":
-			run("status", s.toolWorkflowStatus)
+			requireID("status", s.toolWorkflowStatus)
 		case "timeline":
-			run("timeline", s.toolPhaseTimeline)
+			requireID("timeline", s.toolPhaseTimeline)
 		case "tokens":
-			run("tokens", s.toolTokenUsage)
+			requireID("tokens", s.toolTokenUsage)
 		case "verdicts":
-			run("verdicts", s.toolWorkflowVerdicts)
+			requireID("verdicts", s.toolWorkflowVerdicts)
 		case "output":
-			run("output", s.toolWorkflowOutput)
+			requireID("output", s.toolWorkflowOutput)
 		case "persona_output":
+			if args.WorkflowID == "" {
+				errs["persona_output"] = "workflow_id is required for panel \"persona_output\""
+				continue
+			}
 			if args.Persona == "" {
 				errs["persona_output"] = "persona is required when include contains 'persona_output'"
 				continue
 			}
 			run("persona_output", s.toolPersonaOutput)
+		case "list":
+			// "list" absorbs the former rick_search_workflows: when any business
+			// key filter is present, route to the tag-index search; otherwise
+			// return the full run + DAG-definition listing.
+			if args.Ticket != "" || args.Source != "" || args.Repo != "" || args.Status != "" {
+				run("list", s.toolSearchWorkflows)
+			} else {
+				run("list", s.toolListWorkflows)
+			}
+		case "events":
+			run("events", s.toolListEvents)
+		case "dead_letters":
+			run("dead_letters", s.toolListDeadLetters)
 		default:
 			errs[inc] = fmt.Sprintf("unknown include panel: %q", inc)
 		}
@@ -265,9 +386,41 @@ func (s *Server) toolWorkflowControl(ctx context.Context, raw json.RawMessage) (
 		return s.toolResumeWorkflow(ctx, raw)
 	case "cancel":
 		return s.toolCancelWorkflow(ctx, raw)
+	case "retry":
+		return s.toolRetryWorkflow(ctx, raw)
+	case "inject_guidance":
+		return s.toolInjectGuidance(ctx, raw)
+	case "approve_hint":
+		return s.toolApproveHint(ctx, raw)
+	case "reject_hint":
+		// toolRejectHint reads its skip/fail decision from an "action" key, which
+		// collides with this facade's discriminator. Remap the caller-facing
+		// "reject_action" onto the "action" the handler expects.
+		return s.toolRejectHint(ctx, remapRejectAction(raw))
 	default:
-		return nil, fmt.Errorf("invalid action %q: must be pause, resume, or cancel", args.Action)
+		return nil, fmt.Errorf("invalid action %q: must be pause, resume, cancel, retry, inject_guidance, approve_hint, or reject_hint", args.Action)
 	}
+}
+
+// remapRejectAction rewrites {action:"reject_hint", reject_action:"skip"|"fail"}
+// into the {action:"skip"|"fail"} shape toolRejectHint unmarshals. On any parse
+// failure it falls back to the original bytes so the handler surfaces the error.
+func remapRejectAction(raw json.RawMessage) json.RawMessage {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw
+	}
+	ra, _ := m["reject_action"].(string)
+	if ra == "" {
+		ra = "skip"
+	}
+	m["action"] = ra
+	delete(m, "reject_action")
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // --- rick_diff_viewer ---
@@ -305,16 +458,20 @@ func (s *Server) toolJobInspect(ctx context.Context, raw json.RawMessage) (any, 
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
-	if args.JobID == "" {
-		return nil, fmt.Errorf("job_id is required")
-	}
 
 	include := args.Include
 	if len(include) == 0 {
-		include = []string{"status", "output"}
+		if args.JobID != "" {
+			include = []string{"status", "output"}
+		} else {
+			include = []string{"list"}
+		}
 	}
 
-	result := map[string]any{"job_id": args.JobID}
+	result := map[string]any{}
+	if args.JobID != "" {
+		result["job_id"] = args.JobID
+	}
 	errs := map[string]string{}
 
 	run := func(panel string, fn func(context.Context, json.RawMessage) (any, error)) {
@@ -326,12 +483,24 @@ func (s *Server) toolJobInspect(ctx context.Context, raw json.RawMessage) (any, 
 		result[panel] = out
 	}
 
+	requireJob := func(panel string, fn func(context.Context, json.RawMessage) (any, error)) {
+		if args.JobID == "" {
+			errs[panel] = fmt.Sprintf("job_id is required for panel %q", panel)
+			return
+		}
+		run(panel, fn)
+	}
+
 	for _, inc := range include {
 		switch inc {
 		case "status":
-			run("status", s.toolJobStatus)
+			requireJob("status", s.toolJobStatus)
 		case "output":
-			run("output", s.toolJobOutput)
+			requireJob("output", s.toolJobOutput)
+		case "list":
+			run("list", s.toolJobsList)
+		case "backends":
+			run("backends", s.toolBackends)
 		default:
 			errs[inc] = fmt.Sprintf("unknown include panel: %q", inc)
 		}
@@ -366,7 +535,55 @@ func (s *Server) toolWaveManager(ctx context.Context, raw json.RawMessage) (any,
 		return s.toolWaveStatus(ctx, raw)
 	case "cleanup":
 		return s.toolWaveCleanup(ctx, raw)
+	case "pr_links":
+		return s.toolGitHubPRLinks(ctx, raw)
 	default:
-		return nil, fmt.Errorf("invalid action %q: must be plan, launch, status, or cleanup", args.Action)
+		return nil, fmt.Errorf("invalid action %q: must be plan, launch, status, cleanup, or pr_links", args.Action)
+	}
+}
+
+// --- rick_workspace ---
+
+type workspaceArgs struct {
+	Action string `json:"action"`
+}
+
+func (s *Server) toolWorkspace(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args workspaceArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	switch args.Action {
+	case "setup":
+		return s.toolWorkspaceSetup(ctx, raw)
+	case "cleanup":
+		return s.toolWorkspaceCleanup(ctx, raw)
+	case "list":
+		return s.toolWorkspaceList(ctx, raw)
+	default:
+		return nil, fmt.Errorf("invalid action %q: must be setup, cleanup, or list", args.Action)
+	}
+}
+
+// --- rick_confluence ---
+
+type confluenceArgs struct {
+	Action string `json:"action"`
+}
+
+func (s *Server) toolConfluence(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args confluenceArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+
+	switch args.Action {
+	case "read":
+		return s.toolConfluenceRead(ctx, raw)
+	case "write":
+		return s.toolConfluenceWrite(ctx, raw)
+	default:
+		return nil, fmt.Errorf("invalid action %q: must be read or write", args.Action)
 	}
 }

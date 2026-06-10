@@ -7,52 +7,11 @@ import (
 	"strings"
 )
 
-func (s *Server) registerConfluenceTools() {
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_confluence_read",
-			Description: "Read a Confluence page by ID or URL. Returns title, body content, version, and space key.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"page_id": map[string]any{
-						"type":        "string",
-						"description": "Confluence page ID (numeric) or full page URL.",
-					},
-				},
-				"required": []string{"page_id"},
-			},
-		},
-		Handler: s.toolConfluenceRead,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_confluence_write",
-			Description: "Update a section of a Confluence page. Finds the heading and replaces content under it. Content is provided as markdown and converted to Confluence storage format.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"page_id": map[string]any{
-						"type":        "string",
-						"description": "Confluence page ID (numeric) or full page URL.",
-					},
-					"content": map[string]any{
-						"type":        "string",
-						"description": "Content to write (markdown or HTML).",
-					},
-					"after_heading": map[string]any{
-						"type":        "string",
-						"description": "Insert after this heading (e.g., 'Plan Tecnico').",
-					},
-					},
-				"required": []string{"page_id", "content", "after_heading"},
-			},
-		},
-		Handler: s.toolConfluenceWrite,
-	})
-}
+// registerConfluenceTools is intentionally empty: the Confluence verbs are
+// exposed through the rick_confluence facade (tools_consolidated.go), which
+// dispatches to the toolConfluence{Read,Write} handlers retained below. The
+// group stub is kept so registerBuiltinTools' call site stays uniform.
+func (s *Server) registerConfluenceTools() {}
 
 // --- Handlers ---
 

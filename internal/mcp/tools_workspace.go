@@ -13,77 +13,11 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/workspace"
 )
 
-func (s *Server) registerWorkspaceTools() {
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_workspace_setup",
-			Description: "Create an isolated local clone of a repository under $RICK_REPOS_PATH. Checks out a branch from origin/<base>. Returns the workspace path. ALWAYS use this before running code-writing jobs to prevent collisions.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"repo": map[string]any{
-						"type":        "string",
-						"description": "Repository name under $RICK_REPOS_PATH (e.g., 'backend', 'frontend').",
-					},
-					"ticket": map[string]any{
-						"type":        "string",
-						"description": "Jira ticket ID for the branch name (e.g., 'PROJ-12345').",
-					},
-					"isolate": map[string]any{
-						"type":        "boolean",
-						"default":     true,
-						"description": "Create isolated local clone (ALWAYS true for code-writing jobs).",
-					},
-					"suffix": map[string]any{
-						"type":        "string",
-						"description": "Optional suffix for parallel tasks on same repo (e.g., 'task1').",
-					},
-					"base": map[string]any{
-						"type":        "string",
-						"default":     "main",
-						"description": "Base branch to create from (branch created from origin/<base>).",
-					},
-				},
-				"required": []string{"repo", "ticket"},
-			},
-		},
-		Handler: s.toolWorkspaceSetup,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_workspace_cleanup",
-			Description: "Remove an isolated workspace directory. Accepts either an explicit path OR a correlation_id (workflow ID) — when correlation_id is given, the workspace path is resolved from the workflow's WorkspaceReady event. Safety: only deletes paths under $RICK_REPOS_PATH matching the *-rick-ws-* pattern.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"path": map[string]any{
-						"type":        "string",
-						"description": "Absolute path to the isolated workspace. Mutually exclusive with correlation_id.",
-					},
-					"correlation_id": map[string]any{
-						"type":        "string",
-						"description": "Workflow correlation ID. Resolves the workspace path from the WorkspaceReady event for that workflow. Mutually exclusive with path.",
-					},
-				},
-			},
-		},
-		Handler: s.toolWorkspaceCleanup,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_workspace_list",
-			Description: "List all isolated workspaces under $RICK_REPOS_PATH. Shows git branch and working tree status for each.",
-			InputSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
-			},
-		},
-		Handler: s.toolWorkspaceList,
-	})
-}
+// registerWorkspaceTools is intentionally empty: the workspace verbs are exposed
+// through the rick_workspace facade (tools_consolidated.go), which dispatches to
+// the toolWorkspace{Setup,Cleanup,List} handlers retained below. The group stub
+// is kept so registerBuiltinTools' call site stays uniform.
+func (s *Server) registerWorkspaceTools() {}
 
 // --- Handlers ---
 

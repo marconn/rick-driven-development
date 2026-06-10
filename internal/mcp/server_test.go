@@ -262,27 +262,50 @@ func TestToolsList(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expectedTools := map[string]bool{
-		"rick_run_workflow":      false,
-		"rick_workflow_inspect":  false,
-		"rick_workflow_control":  false,
-		"rick_list_workflows":    false,
-		"rick_list_events":       false,
-		"rick_diff_viewer":       false,
-		"rick_job_inspect":       false,
-		"rick_wave_manager":      false,
-		"rick_list_dead_letters": false,
-		"rick_inject_guidance":   false,
+	// The MCP surface is deliberately capped at a small set of consolidated
+	// facades. This is the regrowth guard: any new top-level tool must be a
+	// conscious decision that updates this set, not a silent addition that
+	// re-saturates the LLM's tool-selection context.
+	wantTools := []string{
+		// Workflow
+		"rick_run_workflow", "rick_workflow_inspect", "rick_workflow_control",
+		// Jobs
+		"rick_consult", "rick_run", "rick_job_inspect", "rick_job_cancel",
+		// Workspace / wave / diff
+		"rick_workspace", "rick_wave_manager", "rick_diff_viewer",
+		// Jira
+		"rick_jira_read", "rick_jira_write", "rick_jira_search",
+		"rick_jira_create", "rick_jira_manage_links",
+		// Confluence / observability
+		"rick_confluence", "rick_create_pr", "rick_project_sync",
 	}
 
+	got := make(map[string]bool, len(result.Tools))
 	for _, tool := range result.Tools {
-		if _, ok := expectedTools[tool.Name]; ok {
-			expectedTools[tool.Name] = true
+		got[tool.Name] = true
+	}
+
+	if len(result.Tools) != len(wantTools) {
+		t.Errorf("tool surface drift: got %d tools, want %d", len(result.Tools), len(wantTools))
+	}
+	for _, name := range wantTools {
+		if !got[name] {
+			t.Errorf("expected tool %s not found in tools/list", name)
 		}
 	}
-	for name, found := range expectedTools {
-		if !found {
-			t.Errorf("expected tool %s not found in tools/list", name)
+
+	// Tools folded into facades must NOT be registered standalone anymore.
+	removed := []string{
+		"rick_list_workflows", "rick_list_events", "rick_list_dead_letters",
+		"rick_inject_guidance", "rick_approve_hint", "rick_reject_hint",
+		"rick_plan_btu", "rick_search_workflows", "rick_retry_workflow",
+		"rick_jobs", "rick_backends", "rick_github_pr_links",
+		"rick_workspace_setup", "rick_workspace_cleanup", "rick_workspace_list",
+		"rick_confluence_read", "rick_confluence_write",
+	}
+	for _, name := range removed {
+		if got[name] {
+			t.Errorf("tool %s should be folded into a facade, not registered standalone", name)
 		}
 	}
 }
@@ -700,7 +723,8 @@ func TestToolListWorkflows(t *testing.T) {
 
 	s := NewServer(deps, testLogger())
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name: "rick_list_workflows",
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"include":["list"]}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -711,10 +735,13 @@ func TestToolListWorkflows(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var list listWorkflowsResult
-	if err := json.Unmarshal([]byte(result.Content[0].Text), &list); err != nil {
+	var inspect struct {
+		List listWorkflowsResult `json:"list"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &inspect); err != nil {
 		t.Fatal(err)
 	}
+	list := inspect.List
 	if len(list.Workflows) != 1 {
 		t.Fatalf("expected 1 workflow, got %d", len(list.Workflows))
 	}
@@ -742,8 +769,8 @@ func TestToolListEvents(t *testing.T) {
 
 	// List events for workflow
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_list_events",
-		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s"}`, aggregateID)),
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s","include":["events"]}`, aggregateID)),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -754,12 +781,14 @@ func TestToolListEvents(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var list listEventsResult
-	if err := json.Unmarshal([]byte(result.Content[0].Text), &list); err != nil {
+	var inspect struct {
+		Events listEventsResult `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &inspect); err != nil {
 		t.Fatal(err)
 	}
-	if list.Count != 2 {
-		t.Errorf("expected 2 events, got %d", list.Count)
+	if inspect.Events.Count != 2 {
+		t.Errorf("expected 2 events, got %d", inspect.Events.Count)
 	}
 }
 
@@ -777,8 +806,8 @@ func TestToolListEventsGlobal(t *testing.T) {
 	}
 
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_list_events",
-		Arguments: json.RawMessage(`{"limit":10}`),
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"include":["events"],"limit":10}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -789,10 +818,12 @@ func TestToolListEventsGlobal(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var list listEventsResult
-	_ = json.Unmarshal([]byte(result.Content[0].Text), &list)
-	if list.Count != 2 {
-		t.Errorf("expected 2 events from global stream, got %d", list.Count)
+	var inspect struct {
+		Events listEventsResult `json:"events"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	if inspect.Events.Count != 2 {
+		t.Errorf("expected 2 events from global stream, got %d", inspect.Events.Count)
 	}
 }
 
@@ -976,7 +1007,8 @@ func TestToolListDeadLetters(t *testing.T) {
 
 	s := NewServer(deps, testLogger())
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name: "rick_list_dead_letters",
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"include":["dead_letters"]}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -987,8 +1019,11 @@ func TestToolListDeadLetters(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var dls listDeadLettersResult
-	_ = json.Unmarshal([]byte(result.Content[0].Text), &dls)
+	var inspect struct {
+		DeadLetters listDeadLettersResult `json:"dead_letters"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	dls := inspect.DeadLetters
 	if dls.Count != 1 {
 		t.Fatalf("expected 1 dead letter, got %d", dls.Count)
 	}
@@ -1003,7 +1038,8 @@ func TestToolListDeadLettersEmpty(t *testing.T) {
 	s := NewServer(deps, testLogger())
 
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name: "rick_list_dead_letters",
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"include":["dead_letters"]}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -1014,10 +1050,12 @@ func TestToolListDeadLettersEmpty(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var dls listDeadLettersResult
-	_ = json.Unmarshal([]byte(result.Content[0].Text), &dls)
-	if dls.Count != 0 {
-		t.Errorf("expected 0 dead letters, got %d", dls.Count)
+	var inspect struct {
+		DeadLetters listDeadLettersResult `json:"dead_letters"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	if inspect.DeadLetters.Count != 0 {
+		t.Errorf("expected 0 dead letters, got %d", inspect.DeadLetters.Count)
 	}
 }
 
@@ -1216,8 +1254,8 @@ func TestToolInjectGuidance(t *testing.T) {
 	_ = deps.Store.Append(context.Background(), aggregateID, 0, []event.Envelope{reqEvt, startEvt, pauseEvt})
 
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_inject_guidance",
-		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s","content":"use sql.NullString","auto_resume":true}`, aggregateID)),
+		Name:      "rick_workflow_control",
+		Arguments: json.RawMessage(fmt.Sprintf(`{"action":"inject_guidance","workflow_id":"%s","content":"use sql.NullString","auto_resume":true}`, aggregateID)),
 	}))
 
 	resp := parseResponse(t, lines[0])

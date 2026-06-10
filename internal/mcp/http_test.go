@@ -132,7 +132,8 @@ func TestHTTPAutoInitialize(t *testing.T) {
 
 	// HTTP clients skip initialize handshake — tool calls should work immediately.
 	params, _ := json.Marshal(toolsCallParams{
-		Name: "rick_list_workflows",
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"include":["list"]}`),
 	})
 	w := postMCP(t, h, jsonRPCRequest{
 		JSONRPC: jsonRPCVersion,

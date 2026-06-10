@@ -110,6 +110,29 @@ func (c *mcpClient) callTool(ctx context.Context, name string, args map[string]a
 	return text, toolResult.IsError, nil
 }
 
+// inspectPanel calls rick_workflow_inspect for a single panel and returns that
+// panel's JSON as text, mirroring what the old standalone read tools returned
+// directly. Extra args (workflow_id, limit, filters) are merged in. This keeps
+// E2E assertions that unmarshal into the original result structs unchanged.
+func (c *mcpClient) inspectPanel(ctx context.Context, panel string, extra map[string]any) (string, bool, error) {
+	args := map[string]any{"include": []string{panel}}
+	for k, v := range extra {
+		args[k] = v
+	}
+	text, isErr, err := c.callTool(ctx, "rick_workflow_inspect", args)
+	if err != nil || isErr {
+		return text, isErr, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &fields); err != nil {
+		return "", false, fmt.Errorf("parse inspect result: %w", err)
+	}
+	if payload, ok := fields[panel]; ok {
+		return string(payload), false, nil
+	}
+	return "", false, fmt.Errorf("inspect panel %q not returned: %s", panel, text)
+}
+
 func (c *mcpClient) healthCheck(ctx context.Context) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/mcp", nil)
 	if err != nil {
@@ -271,7 +294,7 @@ func TestE2EAgentFullWorkflowJourney(t *testing.T) {
 	client := newMCPClient(baseURL)
 
 	// Step 1: "What workflows are running?" → list_workflows
-	text, isErr, err := client.callTool(ctx, "rick_list_workflows", nil)
+	text, isErr, err := client.inspectPanel(ctx, "list", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +372,7 @@ func TestE2EAgentFullWorkflowJourney(t *testing.T) {
 	}
 
 	// Step 6: "Show me the events" → list_events
-	text, isErr, err = client.callTool(ctx, "rick_list_events", map[string]any{
+	text, isErr, err = client.inspectPanel(ctx, "events", map[string]any{
 		"workflow_id": wfID,
 		"limit":       50,
 	})
@@ -384,7 +407,8 @@ func TestE2EAgentFullWorkflowJourney(t *testing.T) {
 	}
 
 	// Step 8: "Tell the developer to use PostgreSQL" → inject_guidance
-	text, isErr, err = client.callTool(ctx, "rick_inject_guidance", map[string]any{
+	text, isErr, err = client.callTool(ctx, "rick_workflow_control", map[string]any{
+		"action":      "inject_guidance",
 		"workflow_id": wfID,
 		"content":     "Use PostgreSQL instead of SQLite for the data layer",
 		"target":      "developer",
@@ -421,7 +445,7 @@ func TestE2EAgentFullWorkflowJourney(t *testing.T) {
 	}
 
 	// Step 10: "Any dead letters?" → list_dead_letters
-	text, isErr, err = client.callTool(ctx, "rick_list_dead_letters", nil)
+	text, isErr, err = client.inspectPanel(ctx, "dead_letters", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +454,7 @@ func TestE2EAgentFullWorkflowJourney(t *testing.T) {
 	}
 
 	// Step 11: Verify workflow count increased.
-	text, _, _ = client.callTool(ctx, "rick_list_workflows", nil)
+	text, _, _ = client.inspectPanel(ctx, "list", nil)
 	_ = json.Unmarshal([]byte(text), &wfList)
 	if len(wfList.Workflows) <= initialCount {
 		t.Errorf("expected workflow count to increase from %d", initialCount)
@@ -482,12 +506,12 @@ func TestE2EAgentMultipleWorkflows(t *testing.T) {
 	}
 
 	// Verify all 3 are listed. Sync projections ensure consistency without sleep.
-	text, _, _ := client.callTool(ctx, "rick_list_workflows", nil)
+	text, _, _ := client.inspectPanel(ctx, "list", nil)
 	var wfList listWorkflowsResult
 	_ = json.Unmarshal([]byte(text), &wfList)
 
 	// Global events should contain at least 3 WorkflowRequested.
-	text, _, _ = client.callTool(ctx, "rick_list_events", map[string]any{"limit": 100})
+	text, _, _ = client.inspectPanel(ctx, "events", map[string]any{"limit": 100})
 	var events listEventsResult
 	_ = json.Unmarshal([]byte(text), &events)
 	if events.Count < 3 {
@@ -559,7 +583,8 @@ func TestE2EAgentErrorCases(t *testing.T) {
 	}
 
 	// Inject guidance with empty content.
-	_, isErr, err = client.callTool(ctx, "rick_inject_guidance", map[string]any{
+	_, isErr, err = client.callTool(ctx, "rick_workflow_control", map[string]any{
+		"action":      "inject_guidance",
 		"workflow_id": "nonexistent-workflow-id",
 		"content":     "",
 	})
@@ -747,7 +772,8 @@ func TestE2EHintApproveReject(t *testing.T) {
 	}
 
 	// 4. Approve the hint with guidance.
-	text, isErr, err = client.callTool(ctx, "rick_approve_hint", map[string]any{
+	text, isErr, err = client.callTool(ctx, "rick_workflow_control", map[string]any{
+		"action":      "approve_hint",
 		"workflow_id": wfID,
 		"persona":     "plan-architect",
 		"guidance":    "focus on backend components only",
@@ -835,11 +861,12 @@ func TestE2EHintRejectSkip(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Reject with skip.
-	text, isErr, err := client.callTool(ctx, "rick_reject_hint", map[string]any{
-		"workflow_id": wfID,
-		"persona":     "estimator",
-		"reason":      "not needed for this iteration",
-		"action":      "skip",
+	text, isErr, err := client.callTool(ctx, "rick_workflow_control", map[string]any{
+		"action":        "reject_hint",
+		"workflow_id":   wfID,
+		"persona":       "estimator",
+		"reason":        "not needed for this iteration",
+		"reject_action": "skip",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1007,7 +1034,7 @@ func TestE2EListWorkflowsImmediateConsistency(t *testing.T) {
 	_ = json.Unmarshal([]byte(text), &run)
 
 	// Immediately list workflows — NO sleep. The projection must be consistent.
-	text, isErr, err = client.callTool(ctx, "rick_list_workflows", nil)
+	text, isErr, err = client.inspectPanel(ctx, "list", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1036,7 +1063,7 @@ func TestE2EListWorkflowsImmediateConsistency(t *testing.T) {
 	}
 
 	// Also check list_events immediately — store must have the event.
-	text, _, err = client.callTool(ctx, "rick_list_events", map[string]any{
+	text, _, err = client.inspectPanel(ctx, "events", map[string]any{
 		"workflow_id": run.WorkflowID,
 	})
 	if err != nil {

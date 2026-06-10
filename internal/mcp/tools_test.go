@@ -622,8 +622,9 @@ func TestConfluenceTools_NoClientConfigured(t *testing.T) {
 		name string
 		args any
 	}{
-		{"rick_confluence_read", map[string]any{"page_id": "12345"}},
-		{"rick_confluence_write", map[string]any{
+		{"read", map[string]any{"action": "read", "page_id": "12345"}},
+		{"write", map[string]any{
+			"action":        "write",
 			"page_id":       "12345",
 			"content":       "# Test",
 			"after_heading": "Plan Tecnico",
@@ -632,7 +633,7 @@ func TestConfluenceTools_NoClientConfigured(t *testing.T) {
 
 	for _, tc := range confluenceTools {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := callTool(t, s, tc.name, tc.args)
+			_, err := callTool(t, s, "rick_confluence", tc.args)
 			if err == nil {
 				t.Fatal("expected error when Confluence client not configured")
 			}
@@ -673,7 +674,7 @@ func TestToolWorkspaceCleanup_MissingPath(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_workspace_cleanup", map[string]any{})
+	_, err := callTool(t, s, "rick_workspace", map[string]any{"action": "cleanup"})
 	if err == nil {
 		t.Fatal("expected error for missing path")
 	}
@@ -699,7 +700,7 @@ func TestToolConfluenceRead_MissingPageID(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_confluence_read", map[string]any{})
+	_, err := callTool(t, s, "rick_confluence", map[string]any{"action": "read"})
 	if err == nil {
 		t.Fatal("expected error for missing page_id")
 	}
@@ -733,12 +734,21 @@ func TestToolJobStatus_MissingJobID(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_job_inspect", map[string]any{})
-	if err == nil {
-		t.Fatal("expected error for missing job_id")
+	// Requesting a per-job panel (status) without a job_id is reported under
+	// result["errors"][panel], not as a Go error — the facade never fails the
+	// whole call for one bad panel. (Omitting include entirely defaults to the
+	// global "list" panel, which is valid.)
+	res, err := callTool(t, s, "rick_job_inspect", map[string]any{"include": []string{"status"}})
+	if err != nil {
+		t.Fatalf("inspect should not return a Go error, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "job_id is required") {
-		t.Errorf("expected 'job_id is required', got: %v", err)
+	resMap, ok := res.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", res)
+	}
+	errs, _ := resMap["errors"].(map[string]string)
+	if !strings.Contains(errs["status"], "job_id is required") {
+		t.Errorf("expected status panel 'job_id is required' error, got: %v", resMap["errors"])
 	}
 }
 
@@ -756,26 +766,39 @@ func TestToolJobsList_Empty(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	result, err := callTool(t, s, "rick_jobs", map[string]any{})
+	// The jobs list is now the rick_job_inspect "list" panel (no job_id), so the
+	// result is wrapped under the panel key.
+	result, err := callTool(t, s, "rick_job_inspect", map[string]any{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	jlr, ok := result.(jobsListResult)
-	if !ok {
-		t.Fatalf("unexpected type: %T", result)
+	b, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
-	if jlr.Count != 0 {
-		t.Errorf("expected 0 jobs, got %d", jlr.Count)
+	var wrapper struct {
+		List jobsListResult `json:"list"`
+	}
+	if err := json.Unmarshal(b, &wrapper); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if wrapper.List.Count != 0 {
+		t.Errorf("expected 0 jobs, got %d", wrapper.List.Count)
 	}
 }
 
 // observability tools
+//
+// toolSearchWorkflows is reachable through the rick_workflow_inspect "list"
+// panel only when a business-key filter is present; without one the facade
+// routes to the plain listing. The "requires at least one filter" guard is
+// therefore exercised against the handler directly.
 func TestToolSearchWorkflows_RequiresTag(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_search_workflows", map[string]any{})
+	_, err := s.toolSearchWorkflows(t.Context(), json.RawMessage(`{}`))
 	if err == nil {
 		t.Fatal("expected error when no search criteria provided")
 	}
@@ -788,9 +811,19 @@ func TestToolWorkflowOutput_MissingID(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_workflow_inspect", map[string]any{"include": []string{"output"}})
-	if err == nil {
-		t.Fatal("expected error for missing workflow_id")
+	// A per-workflow panel (output) without a workflow_id is reported under
+	// result["errors"][panel], not as a Go error.
+	res, err := callTool(t, s, "rick_workflow_inspect", map[string]any{"include": []string{"output"}})
+	if err != nil {
+		t.Fatalf("inspect should not return a Go error, got: %v", err)
+	}
+	resMap, ok := res.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", res)
+	}
+	errs, _ := resMap["errors"].(map[string]string)
+	if !strings.Contains(errs["output"], "workflow_id is required") {
+		t.Errorf("expected output panel 'workflow_id is required' error, got: %v", resMap["errors"])
 	}
 }
 
@@ -798,7 +831,7 @@ func TestToolRetryWorkflow_MissingID(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_retry_workflow", map[string]any{})
+	_, err := callTool(t, s, "rick_workflow_control", map[string]any{"action": "retry"})
 	if err == nil {
 		t.Fatal("expected error for missing workflow_id")
 	}
@@ -842,7 +875,8 @@ func TestToolRetryWorkflow_FromPhase_EmitsRetryEvent(t *testing.T) {
 		t.Fatalf("seed events: %v", err)
 	}
 
-	result, err := callTool(t, s, "rick_retry_workflow", map[string]any{
+	result, err := callTool(t, s, "rick_workflow_control", map[string]any{
+		"action":      "retry",
 		"workflow_id": corrID,
 		"from_phase":  "developer",
 	})
@@ -937,7 +971,8 @@ func TestToolRetryWorkflow_FromPhase_BarrierSibling(t *testing.T) {
 		t.Fatalf("seed events: %v", err)
 	}
 
-	result, err := callTool(t, s, "rick_retry_workflow", map[string]any{
+	result, err := callTool(t, s, "rick_workflow_control", map[string]any{
+		"action":      "retry",
 		"workflow_id": corrID,
 		"from_phase":  "reviewer",
 	})
@@ -985,7 +1020,8 @@ func TestToolRetryWorkflow_FromPhase_UnknownPhase(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	_, err := callTool(t, s, "rick_retry_workflow", map[string]any{
+	_, err := callTool(t, s, "rick_workflow_control", map[string]any{
+		"action":      "retry",
 		"workflow_id": corrID,
 		"from_phase":  "not-a-real-handler",
 	})

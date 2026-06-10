@@ -14,30 +14,12 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/jira"
 )
 
-func (s *Server) registerWaveTools() {
-
-	// rick_wave_plan / rick_wave_launch / rick_wave_status / rick_wave_cleanup
-	// are folded into rick_wave_manager (see tools_consolidated.go); their
-	// handlers remain below as the implementation the facade dispatches to.
-	// rick_github_pr_links stays standalone — it is not a wave lifecycle verb.
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_github_pr_links",
-			Description: "Get GitHub pull request links for an issue or every child of a wave. Mirrors rick_jira_read's pr_links join for GitHub. Accepts either 'issue' (single owner/repo#N) or a wave source (same shape as rick_wave_manager). For each issue, resolves the workflow correlation via the 'source' tag and inspects the GitHub timeline for cross-referenced PRs.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"issue":  map[string]any{"type": "string", "description": "Single GitHub issue ref 'owner/repo#N'. Mutually exclusive with source/epic."},
-					"epic":   map[string]any{"type": "string", "description": "Jira epic key (back-compat shorthand for wave-wide lookup)."},
-					"source": waveSourceSchema(),
-					"wave":   map[string]any{"type": "integer", "description": "Wave number (optional, iterates all waves if omitted)."},
-				},
-			},
-		},
-		Handler: s.toolGitHubPRLinks,
-	})
-}
+// registerWaveTools is intentionally empty: the wave lifecycle verbs (plan /
+// launch / status / cleanup) and the pr_links lookup are all exposed through
+// the rick_wave_manager facade (tools_consolidated.go), which dispatches to the
+// toolWave* and toolGitHubPRLinks handlers retained below. The group stub is
+// kept so registerBuiltinTools' call site stays uniform.
+func (s *Server) registerWaveTools() {}
 
 // waveSourceSchema is the shared JSON schema fragment for the structured
 // source descriptor accepted by all wave tools.
@@ -1837,7 +1819,7 @@ func (s *Server) toolGitHubPRLinks(ctx context.Context, raw json.RawMessage) (an
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 	if s.deps.GitHub == nil {
-		return nil, fmt.Errorf("GITHUB_TOKEN is not set — rick_github_pr_links requires a configured GitHub client")
+		return nil, fmt.Errorf("GITHUB_TOKEN is not set — rick_wave_manager action=pr_links requires a configured GitHub client")
 	}
 
 	// Single-issue shape: `issue = "owner/repo#N"`.

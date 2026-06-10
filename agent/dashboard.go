@@ -9,7 +9,7 @@ import (
 
 // --- Query Types ---
 
-// WorkflowSummary mirrors the rick_list_workflows tool response.
+// WorkflowSummary mirrors the rick_workflow_inspect "list" panel response.
 type WorkflowSummary struct {
 	AggregateID       string `json:"aggregate_id"`
 	WorkflowID        string `json:"workflow_id"`
@@ -20,7 +20,7 @@ type WorkflowSummary struct {
 	PendingHintsCount int    `json:"pending_hints_count,omitempty"`
 }
 
-// EventEntry mirrors the rick_list_events tool response.
+// EventEntry mirrors the rick_workflow_inspect "events" panel response.
 type EventEntry struct {
 	ID            string `json:"id"`
 	Type          string `json:"type"`
@@ -78,7 +78,7 @@ type TokenUsage struct {
 	ByBackend  map[string]int `json:"by_backend"`
 }
 
-// DeadLetterEntry mirrors the rick_list_dead_letters tool response.
+// DeadLetterEntry mirrors the rick_workflow_inspect "dead_letters" panel response.
 type DeadLetterEntry struct {
 	ID       string `json:"id"`
 	EventID  string `json:"event_id"`
@@ -127,9 +127,10 @@ type PersonaOutput struct {
 
 // --- Wails-bound Query Methods ---
 
-// ListWorkflows returns all tracked workflows.
+// ListWorkflows returns all tracked workflows via the rick_workflow_inspect
+// "list" global panel (no workflow_id).
 func (a *App) ListWorkflows() ([]WorkflowSummary, error) {
-	raw, err := a.mcpClient.CallTool(a.ctx, "rick_list_workflows", map[string]any{})
+	raw, err := a.inspectPanel("", "list", nil)
 	if err != nil {
 		return nil, fmt.Errorf("list workflows: %w", err)
 	}
@@ -143,17 +144,14 @@ func (a *App) ListWorkflows() ([]WorkflowSummary, error) {
 	return result.Workflows, nil
 }
 
-// ListEvents returns events, optionally filtered by workflow ID.
+// ListEvents returns events via the rick_workflow_inspect "events" panel,
+// optionally filtered by workflow ID.
 func (a *App) ListEvents(workflowID string, limit int) ([]EventEntry, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	args := map[string]any{"limit": limit}
-	if workflowID != "" {
-		args["workflow_id"] = workflowID
-	}
 
-	raw, err := a.mcpClient.CallTool(a.ctx, "rick_list_events", args)
+	raw, err := a.inspectPanel(workflowID, "events", map[string]any{"limit": limit})
 	if err != nil {
 		return nil, fmt.Errorf("list events: %w", err)
 	}
@@ -247,9 +245,10 @@ func (a *App) TokenUsageForWorkflow(workflowID string) (*TokenUsage, error) {
 	return &usage, nil
 }
 
-// ListDeadLetters returns all dead letter entries.
+// ListDeadLetters returns all dead letter entries via the rick_workflow_inspect
+// "dead_letters" global panel (no workflow_id).
 func (a *App) ListDeadLetters() ([]DeadLetterEntry, error) {
-	raw, err := a.mcpClient.CallTool(a.ctx, "rick_list_dead_letters", map[string]any{})
+	raw, err := a.inspectPanel("", "dead_letters", nil)
 	if err != nil {
 		return nil, fmt.Errorf("list dead letters: %w", err)
 	}
@@ -304,17 +303,19 @@ func (a *App) control(ctx context.Context, action, workflowID, reason, label str
 	return &result, nil
 }
 
-// ApproveHint approves a pending hint, triggering full persona execution.
+// ApproveHint approves a pending hint, triggering full persona execution. Routes
+// through rick_workflow_control with action=approve_hint.
 func (a *App) ApproveHint(workflowID string, persona string, guidance string) (*ActionResult, error) {
 	args := map[string]any{
 		"workflow_id": workflowID,
+		"action":      "approve_hint",
 		"persona":     persona,
 	}
 	if guidance != "" {
 		args["guidance"] = guidance
 	}
 
-	raw, err := a.mcpClient.CallTool(a.ctx, "rick_approve_hint", args)
+	raw, err := a.mcpClient.CallTool(a.ctx, "rick_workflow_control", args)
 	if err != nil {
 		return nil, fmt.Errorf("approve hint: %w", err)
 	}
@@ -326,20 +327,23 @@ func (a *App) ApproveHint(workflowID string, persona string, guidance string) (*
 	return &result, nil
 }
 
-// RejectHint rejects a pending hint. Action: "skip" (mark complete) or "fail" (fail workflow).
+// RejectHint rejects a pending hint. The skip/fail decision rides on
+// reject_action (the facade remaps it onto the handler's action field, since
+// "action" is the control discriminator). Routes through rick_workflow_control.
 func (a *App) RejectHint(workflowID string, persona string, reason string, action string) (*ActionResult, error) {
 	args := map[string]any{
 		"workflow_id": workflowID,
+		"action":      "reject_hint",
 		"persona":     persona,
 	}
 	if reason != "" {
 		args["reason"] = reason
 	}
 	if action != "" {
-		args["action"] = action
+		args["reject_action"] = action
 	}
 
-	raw, err := a.mcpClient.CallTool(a.ctx, "rick_reject_hint", args)
+	raw, err := a.mcpClient.CallTool(a.ctx, "rick_workflow_control", args)
 	if err != nil {
 		return nil, fmt.Errorf("reject hint: %w", err)
 	}
@@ -381,10 +385,12 @@ func (a *App) PersonaOutput(workflowID, persona string) (*PersonaOutput, error) 
 	return &output, nil
 }
 
-// InjectGuidance injects operator guidance into a workflow.
+// InjectGuidance injects operator guidance into a workflow. Routes through
+// rick_workflow_control with action=inject_guidance (auto-resumes by default).
 func (a *App) InjectGuidance(workflowID string, content string, target string) (*ActionResult, error) {
 	args := map[string]any{
 		"workflow_id": workflowID,
+		"action":      "inject_guidance",
 		"content":     content,
 		"auto_resume": true,
 	}
@@ -392,7 +398,7 @@ func (a *App) InjectGuidance(workflowID string, content string, target string) (
 		args["target"] = target
 	}
 
-	raw, err := a.mcpClient.CallTool(a.ctx, "rick_inject_guidance", args)
+	raw, err := a.mcpClient.CallTool(a.ctx, "rick_workflow_control", args)
 	if err != nil {
 		return nil, fmt.Errorf("inject guidance: %w", err)
 	}

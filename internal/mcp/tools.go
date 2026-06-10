@@ -109,18 +109,22 @@ func (s *Server) registerBuiltinTools() { //nolint:funlen // tool registration i
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_run_workflow",
-			Description: "Start a new Rick AI workflow. All code-producing workflows provision an isolated workspace first and commit at the end. Runs a full pipeline (workspace, research, architect, develop, review, QA, commit) or a subset based on the selected DAG. For BTU technical planning use rick_plan_btu instead.",
+			Description: "Start a new Rick AI workflow. All code-producing workflows provision an isolated workspace first and commit at the end. Runs a full pipeline (workspace, research, architect, develop, review, QA, commit) or a subset based on the selected DAG. For BTU technical planning set dag='plan-btu' and pass page_id (Confluence BTU page); that flow pauses twice for human review (use rick_workflow_control approve_hint/reject_hint). prompt is required for every DAG except plan-btu.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"prompt": map[string]any{
 						"type":        "string",
-						"description": "The task description or requirements for the workflow.",
+						"description": "The task description or requirements for the workflow. Required for every DAG except plan-btu.",
 					},
 					"dag": map[string]any{
 						"type":        "string",
-						"description": "Which workflow DAG to use. Call rick_list_workflows to see all registered workflows (built-in and plugin-provided). Defaults: 'github-dev' when source is 'gh:owner/repo#N' (issue reference), 'jira-dev' when ticket is provided, 'workspace-dev' otherwise.",
+						"description": "Which workflow DAG to use. Inspect rick_workflow_inspect (include=['list']) to see all registered workflows (built-in and plugin-provided). Defaults: 'github-dev' when source is 'gh:owner/repo#N' (issue reference), 'jira-dev' when ticket is provided, 'workspace-dev' otherwise. Set 'plan-btu' for BTU technical planning (requires page_id).",
 						"default":     "workspace-dev",
+					},
+					"page_id": map[string]any{
+						"type":        "string",
+						"description": "plan-btu only: Confluence page ID (numeric) or full page URL of the BTU page to plan from.",
 					},
 					"source": map[string]any{
 						"type":        "string",
@@ -143,177 +147,22 @@ func (s *Server) registerBuiltinTools() { //nolint:funlen // tool registration i
 						"description": "Free-form branch name for code-producing workflows (workspace-dev / develop-only) when no ticket exists. Use kebab-case verbs, e.g. 'add-rate-limiter'. Ignored by github-dev / pr-* / jira-dev (they derive their own branch). Mutually exclusive with ticket — pass one or the other.",
 					},
 				},
-				"required": []string{"prompt"},
+				// prompt is conditionally required (every DAG except plan-btu); the
+				// handler enforces it after the plan-btu route is taken, so it is
+				// not listed here.
 			},
 		},
 		Handler: s.toolRunWorkflow,
 	})
 
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_list_workflows",
-			Description: "List available workflow DAGs (definitions) and all tracked workflow runs with their current status.",
-			InputSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
-			},
-		},
-		Handler: s.toolListWorkflows,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_list_events",
-			Description: "List events for a specific workflow (by aggregate ID) or globally. Returns event type, timestamp, source, and payload summary.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "Filter events by workflow aggregate ID. Omit for global event stream.",
-					},
-					"limit": map[string]any{
-						"type":        "integer",
-						"description": "Maximum number of events to return.",
-						"default":     50,
-					},
-				},
-			},
-		},
-		Handler: s.toolListEvents,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_list_dead_letters",
-			Description: "List all dead letter entries (events that failed delivery). Shows event ID, handler, error, and attempt count.",
-			InputSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
-			},
-		},
-		Handler: s.toolListDeadLetters,
-	})
-
-	// --- Operator Intervention Tools ---
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_inject_guidance",
-			Description: "Inject operator guidance into a paused workflow. The guidance becomes part of the context for the next persona invocation. Auto-resumes by default.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID.",
-					},
-					"content": map[string]any{
-						"type":        "string",
-						"description": "Guidance text for the next persona.",
-					},
-					"target": map[string]any{
-						"type":        "string",
-						"description": "Target persona (optional, defaults to next in chain).",
-					},
-					"auto_resume": map[string]any{
-						"type":        "boolean",
-						"description": "Resume workflow after injecting guidance.",
-						"default":     true,
-					},
-				},
-				"required": []string{"workflow_id", "content"},
-			},
-		},
-		Handler: s.toolInjectGuidance,
-	})
-
-	// --- BTU Planning ---
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_plan_btu",
-			Description: "Start a BTU technical planning workflow. Reads a Confluence BTU page, researches the codebase, generates a technical implementation plan with Fibonacci story point estimates in Spanish, and writes it back to Confluence. The workflow pauses twice for human review: once after generating the plan, and once after estimating story points. Use rick_approve_hint or rick_reject_hint to review.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"page_id": map[string]any{
-						"type":        "string",
-						"description": "Confluence page ID (numeric) or full Confluence page URL.",
-					},
-					"ticket": map[string]any{
-						"type":        "string",
-						"description": "Ticket reference, e.g. 'BTU-1724'. Optional but recommended for tracking.",
-					},
-					"prompt": map[string]any{
-						"type":        "string",
-						"description": "Additional context or instructions for the planning workflow. Optional.",
-					},
-				},
-				"required": []string{"page_id"},
-			},
-		},
-		Handler: s.toolPlanBTU,
-	})
-
-	// --- Hint Approval/Rejection ---
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_approve_hint",
-			Description: "Approve a pending hint for a paused workflow. The workflow pauses when a persona emits a hint (draft plan, estimates) for human review. Approving triggers full execution. Optionally include guidance to adjust the persona's behavior.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID.",
-					},
-					"persona": map[string]any{
-						"type":        "string",
-						"description": "The persona whose hint to approve (e.g. 'plan-architect', 'estimator').",
-					},
-					"guidance": map[string]any{
-						"type":        "string",
-						"description": "Optional guidance to adjust the persona's behavior before full execution.",
-					},
-				},
-				"required": []string{"workflow_id", "persona"},
-			},
-		},
-		Handler: s.toolApproveHint,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_reject_hint",
-			Description: "Reject a pending hint for a paused workflow. Use action 'skip' to mark the persona as complete without full execution, or 'fail' to fail the entire workflow.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID.",
-					},
-					"persona": map[string]any{
-						"type":        "string",
-						"description": "The persona whose hint to reject.",
-					},
-					"reason": map[string]any{
-						"type":        "string",
-						"description": "Reason for rejection.",
-					},
-					"action": map[string]any{
-						"type":        "string",
-						"description": "What to do: 'skip' (mark persona complete without execution) or 'fail' (fail the workflow).",
-						"default":     "skip",
-					},
-				},
-				"required": []string{"workflow_id", "persona"},
-			},
-		},
-		Handler: s.toolRejectHint,
-	})
+	// The following verbs are folded into the consolidated facades
+	// (tools_consolidated.go); their handlers remain in this file as the
+	// implementation the facades dispatch to:
+	//   - rick_list_workflows / rick_list_events / rick_list_dead_letters
+	//       → rick_workflow_inspect global panels (list / events / dead_letters)
+	//   - rick_inject_guidance / rick_approve_hint / rick_reject_hint
+	//       → rick_workflow_control actions (inject_guidance / approve_hint / reject_hint)
+	//   - rick_plan_btu → rick_run_workflow with dag="plan-btu"
 }
 
 func (s *Server) register(t Tool) {
@@ -364,6 +213,12 @@ func (s *Server) toolRunWorkflow(ctx context.Context, raw json.RawMessage) (any,
 	var args runWorkflowArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	// plan-btu is its own launcher: it reads a Confluence page_id (not a prompt)
+	// and pauses for hint review. Route to toolPlanBTU before the prompt check so
+	// the folded tool keeps its original contract.
+	if args.DAG == "plan-btu" {
+		return s.toolPlanBTU(ctx, raw)
 	}
 	if args.Prompt == "" {
 		return nil, fmt.Errorf("prompt is required")
@@ -424,7 +279,7 @@ func (s *Server) toolRunWorkflow(ctx context.Context, raw json.RawMessage) (any,
 			}
 		}
 		if !isWorkflowRegistered(s.deps.Engine, args.DAG) {
-			return nil, fmt.Errorf("workflow %q not registered — start the required plugin or use rick_list_workflows to see available workflows", args.DAG)
+			return nil, fmt.Errorf("workflow %q not registered — start the required plugin or use rick_workflow_inspect (include=[\"list\"]) to see available workflows", args.DAG)
 		}
 	}
 

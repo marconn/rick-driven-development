@@ -16,7 +16,7 @@ func TestToolConfluenceRead_InvalidJSON(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	tool := s.tools["rick_confluence_read"]
+	tool := s.tools["rick_confluence"]
 	_, err := tool.Handler(t.Context(), json.RawMessage(`{bad json`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
@@ -42,7 +42,8 @@ func TestToolConfluenceRead_APIError(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	_, err := callTool(t, s, "rick_confluence_read", map[string]any{
+	_, err := callTool(t, s, "rick_confluence", map[string]any{
+		"action":  "read",
 		"page_id": "99999",
 	})
 	if err == nil {
@@ -71,7 +72,8 @@ func TestToolConfluenceRead_WithURLExtractPageID(t *testing.T) {
 	defer s.Close()
 
 	// Pass a URL containing /pages/55555/ — extractPageID must extract "55555".
-	result, err := callTool(t, s, "rick_confluence_read", map[string]any{
+	result, err := callTool(t, s, "rick_confluence", map[string]any{
+		"action":  "read",
 		"page_id": "https://wiki.example.com/wiki/spaces/ENG/pages/55555/Some-Title",
 	})
 	if err != nil {
@@ -104,7 +106,8 @@ func TestToolConfluenceRead_ReturnsAllFields(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_confluence_read", map[string]any{
+	result, err := callTool(t, s, "rick_confluence", map[string]any{
+		"action":  "read",
 		"page_id": "77777",
 	})
 	if err != nil {
@@ -132,7 +135,7 @@ func TestToolConfluenceWrite_InvalidJSON(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	tool := s.tools["rick_confluence_write"]
+	tool := s.tools["rick_confluence"]
 	_, err := tool.Handler(t.Context(), json.RawMessage(`{bad`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
@@ -158,7 +161,8 @@ func TestToolConfluenceWrite_ReadPageAPIError(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	_, err := callTool(t, s, "rick_confluence_write", map[string]any{
+	_, err := callTool(t, s, "rick_confluence", map[string]any{
+		"action":        "write",
 		"page_id":       "88888",
 		"content":       "New content",
 		"after_heading": "Section Header",
@@ -175,7 +179,8 @@ func TestToolConfluenceWrite_MissingPageID(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_confluence_write", map[string]any{
+	_, err := callTool(t, s, "rick_confluence", map[string]any{
+		"action":        "write",
 		"content":       "# Some content",
 		"after_heading": "Plan Tecnico",
 		// page_id omitted
@@ -213,7 +218,8 @@ func TestToolConfluenceWrite_SuccessReturnsPageInfo(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_confluence_write", map[string]any{
+	result, err := callTool(t, s, "rick_confluence", map[string]any{
+		"action":        "write",
 		"page_id":       pageID,
 		"content":       "## New technical approach\n- step one\n- step two",
 		"after_heading": "Technical Plan",

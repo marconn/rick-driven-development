@@ -30,3 +30,22 @@ Tool surface reduced from ~45 to **33** across 7 categories: workflow (10), jobs
 
 ## 4. The "Kill Shot" (Risk Assessment)
 The most likely reason this design could fail is that **consolidated tools require more complex input schemas**. If we make the `rick_workflow_inspect` schema too nested, the LLM will hallucinate arguments or fail to format the JSON correctly. We must keep the schemas flat and use simple string enums for multiplexing. Also, tests that rely on the old names of the tools will need to be refactored, which is currently ongoing for the workflow consolidation tools.
+
+## 6. Round 2 outcome (33 → 18)
+
+A second pass folded the orphan verbs and remaining read/list tools that the first round left standalone. Hard rename (no aliases) — all consumers are in-repo (agent `dashboard.go`/`operator.go`, tests, docs) and MCP clients re-read `tools/list` each session, so there is no persisted external contract.
+
+Folded (15 standalone tools removed, 2 new facades added):
+- `rick_list_workflows`, `rick_search_workflows`, `rick_list_events`, `rick_list_dead_letters` → `rick_workflow_inspect` global panels (`workflow_id` made optional; `list` filters by ticket/source/repo to absorb search).
+- `rick_inject_guidance`, `rick_approve_hint`, `rick_reject_hint`, `rick_retry_workflow` → `rick_workflow_control` actions. (`reject_hint`'s skip/fail rides on `reject_action`, remapped onto the handler's `action` to avoid colliding with the facade discriminator.)
+- `rick_jobs`, `rick_backends` → `rick_job_inspect` global panels (`job_id` made optional).
+- `rick_github_pr_links` → `rick_wave_manager action=pr_links`.
+- `rick_workspace_setup`/`cleanup`/`list` → new `rick_workspace` facade (`action`).
+- `rick_confluence_read`/`write` → new `rick_confluence` facade (`action`).
+- `rick_plan_btu` → `rick_run_workflow` with `dag=plan-btu` (+`page_id`).
+
+Held deliberately:
+- **Jira stays at 5** (`read`/`write`/`search`/`create`/`manage_links`). Merging search-into-read and create-into-write was rejected: it makes the return shape polymorphic (issue-or-list, update-or-create), which is exactly the arg-hallucination kill-shot the flat-schema rule guards against. Every shipped facade routes via a pure `action`/`include` enum with a uniform return shape; Jira would not.
+- **`rick_job_cancel` stays standalone** — the lone mutating job verb, kept out of the read-only `rick_job_inspect` so the inspect/control (read/write) split holds.
+
+Final surface: **18 tools.** Guarded by `TestToolsList` (server_test.go), which asserts the exact set and that every folded name is absent — silent regrowth fails the build. All underlying handlers are retained and dispatched to; zero capability lost. `make check` (lint + test + race) and the `agent/` module tests are green.

@@ -40,7 +40,7 @@ Provisions isolated git working copies under `$RICK_REPOS_PATH` so workflows (`w
 - `RICK_REPOS_PATH` — required; root directory holding source repos and isolated workspace clones
 
 ## Related
-- `../mcp/tools_workspace.go` — `rick_workspace_setup` / `rick_workspace_cleanup` / `rick_workspace_list` MCP tools wrap this package and own the deletion pattern guard
+- `../mcp/tools_workspace.go` — the `rick_workspace` MCP tool (setup/cleanup/list via `action`) wraps this package and owns the deletion pattern guard
 - `../handler/workspace.go` — `workspace` handler used by `workspace-dev` and `jira-dev` DAGs; calls `SetupWorkspace` with `isolate=true` and the correlation ID as `suffix`
 - `../handler/pr_workspace.go` — `pr-workspace` handler for the `pr-review` DAG; clones the PR branch via the `branch` override path
 - `../handler/pr_cleanup.go` — `pr-cleanup` handler that calls `CleanupIsolatedWorkspace` at the end of `pr-review`

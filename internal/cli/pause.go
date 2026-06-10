@@ -173,6 +173,7 @@ func runResumeDirect(ctx context.Context, dbPath, aggregateID, reason string) er
 
 func runGuide(ctx context.Context, serverURL, dbPath, aggregateID, content, target string, autoResume bool) error {
 	args := map[string]any{
+		"action":      "inject_guidance",
 		"workflow_id": aggregateID,
 		"content":     content,
 		"auto_resume": autoResume,
@@ -181,7 +182,7 @@ func runGuide(ctx context.Context, serverURL, dbPath, aggregateID, content, targ
 		args["target"] = target
 	}
 
-	_, err := mcpCall(ctx, serverURL, "rick_inject_guidance", args)
+	_, err := mcpCall(ctx, serverURL, "rick_workflow_control", args)
 	if err == nil {
 		_, _ = fmt.Fprintf(os.Stdout, "Guidance injected into workflow %s\n", aggregateID)
 		return nil

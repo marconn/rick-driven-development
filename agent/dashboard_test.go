@@ -49,22 +49,10 @@ func fakeMCPDashboard(t *testing.T) http.HandlerFunc {
 
 		var resultText string
 		switch params.Name {
-		case "rick_list_workflows":
-			resultText = `{"workflows":[{"aggregate_id":"wf-1","workflow_id":"workspace-dev","status":"running","started_at":"2026-03-16T10:00:00Z"}]}`
-		case "rick_list_events":
-			resultText = `{"events":[{"id":"evt-1","type":"workflow.started","version":1,"timestamp":"2026-03-16T10:00:00Z","source":"mcp"}],"count":1}`
 		case "rick_workflow_inspect":
 			resultText = inspectPanelResult(args.Include)
-		case "rick_list_dead_letters":
-			resultText = `{"dead_letters":[],"count":0}`
 		case "rick_workflow_control":
 			resultText = controlResult(args.Action)
-		case "rick_inject_guidance":
-			resultText = `{"workflow_id":"wf-1","action":"guidance_injected","resumed":true}`
-		case "rick_approve_hint":
-			resultText = `{"workflow_id":"wf-1","action":"hint_approved","status":"running"}`
-		case "rick_reject_hint":
-			resultText = `{"workflow_id":"wf-1","action":"hint_rejected","status":"running"}`
 		default:
 			resultText = `"unknown tool"`
 		}
@@ -101,12 +89,21 @@ func inspectPanelResult(include []string) string {
 		return `{"workflow_id":"wf-1","verdicts":{"workflow_id":"wf-1","verdicts":[{"phase":"developer","source_phase":"reviewer","outcome":"fail","summary":"Missing error handling","issues":[{"severity":"major","category":"correctness","description":"Nil pointer dereference possible","file":"main.go","line":42}]}]}}`
 	case "persona_output":
 		return `{"workflow_id":"wf-1","persona_output":{"workflow_id":"wf-1","persona":"developer","output":"Generated code output...","truncated":false,"backend":"claude","tokens_used":2500,"duration_ms":8000}}`
+	// Global panels (no workflow_id): the former rick_list_* tools.
+	case "list":
+		return `{"list":{"workflows":[{"aggregate_id":"wf-1","workflow_id":"workspace-dev","status":"running","started_at":"2026-03-16T10:00:00Z"}]}}`
+	case "events":
+		return `{"events":{"events":[{"id":"evt-1","type":"workflow.started","version":1,"timestamp":"2026-03-16T10:00:00Z","source":"mcp"}],"count":1}}`
+	case "dead_letters":
+		return `{"dead_letters":{"dead_letters":[],"count":0}}`
 	default:
 		return `{"workflow_id":"wf-1","errors":{"` + panel + `":"unknown include panel"}}`
 	}
 }
 
-// controlResult mimics rick_workflow_control routing on the action verb.
+// controlResult mimics rick_workflow_control routing on the action verb. The
+// pause/resume/cancel/retry verbs return an interventionResult shape; the
+// inject_guidance/approve_hint/reject_hint verbs return their handler shapes.
 func controlResult(action string) string {
 	switch action {
 	case "pause":
@@ -115,6 +112,14 @@ func controlResult(action string) string {
 		return `{"workflow_id":"wf-1","action":"cancelled","status":"cancelled"}`
 	case "resume":
 		return `{"workflow_id":"wf-1","action":"resumed","status":"running"}`
+	case "retry":
+		return `{"workflow_id":"wf-1","action":"retried","status":"resumed"}`
+	case "inject_guidance":
+		return `{"workflow_id":"wf-1","action":"guidance_injected","resumed":true}`
+	case "approve_hint":
+		return `{"workflow_id":"wf-1","action":"hint_approved","status":"running"}`
+	case "reject_hint":
+		return `{"workflow_id":"wf-1","action":"hint_rejected","status":"running"}`
 	default:
 		return `"unknown action"`
 	}
@@ -537,7 +542,8 @@ func fakeMCPWithArgCapture(t *testing.T) (http.HandlerFunc, func() map[string]an
 
 				// Re-encode and replay through the base handler logic.
 				// Since body is consumed, we need to reconstruct the response ourselves.
-				resultText := dashboardResultFor(params.Name)
+				action, _ := lastArgs["action"].(string)
+				resultText := dashboardResultFor(params.Name, action)
 				resp := mcpResponse{JSONRPC: "2.0", ID: req.ID}
 				result, _ := json.Marshal(mcpToolResult{
 					Content: []mcpContent{{Type: "text", Text: resultText}},
@@ -559,15 +565,16 @@ func fakeMCPWithArgCapture(t *testing.T) (http.HandlerFunc, func() map[string]an
 }
 
 // dashboardResultFor returns the canned JSON response for a given tool name.
-// Must stay in sync with fakeMCPDashboard's switch.
-func dashboardResultFor(name string) string {
+// Must stay in sync with fakeMCPDashboard's switch. Approve/reject hint now ride
+// on rick_workflow_control (action=approve_hint|reject_hint); the arg-capture
+// tests assert the action/persona/reject_action the dashboard passes, so any
+// ActionResult-compatible body suffices here.
+func dashboardResultFor(name, action string) string {
 	switch name {
-	case "rick_list_workflows":
-		return `{"workflows":[{"aggregate_id":"wf-1","workflow_id":"workspace-dev","status":"running","started_at":"2026-03-16T10:00:00Z"}]}`
-	case "rick_approve_hint":
-		return `{"workflow_id":"wf-1","action":"hint_approved","status":"running"}`
-	case "rick_reject_hint":
-		return `{"workflow_id":"wf-1","action":"hint_rejected","status":"running"}`
+	case "rick_workflow_inspect":
+		return `{"list":{"workflows":[{"aggregate_id":"wf-1","workflow_id":"workspace-dev","status":"running","started_at":"2026-03-16T10:00:00Z"}]}}`
+	case "rick_workflow_control":
+		return controlResult(action)
 	default:
 		return `"unknown tool"`
 	}
@@ -666,8 +673,11 @@ func TestRejectHint(t *testing.T) {
 		}
 
 		args := getLastArgs()
-		if args["action"] != "skip" {
-			t.Errorf("expected action 'skip', got %v", args["action"])
+		if args["action"] != "reject_hint" {
+			t.Errorf("expected control verb 'reject_hint', got %v", args["action"])
+		}
+		if args["reject_action"] != "skip" {
+			t.Errorf("expected reject_action 'skip', got %v", args["reject_action"])
 		}
 		if args["reason"] != "not needed" {
 			t.Errorf("expected reason 'not needed', got %v", args["reason"])
@@ -688,8 +698,8 @@ func TestRejectHint(t *testing.T) {
 			t.Fatalf("RejectHint fail: %v", err)
 		}
 		args := getLastArgs()
-		if args["action"] != "fail" {
-			t.Errorf("expected action 'fail', got %v", args["action"])
+		if args["reject_action"] != "fail" {
+			t.Errorf("expected reject_action 'fail', got %v", args["reject_action"])
 		}
 	})
 
@@ -707,8 +717,8 @@ func TestRejectHint(t *testing.T) {
 			t.Fatalf("RejectHint empty action: %v", err)
 		}
 		args := getLastArgs()
-		if _, ok := args["action"]; ok {
-			t.Error("expected 'action' NOT in args when action is empty")
+		if _, ok := args["reject_action"]; ok {
+			t.Error("expected 'reject_action' NOT in args when skip/fail is empty")
 		}
 	})
 
@@ -729,8 +739,8 @@ func TestRejectHint(t *testing.T) {
 		if args["reason"] != "low confidence" {
 			t.Errorf("expected reason 'low confidence', got %v", args["reason"])
 		}
-		if _, ok := args["action"]; ok {
-			t.Error("expected 'action' NOT in args when action is empty")
+		if _, ok := args["reject_action"]; ok {
+			t.Error("expected 'reject_action' NOT in args when skip/fail is empty")
 		}
 	})
 

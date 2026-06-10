@@ -33,7 +33,7 @@ func (s *Server) registerJobTools() {
 					"backend": map[string]any{
 						"type":        "string",
 						"enum":        []string{"claude", "gemini", "codex", "antigravity", "opencode"},
-						"description": "AI backend. Defaults to server's configured backend (see rick_backends for the active default and which CLIs are installed).",
+						"description": "AI backend. Defaults to server's configured backend (see rick_job_inspect include=[\"backends\"] for the active default and which CLIs are installed).",
 					},
 					"model": map[string]any{
 						"type":        "string",
@@ -80,7 +80,7 @@ func (s *Server) registerJobTools() {
 					"backend": map[string]any{
 						"type":        "string",
 						"enum":        []string{"claude", "gemini", "codex", "antigravity", "opencode"},
-						"description": "AI backend. Defaults to server's configured backend (see rick_backends for the active default and which CLIs are installed).",
+						"description": "AI backend. Defaults to server's configured backend (see rick_job_inspect include=[\"backends\"] for the active default and which CLIs are installed).",
 					},
 					"model": map[string]any{
 						"type":        "string",
@@ -133,29 +133,9 @@ func (s *Server) registerJobTools() {
 		Handler: s.toolJobCancel,
 	})
 
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_jobs",
-			Description: "List all tracked async jobs with their status, type, and start time.",
-			InputSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
-			},
-		},
-		Handler: s.toolJobsList,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_backends",
-			Description: "List the AI backends rick knows about and which are active: the resolved default backend (used when a tool omits the backend arg), the review-phase rotation (RICK_REVIEW_BACKENDS), and per-backend whether the CLI binary is installed on PATH. Use this to discover which backends a client can actually select.",
-			InputSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
-			},
-		},
-		Handler: s.toolBackends,
-	})
+	// rick_jobs (list) and rick_backends are folded into the rick_job_inspect
+	// facade (tools_consolidated.go) as the list/backends panels; their handlers
+	// toolJobsList / toolBackends remain below.
 }
 
 // --- Tool Handlers ---
