@@ -21,6 +21,7 @@
 ## Env file
 - `~/.config/rick/env` carries env vars consumed by the service: `JIRA_URL`, `JIRA_EMAIL`, `JIRA_TOKEN`, `CONFLUENCE_URL`, `CONFLUENCE_EMAIL`, `CONFLUENCE_TOKEN`, `RICK_REPOS_PATH`, `RICK_DISABLE_QUALITY_GATE`, `RICK_CLAUDE_BIN`, `RICK_GEMINI_BIN`, `RICK_MODEL`, `RICK_LOG_LEVEL`, etc. See top-level `CLAUDE.md` for the full list.
 - File is optional — the unit uses `EnvironmentFile=-` so a missing file is not fatal.
+- The `rick` binary ALSO self-loads this file at startup (`internal/cli/loadConfigEnv` via the root `PersistentPreRunE`), so the env vars are present even when launched outside this unit (the system unit has no `EnvironmentFile`; a bare `rick serve` from `$PATH` has none either). The unit's `EnvironmentFile=` is now belt-and-suspenders — both read the same file, and a value already set by systemd wins over the file (the loader is additive). This is the durable fix for "workflows don't run because `RICK_REPOS_PATH` is unset": the binary no longer depends on the launcher to inject the env.
 
 ## Related
 - `../../Makefile` — `make deploy` builds + restarts `rick-server`; `make restart` restarts rick-server plus all four companion services.

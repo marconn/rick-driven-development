@@ -3,7 +3,8 @@
 Cobra command tree for the `rick` binary — wires the engine, persona runner, projections, MCP server, and gRPC service together for each subcommand.
 
 ## Files
-- `root.go` — `New()` builds the root cobra command and registers all subcommands.
+- `root.go` — `New()` builds the root cobra command and registers all subcommands. Its `PersistentPreRunE` calls `loadConfigEnv()` (env.go) before any subcommand runs.
+- `env.go` — `loadConfigEnv()` self-loads `~/.config/rick/env` into the process environment (additive; already-set vars win; missing file non-fatal; strips one layer of matching quotes — systemd-EnvironmentFile semantics). The binary owns this so `RICK_REPOS_PATH` and friends are set regardless of launch path (user systemd unit, system unit with no `EnvironmentFile`, or a bare `rick serve` from `$PATH`) — a server that can't see `RICK_REPOS_PATH` never provisions a workspace and workflows silently fail to run.
 - `run.go` — **DEPRECATED**. Direct in-process workflow execution. Do NOT add features here. All workflow execution must go through `rick serve` + MCP + agent UI. Still hosts shared helpers `selectWorkflowDef()` (workflow def selector with `RICK_DISABLE_QUALITY_GATE` strip) and `unmarshalPayload()`.
 - `serve.go` — Long-running daemon. Boots store, bus, backend, handler registry, engine, PersonaRunner with `CompositeDispatcher` (local + gRPC stream), all four projections, `NotificationBroker`, gRPC `PersonaService`, optional GitHub/Jira pollers, and the MCP HTTP server. Defaults `--yolo=true`. Honors `RICK_LOG_LEVEL=debug`.
 - `mcp.go` — MCP-over-stdio mode for Claude Desktop / Cursor. Subset of serve (no gRPC, no optional services). Logs to stderr at warn level since stdout is reserved for protocol.
