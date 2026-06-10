@@ -33,16 +33,19 @@ func waitForWorkflowStatus(t *testing.T, s *Server, workflowID string, want engi
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		result, err := callTool(t, s, "rick_workflow_status", map[string]any{
+		result, err := callTool(t, s, "rick_workflow_inspect", map[string]any{
 			"workflow_id": workflowID,
+			"include":     []string{"status"},
 		})
 		if err != nil {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
-		if status, ok := result.(workflowStatusResult); ok {
-			if status.Status == string(want) {
-				return
+		if rm, ok := result.(map[string]any); ok {
+			if status, ok := rm["status"].(workflowStatusResult); ok {
+				if status.Status == string(want) {
+					return
+				}
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -122,8 +125,9 @@ func TestToolRetryWorkflow_CancelledWorkflow(t *testing.T) {
 	waitForWorkflowStatus(t, s, wfID, engine.StatusRunning, 2*time.Second)
 
 	// Cancel the workflow first.
-	_, err := callTool(t, s, "rick_cancel_workflow", map[string]any{
+	_, err := callTool(t, s, "rick_workflow_control", map[string]any{
 		"workflow_id": wfID,
+		"action":      "cancel",
 		"reason":      "testing retry from cancelled",
 	})
 	if err != nil {
@@ -180,16 +184,21 @@ func TestToolWorkflowOutput_EmptyWorkflow(t *testing.T) {
 	wfID := seedWorkflow(t, s, "test task", "workspace-dev")
 
 	// Workflow just started — no persona outputs yet.
-	result, err := callTool(t, s, "rick_workflow_output", map[string]any{
+	result, err := callTool(t, s, "rick_workflow_inspect", map[string]any{
 		"workflow_id": wfID,
+		"include":     []string{"output"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	rm, ok := result.(map[string]any)
+	wrap, ok := result.(map[string]any)
 	if !ok {
 		t.Fatalf("unexpected type: %T", result)
+	}
+	rm, ok := wrap["output"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected output panel type: %T (errors: %v)", wrap["output"], wrap["errors"])
 	}
 	if rm["workflow_id"] != wfID {
 		t.Errorf("expected workflow_id=%s, got %v", wfID, rm["workflow_id"])
@@ -208,8 +217,9 @@ func TestToolWorkflowVerdicts_NewWorkflow(t *testing.T) {
 
 	wfID := seedWorkflow(t, s, "write code", "workspace-dev")
 
-	result, err := callTool(t, s, "rick_workflow_verdicts", map[string]any{
+	result, err := callTool(t, s, "rick_workflow_inspect", map[string]any{
 		"workflow_id": wfID,
+		"include":     []string{"verdicts"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -226,13 +236,20 @@ func TestToolPersonaOutput_NotFound(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	// Ask for output for a persona that hasn't run yet.
-	_, err := callTool(t, s, "rick_persona_output", map[string]any{
+	// Ask for output for a persona that hasn't run yet. rick_workflow_inspect
+	// reports the failure under result["errors"]["persona_output"].
+	result, err := callTool(t, s, "rick_workflow_inspect", map[string]any{
 		"workflow_id": "nonexistent-wf",
+		"include":     []string{"persona_output"},
 		"persona":     "developer",
 	})
-	if err == nil {
-		t.Fatal("expected error for nonexistent workflow")
+	if err != nil {
+		t.Fatalf("inspect should not return a Go error, got: %v", err)
+	}
+	rm := result.(map[string]any)
+	errs, _ := rm["errors"].(map[string]string)
+	if errs["persona_output"] == "" {
+		t.Fatal("expected persona_output panel error for nonexistent workflow")
 	}
 }
 
@@ -240,11 +257,19 @@ func TestToolPersonaOutput_MissingArgs(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_persona_output", map[string]any{
+	// Missing persona: rick_workflow_inspect records the requirement violation
+	// under result["errors"]["persona_output"] rather than as a Go error.
+	result, err := callTool(t, s, "rick_workflow_inspect", map[string]any{
 		"workflow_id": "some-id",
+		"include":     []string{"persona_output"},
 	})
-	if err == nil {
-		t.Fatal("expected error for missing persona")
+	if err != nil {
+		t.Fatalf("inspect should not return a Go error, got: %v", err)
+	}
+	rm := result.(map[string]any)
+	errs, _ := rm["errors"].(map[string]string)
+	if errs["persona_output"] == "" {
+		t.Fatal("expected persona_output panel error for missing persona")
 	}
 }
 
@@ -280,17 +305,19 @@ func TestToolPersonaOutput_FallsBackToPersonaFailed(t *testing.T) {
 		t.Fatalf("seed PersonaFailed: %v", err)
 	}
 
-	result, err := callTool(t, s, "rick_persona_output", map[string]any{
+	result, err := callTool(t, s, "rick_workflow_inspect", map[string]any{
 		"workflow_id": corrID,
+		"include":     []string{"persona_output"},
 		"persona":     "developer",
 	})
 	if err != nil {
-		t.Fatalf("rick_persona_output: %v", err)
+		t.Fatalf("rick_workflow_inspect: %v", err)
 	}
 
-	out, ok := result.(personaOutputResult)
+	wrap := result.(map[string]any)
+	out, ok := wrap["persona_output"].(personaOutputResult)
 	if !ok {
-		t.Fatalf("unexpected result type: %T", result)
+		t.Fatalf("unexpected persona_output panel type: %T (errors: %v)", wrap["persona_output"], wrap["errors"])
 	}
 	if out.Status != "failed" {
 		t.Errorf("Status = %q; want failed", out.Status)
@@ -350,17 +377,19 @@ func TestToolPersonaOutput_CompletedSupersedesEarlierFailure(t *testing.T) {
 		t.Fatalf("seed events: %v", err)
 	}
 
-	result, err := callTool(t, s, "rick_persona_output", map[string]any{
+	result, err := callTool(t, s, "rick_workflow_inspect", map[string]any{
 		"workflow_id": corrID,
+		"include":     []string{"persona_output"},
 		"persona":     "developer",
 	})
 	if err != nil {
-		t.Fatalf("rick_persona_output: %v", err)
+		t.Fatalf("rick_workflow_inspect: %v", err)
 	}
 
-	out, ok := result.(personaOutputResult)
+	wrap := result.(map[string]any)
+	out, ok := wrap["persona_output"].(personaOutputResult)
 	if !ok {
-		t.Fatalf("unexpected result type: %T", result)
+		t.Fatalf("unexpected persona_output panel type: %T (errors: %v)", wrap["persona_output"], wrap["errors"])
 	}
 	if out.Status != "completed" {
 		t.Errorf("Status = %q; want completed (later success supersedes earlier failure)", out.Status)
@@ -380,7 +409,7 @@ func TestToolDiff_MissingID(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_diff", map[string]any{})
+	_, err := callTool(t, s, "rick_diff_viewer", map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for missing workflow_id")
 	}
@@ -393,7 +422,7 @@ func TestToolDiff_NoWorkspace(t *testing.T) {
 	wfID := seedWorkflow(t, s, "test", "workspace-dev")
 
 	// Workflow doesn't have a workspace — should fail.
-	_, err := callTool(t, s, "rick_diff", map[string]any{
+	_, err := callTool(t, s, "rick_diff_viewer", map[string]any{
 		"workflow_id": wfID,
 	})
 	if err == nil {
@@ -410,7 +439,7 @@ func TestToolPRDiff_MissingRepo(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_pr_diff", map[string]any{
+	_, err := callTool(t, s, "rick_diff_viewer", map[string]any{
 		"pr_number": 1,
 	})
 	if err == nil {
@@ -422,7 +451,7 @@ func TestToolPRDiff_MissingPRNumber(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_pr_diff", map[string]any{
+	_, err := callTool(t, s, "rick_diff_viewer", map[string]any{
 		"repo": "owner/repo",
 	})
 	if err == nil {
@@ -434,7 +463,7 @@ func TestToolPRDiff_InvalidRepoFormat(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_pr_diff", map[string]any{
+	_, err := callTool(t, s, "rick_diff_viewer", map[string]any{
 		"repo":      "not-a-valid-format",
 		"pr_number": 1,
 	})
@@ -508,7 +537,7 @@ func TestToolWaveCleanup_MissingEpic(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_wave_cleanup", map[string]any{})
+	_, err := callTool(t, s, "rick_wave_manager", map[string]any{"action": "cleanup"})
 	if err == nil {
 		t.Fatal("expected error for missing epic")
 	}
@@ -523,8 +552,9 @@ func TestToolWaveCleanup_NoHulipathNoJira(t *testing.T) {
 
 	// wave_cleanup needs both Jira (for computeWavePlan) and RICK_REPOS_PATH (for cleanup).
 	// Without Jira, should fail on Jira check first.
-	_, err := callTool(t, s, "rick_wave_cleanup", map[string]any{
-		"epic": "PROJ-EPIC",
+	_, err := callTool(t, s, "rick_wave_manager", map[string]any{
+		"action": "cleanup",
+		"epic":   "PROJ-EPIC",
 	})
 	if err == nil {
 		t.Fatal("expected error when Jira not configured")
@@ -542,13 +572,13 @@ func TestTools_InvalidJSON(t *testing.T) {
 
 	tools := []string{
 		"rick_run_workflow",
-		"rick_workflow_status",
-		"rick_cancel_workflow",
-		"rick_pause_workflow",
-		"rick_resume_workflow",
+		"rick_workflow_inspect",
+		"rick_workflow_control",
+		"rick_diff_viewer",
+		"rick_job_inspect",
 		"rick_inject_guidance",
 		"rick_jira_read",
-		"rick_wave_plan",
+		"rick_wave_manager",
 		"rick_workspace_cleanup",
 	}
 
@@ -613,16 +643,21 @@ func TestToolWorkflowOutput_FiltersByPhaseVerb(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := callTool(t, s, "rick_workflow_output", map[string]any{
+			result, err := callTool(t, s, "rick_workflow_inspect", map[string]any{
 				"workflow_id": corrID,
+				"include":     []string{"output"},
 				"phases":      tc.phases,
 			})
 			if err != nil {
 				t.Fatalf("call tool: %v", err)
 			}
-			rm, ok := result.(map[string]any)
+			wrap, ok := result.(map[string]any)
 			if !ok {
 				t.Fatalf("unexpected result type: %T", result)
+			}
+			rm, ok := wrap["output"].(map[string]any)
+			if !ok {
+				t.Fatalf("unexpected output panel type: %T (errors: %v)", wrap["output"], wrap["errors"])
 			}
 			count, _ := rm["count"].(int)
 			if count != 1 {
@@ -633,16 +668,19 @@ func TestToolWorkflowOutput_FiltersByPhaseVerb(t *testing.T) {
 
 	// Sanity: a filter that matches nothing returns zero results.
 	t.Run("no match", func(t *testing.T) {
-		result, err := callTool(t, s, "rick_workflow_output", map[string]any{
+		result, err := callTool(t, s, "rick_workflow_inspect", map[string]any{
 			"workflow_id": corrID,
+			"include":     []string{"output"},
 			"phases":      []string{"nonexistent-phase"},
 		})
 		if err != nil {
 			t.Fatalf("call tool: %v", err)
 		}
-		if rm, ok := result.(map[string]any); ok {
-			if count, _ := rm["count"].(int); count != 0 {
-				t.Errorf("expected count=0 for unmatched filter, got %d", count)
+		if wrap, ok := result.(map[string]any); ok {
+			if rm, ok := wrap["output"].(map[string]any); ok {
+				if count, _ := rm["count"].(int); count != 0 {
+					t.Errorf("expected count=0 for unmatched filter, got %d", count)
+				}
 			}
 		}
 	})

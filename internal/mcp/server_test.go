@@ -214,17 +214,14 @@ func TestToolsList(t *testing.T) {
 
 	expectedTools := map[string]bool{
 		"rick_run_workflow":      false,
-		"rick_workflow_status":   false,
+		"rick_workflow_inspect":  false,
+		"rick_workflow_control":  false,
 		"rick_list_workflows":    false,
 		"rick_list_events":       false,
-		"rick_token_usage":       false,
-		"rick_phase_timeline":    false,
-		"rick_workflow_verdicts": false,
-		"rick_persona_output":    false,
+		"rick_diff_viewer":       false,
+		"rick_job_inspect":       false,
+		"rick_wave_manager":      false,
 		"rick_list_dead_letters": false,
-		"rick_cancel_workflow":   false,
-		"rick_pause_workflow":    false,
-		"rick_resume_workflow":   false,
 		"rick_inject_guidance":   false,
 	}
 
@@ -491,7 +488,7 @@ func TestToolRunWorkflowKeepsWorkspaceDevForPRSource(t *testing.T) {
 	}
 }
 
-func TestToolWorkflowStatus(t *testing.T) {
+func TestToolWorkflowInspect_Status(t *testing.T) {
 	deps, cleanup := testDeps(t)
 	defer cleanup()
 	s := NewServer(deps, testLogger())
@@ -509,7 +506,7 @@ func TestToolWorkflowStatus(t *testing.T) {
 	}
 
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_workflow_status",
+		Name:      "rick_workflow_inspect",
 		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s"}`, aggregateID)),
 	}))
 
@@ -521,10 +518,13 @@ func TestToolWorkflowStatus(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var status workflowStatusResult
-	if err := json.Unmarshal([]byte(result.Content[0].Text), &status); err != nil {
+	var inspect struct {
+		Status workflowStatusResult `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &inspect); err != nil {
 		t.Fatal(err)
 	}
+	status := inspect.Status
 	if status.Status != "requested" {
 		t.Errorf("expected status requested, got %s", status.Status)
 	}
@@ -568,7 +568,7 @@ func TestToolWorkflowStatus_SurfacesFailureDetail(t *testing.T) {
 	}
 
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_workflow_status",
+		Name:      "rick_workflow_inspect",
 		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s"}`, aggregateID)),
 	}))
 
@@ -580,10 +580,13 @@ func TestToolWorkflowStatus_SurfacesFailureDetail(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var status workflowStatusResult
-	if err := json.Unmarshal([]byte(result.Content[0].Text), &status); err != nil {
+	var inspect struct {
+		Status workflowStatusResult `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &inspect); err != nil {
 		t.Fatal(err)
 	}
+	status := inspect.Status
 	if status.Status != "failed" {
 		t.Fatalf("status = %q; want failed", status.Status)
 	}
@@ -613,7 +616,7 @@ func TestToolWorkflowStatusNotFound(t *testing.T) {
 	s := NewServer(deps, testLogger())
 
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_workflow_status",
+		Name:      "rick_workflow_inspect",
 		Arguments: json.RawMessage(`{"workflow_id":"nonexistent"}`),
 	}))
 
@@ -621,8 +624,17 @@ func TestToolWorkflowStatusNotFound(t *testing.T) {
 	data, _ := json.Marshal(resp.Result)
 	var result toolsCallResult
 	_ = json.Unmarshal(data, &result)
-	if !result.IsError {
-		t.Error("expected error for nonexistent workflow")
+	// rick_workflow_inspect reports a missing workflow under
+	// result["errors"]["status"] rather than as a tool-level error.
+	if result.IsError {
+		t.Fatalf("inspect should not be a tool error, got: %s", result.Content[0].Text)
+	}
+	var inspect struct {
+		Errors map[string]string `json:"errors"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	if inspect.Errors["status"] == "" {
+		t.Error("expected status panel error for nonexistent workflow")
 	}
 }
 
@@ -746,8 +758,8 @@ func TestToolTokenUsage(t *testing.T) {
 
 	s := NewServer(deps, testLogger())
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_token_usage",
-		Arguments: json.RawMessage(`{"workflow_id":"tk-wf-1"}`),
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"workflow_id":"tk-wf-1","include":["tokens"]}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -758,8 +770,11 @@ func TestToolTokenUsage(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var usage tokenUsageResult
-	_ = json.Unmarshal([]byte(result.Content[0].Text), &usage)
+	var inspect struct {
+		Tokens tokenUsageResult `json:"tokens"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	usage := inspect.Tokens
 	if usage.Total != 1500 {
 		t.Errorf("expected 1500 tokens, got %d", usage.Total)
 	}
@@ -774,8 +789,8 @@ func TestToolTokenUsageNotTracked(t *testing.T) {
 	s := NewServer(deps, testLogger())
 
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_token_usage",
-		Arguments: json.RawMessage(`{"workflow_id":"nonexistent"}`),
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"workflow_id":"nonexistent","include":["tokens"]}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -786,8 +801,11 @@ func TestToolTokenUsageNotTracked(t *testing.T) {
 		t.Error("expected success with zero usage for unknown workflow")
 	}
 
-	var usage tokenUsageResult
-	_ = json.Unmarshal([]byte(result.Content[0].Text), &usage)
+	var inspect struct {
+		Tokens tokenUsageResult `json:"tokens"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	usage := inspect.Tokens
 	if usage.Total != 0 {
 		t.Errorf("expected 0 tokens, got %d", usage.Total)
 	}
@@ -808,8 +826,8 @@ func TestToolPhaseTimeline(t *testing.T) {
 
 	s := NewServer(deps, testLogger())
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_phase_timeline",
-		Arguments: json.RawMessage(`{"workflow_id":"tl-wf-1"}`),
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"workflow_id":"tl-wf-1","include":["timeline"]}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -820,8 +838,11 @@ func TestToolPhaseTimeline(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var timeline phaseTimelineResult
-	_ = json.Unmarshal([]byte(result.Content[0].Text), &timeline)
+	var inspect struct {
+		Timeline phaseTimelineResult `json:"timeline"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	timeline := inspect.Timeline
 	if len(timeline.Phases) != 1 {
 		t.Fatalf("expected 1 phase, got %d", len(timeline.Phases))
 	}
@@ -853,8 +874,8 @@ func TestToolPhaseTimeline_SurfacesFailureDiagnostics(t *testing.T) {
 
 	s := NewServer(deps, testLogger())
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_phase_timeline",
-		Arguments: json.RawMessage(`{"workflow_id":"tl-failed"}`),
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"workflow_id":"tl-failed","include":["timeline"]}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -865,8 +886,11 @@ func TestToolPhaseTimeline_SurfacesFailureDiagnostics(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var timeline phaseTimelineResult
-	_ = json.Unmarshal([]byte(result.Content[0].Text), &timeline)
+	var inspect struct {
+		Timeline phaseTimelineResult `json:"timeline"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	timeline := inspect.Timeline
 	if len(timeline.Phases) != 1 {
 		t.Fatalf("expected 1 phase, got %d", len(timeline.Phases))
 	}
@@ -1010,8 +1034,8 @@ func TestToolCancelWorkflow(t *testing.T) {
 	_ = deps.Store.Append(context.Background(), aggregateID, 0, []event.Envelope{reqEvt, startEvt})
 
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_cancel_workflow",
-		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s","reason":"test cancel"}`, aggregateID)),
+		Name:      "rick_workflow_control",
+		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s","action":"cancel","reason":"test cancel"}`, aggregateID)),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -1059,8 +1083,8 @@ func TestToolCancelWorkflowAlreadyCompleted(t *testing.T) {
 	_ = deps.Store.Append(context.Background(), aggregateID, 0, []event.Envelope{reqEvt, completeEvt})
 
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_cancel_workflow",
-		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s"}`, aggregateID)),
+		Name:      "rick_workflow_control",
+		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s","action":"cancel"}`, aggregateID)),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -1088,8 +1112,8 @@ func TestToolPauseResumeWorkflow(t *testing.T) {
 
 	// Pause
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_pause_workflow",
-		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s","reason":"investigating"}`, aggregateID)),
+		Name:      "rick_workflow_control",
+		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s","action":"pause","reason":"investigating"}`, aggregateID)),
 	}))
 	resp := parseResponse(t, lines[0])
 	data, _ := json.Marshal(resp.Result)
@@ -1108,8 +1132,8 @@ func TestToolPauseResumeWorkflow(t *testing.T) {
 
 	// Resume
 	lines = serveLines(t, s, sendRequest(2, methodToolsCall, toolsCallParams{
-		Name:      "rick_resume_workflow",
-		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s","reason":"fixed"}`, aggregateID)),
+		Name:      "rick_workflow_control",
+		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s","action":"resume","reason":"fixed"}`, aggregateID)),
 	}))
 	resp = parseResponse(t, lines[0])
 	data, _ = json.Marshal(resp.Result)
@@ -1202,8 +1226,8 @@ func TestToolWorkflowVerdicts(t *testing.T) {
 
 	s := NewServer(deps, testLogger())
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_workflow_verdicts",
-		Arguments: json.RawMessage(`{"workflow_id":"vd-wf-1"}`),
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"workflow_id":"vd-wf-1","include":["verdicts"]}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -1214,10 +1238,13 @@ func TestToolWorkflowVerdicts(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var vr workflowVerdictsResult
-	if err := json.Unmarshal([]byte(result.Content[0].Text), &vr); err != nil {
+	var inspect struct {
+		Verdicts workflowVerdictsResult `json:"verdicts"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &inspect); err != nil {
 		t.Fatal(err)
 	}
+	vr := inspect.Verdicts
 	if vr.Count != 1 {
 		t.Fatalf("expected 1 verdict, got %d", vr.Count)
 	}
@@ -1244,8 +1271,8 @@ func TestToolWorkflowVerdictsEmpty(t *testing.T) {
 	s := NewServer(deps, testLogger())
 
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_workflow_verdicts",
-		Arguments: json.RawMessage(`{"workflow_id":"unknown-wf"}`),
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"workflow_id":"unknown-wf","include":["verdicts"]}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -1256,8 +1283,11 @@ func TestToolWorkflowVerdictsEmpty(t *testing.T) {
 		t.Fatalf("expected success for unknown workflow, got error: %s", result.Content[0].Text)
 	}
 
-	var vr workflowVerdictsResult
-	_ = json.Unmarshal([]byte(result.Content[0].Text), &vr)
+	var inspect struct {
+		Verdicts workflowVerdictsResult `json:"verdicts"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	vr := inspect.Verdicts
 	if vr.Count != 0 {
 		t.Errorf("expected count 0, got %d", vr.Count)
 	}
@@ -1304,8 +1334,8 @@ func TestToolPersonaOutput(t *testing.T) {
 
 	s := NewServer(deps, testLogger())
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_persona_output",
-		Arguments: json.RawMessage(`{"workflow_id":"po-wf-1","persona":"developer"}`),
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"workflow_id":"po-wf-1","include":["persona_output"],"persona":"developer"}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -1316,10 +1346,13 @@ func TestToolPersonaOutput(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var out personaOutputResult
-	if err := json.Unmarshal([]byte(result.Content[0].Text), &out); err != nil {
+	var inspect struct {
+		PersonaOutput personaOutputResult `json:"persona_output"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &inspect); err != nil {
 		t.Fatal(err)
 	}
+	out := inspect.PersonaOutput
 	if out.Output != "This is the AI output text" {
 		t.Errorf("expected output text, got %q", out.Output)
 	}
@@ -1346,8 +1379,8 @@ func TestToolPersonaOutputTruncation(t *testing.T) {
 
 	s := NewServer(deps, testLogger())
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_persona_output",
-		Arguments: json.RawMessage(`{"workflow_id":"po-trunc-1","persona":"developer","max_length":100}`),
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"workflow_id":"po-trunc-1","include":["persona_output"],"persona":"developer","max_length":100}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
@@ -1358,8 +1391,11 @@ func TestToolPersonaOutputTruncation(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var out personaOutputResult
-	_ = json.Unmarshal([]byte(result.Content[0].Text), &out)
+	var inspect struct {
+		PersonaOutput personaOutputResult `json:"persona_output"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	out := inspect.PersonaOutput
 	if !out.Truncated {
 		t.Error("expected truncated=true")
 	}
@@ -1385,16 +1421,26 @@ func TestToolPersonaOutputNotFound(t *testing.T) {
 
 	s := NewServer(deps, testLogger())
 	lines := serveLines(t, s, sendRequest(1, methodToolsCall, toolsCallParams{
-		Name:      "rick_persona_output",
-		Arguments: json.RawMessage(`{"workflow_id":"po-nf-1","persona":"researcher"}`),
+		Name:      "rick_workflow_inspect",
+		Arguments: json.RawMessage(`{"workflow_id":"po-nf-1","include":["persona_output"],"persona":"researcher"}`),
 	}))
 
 	resp := parseResponse(t, lines[0])
 	data, _ := json.Marshal(resp.Result)
 	var result toolsCallResult
 	_ = json.Unmarshal(data, &result)
-	if !result.IsError {
-		t.Error("expected error for persona with no OutputRef")
+	// rick_workflow_inspect surfaces a per-panel failure (persona with no
+	// OutputRef) under result["errors"]["persona_output"] instead of a
+	// tool-level error.
+	if result.IsError {
+		t.Fatalf("inspect should not be a tool error, got: %s", result.Content[0].Text)
+	}
+	var inspect struct {
+		Errors map[string]string `json:"errors"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	if inspect.Errors["persona_output"] == "" {
+		t.Error("expected persona_output panel error for persona with no OutputRef")
 	}
 }
 

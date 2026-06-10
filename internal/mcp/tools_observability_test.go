@@ -95,7 +95,7 @@ func TestToolDiff_IncludesUncommittedChanges(t *testing.T) {
 		t.Fatalf("append ws-ready: %v", err)
 	}
 
-	res, err := callTool(t, s, "rick_diff", map[string]any{
+	res, err := callTool(t, s, "rick_diff_viewer", map[string]any{
 		"workflow_id": correlationID,
 	})
 	if err != nil {
@@ -160,7 +160,7 @@ func TestToolDiff_NoBaseBranch(t *testing.T) {
 		t.Fatalf("append ws-ready: %v", err)
 	}
 
-	res, err := callTool(t, s, "rick_diff", map[string]any{
+	res, err := callTool(t, s, "rick_diff_viewer", map[string]any{
 		"workflow_id": correlationID,
 	})
 	if err != nil {
@@ -223,7 +223,7 @@ func TestToolDiff_StatOnly(t *testing.T) {
 		"workflow_id": correlationID,
 		"stat_only":   true,
 	})
-	res, err := s.tools["rick_diff"].Handler(context.Background(), raw)
+	res, err := s.tools["rick_diff_viewer"].Handler(context.Background(), raw)
 	if err != nil {
 		t.Fatalf("rick_diff: %v", err)
 	}

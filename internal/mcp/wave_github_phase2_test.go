@@ -77,7 +77,8 @@ func TestComputeGithubWavePlan_BodyRefsDeps(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_wave_plan", map[string]any{
+	result, err := callTool(t, s, "rick_wave_manager", map[string]any{
+		"action": "plan",
 		"source": map[string]any{
 			"type":              "github",
 			"parent":            "o/r#1",
@@ -123,7 +124,8 @@ func TestComputeGithubWavePlan_LabelsDeps(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_wave_plan", map[string]any{
+	result, err := callTool(t, s, "rick_wave_manager", map[string]any{
+		"action": "plan",
 		"source": map[string]any{
 			"type":              "github",
 			"parent":            "o/r#1",
@@ -173,7 +175,8 @@ func TestComputeGithubWavePlan_TaskListDiscovery(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_wave_plan", map[string]any{
+	result, err := callTool(t, s, "rick_wave_manager", map[string]any{
+		"action": "plan",
 		"source": map[string]any{
 			"type":              "github",
 			"parent":            "o/r#1",
@@ -218,7 +221,8 @@ func TestComputeGithubWavePlan_DAGMapRouting(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_wave_plan", map[string]any{
+	result, err := callTool(t, s, "rick_wave_manager", map[string]any{
+		"action": "plan",
 		"source": map[string]any{
 			"type":              "github",
 			"parent":            "o/r#1",
@@ -296,7 +300,8 @@ func TestComputeGithubWavePlan_DefaultDAGForGithubSource(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_wave_plan", map[string]any{
+	result, err := callTool(t, s, "rick_wave_manager", map[string]any{
+		"action": "plan",
 		"source": map[string]any{
 			"type":              "github",
 			"parent":            "o/r#1",
@@ -358,7 +363,8 @@ func TestComputeGithubWavePlan_PRFeedbackTimelineRouting(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_wave_plan", map[string]any{
+	result, err := callTool(t, s, "rick_wave_manager", map[string]any{
+		"action": "plan",
 		"source": map[string]any{
 			"type":              "github",
 			"parent":            "o/r#1",
@@ -421,7 +427,8 @@ func TestComputeGithubWavePlan_GraphQLFastPath(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_wave_plan", map[string]any{
+	result, err := callTool(t, s, "rick_wave_manager", map[string]any{
+		"action": "plan",
 		"source": map[string]any{
 			"type":              "github",
 			"parent":            "o/r#1",

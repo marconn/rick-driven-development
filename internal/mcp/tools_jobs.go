@@ -16,7 +16,7 @@ func (s *Server) registerJobTools() {
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_consult",
-			Description: "Spawn an AI persona for a one-shot advisory question. No workflow, no events, no aggregate. Returns a job ID for async polling via rick_job_status/rick_job_output. Use this for quick questions: 'Ask an architect about X', 'Get a QA review of this plan'.",
+			Description: "Spawn an AI persona for a one-shot advisory question. No workflow, no events, no aggregate. Returns a job ID for async polling via rick_job_inspect. Use this for quick questions: 'Ask an architect about X', 'Get a QA review of this plan'.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -111,51 +111,9 @@ func (s *Server) registerJobTools() {
 		Handler: s.toolRun,
 	})
 
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_job_status",
-			Description: "Get the status of an async job spawned by rick_consult or rick_run.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"job_id": map[string]any{
-						"type":        "string",
-						"description": "The job ID returned by rick_consult or rick_run.",
-					},
-				},
-				"required": []string{"job_id"},
-			},
-		},
-		Handler: s.toolJobStatus,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_job_output",
-			Description: "Get the output of a completed async job. Supports incremental reads via offset for streaming large outputs.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"job_id": map[string]any{
-						"type":        "string",
-						"description": "The job ID.",
-					},
-					"offset": map[string]any{
-						"type":        "integer",
-						"default":     0,
-						"description": "Character offset to start reading from (for incremental reads).",
-					},
-					"max_length": map[string]any{
-						"type":        "integer",
-						"default":     50000,
-						"description": "Maximum characters to return.",
-					},
-				},
-				"required": []string{"job_id"},
-			},
-		},
-		Handler: s.toolJobOutput,
-	})
+	// rick_job_status + rick_job_output are folded into rick_job_inspect
+	// (see tools_consolidated.go); their handlers remain below as the
+	// implementation the facade dispatches to.
 
 	s.register(Tool{
 		Definition: ToolDefinition{

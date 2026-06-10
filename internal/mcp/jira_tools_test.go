@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -460,7 +461,7 @@ func TestToolJiraWrite_InvalidJSON(t *testing.T) {
 	defer cleanup()
 
 	tool := s.tools["rick_jira_write"]
-	_, err := tool.Handler(t.Context(), json.RawMessage(`not json`))
+	_, err := tool.Handler(context.Background(), json.RawMessage(`not json`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -469,23 +470,7 @@ func TestToolJiraWrite_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestToolJiraWrite_MissingValue(t *testing.T) {
-	s, cleanup := testServer(t)
-	defer cleanup()
 
-	// value is omitted (JSON null maps to nil in the struct).
-	_, err := callTool(t, s, "rick_jira_write", map[string]any{
-		"ticket":     "PROJ-1",
-		"field_name": "story_points",
-		// no "value"
-	})
-	if err == nil {
-		t.Fatal("expected error for missing value")
-	}
-	if !strings.Contains(err.Error(), "value is required") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
 
 func TestToolJiraWrite_DescriptionConvertsToADF(t *testing.T) {
 	// The description field path runs jira.MarkdownToADF — verify UpdateField is called
@@ -519,8 +504,8 @@ func TestToolJiraWrite_DescriptionConvertsToADF(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	rm := result.(map[string]any)
-	if rm["updated"] != true {
-		t.Errorf("expected updated=true")
+	if rm["field_updated"] == nil {
+		t.Errorf("expected field_updated to be set")
 	}
 	// The PUT body should contain ADF "type":"doc", not the raw markdown string.
 	if !strings.Contains(string(capturedPayload), `"doc"`) {
@@ -556,8 +541,8 @@ func TestToolJiraWrite_AcceptanceCriteriaMapping(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	rm := result.(map[string]any)
-	if rm["updated"] != true {
-		t.Errorf("expected updated=true")
+	if rm["field_updated"] == nil {
+		t.Errorf("expected field_updated to be set")
 	}
 	if capturedPath != "/rest/api/3/issue/PROJ-6" {
 		t.Errorf("unexpected PUT path: %s", capturedPath)
@@ -624,8 +609,8 @@ func TestToolJiraWrite_UnknownFieldPassthrough(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	rm := result.(map[string]any)
-	if rm["updated"] != true {
-		t.Errorf("expected updated=true")
+	if rm["field_updated"] == nil {
+		t.Errorf("expected field_updated to be set")
 	}
 	if !strings.Contains(string(capturedBody), "customfield_99999") {
 		t.Errorf("expected custom field in PUT body, got: %s", capturedBody)
@@ -634,12 +619,12 @@ func TestToolJiraWrite_UnknownFieldPassthrough(t *testing.T) {
 
 // --- toolJiraTransition ---
 
-func TestToolJiraTransition_InvalidJSON(t *testing.T) {
+func TestToolJiraTransitionWrite_InvalidJSON(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	tool := s.tools["rick_jira_transition"]
-	_, err := tool.Handler(t.Context(), json.RawMessage(`{bad`))
+	tool := s.tools["rick_jira_write"]
+	_, err := tool.Handler(context.Background(), json.RawMessage(`{bad`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -648,23 +633,9 @@ func TestToolJiraTransition_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestToolJiraTransition_MissingFields(t *testing.T) {
-	s, cleanup := testServer(t)
-	defer cleanup()
 
-	// Missing status.
-	_, err := callTool(t, s, "rick_jira_transition", map[string]any{
-		"ticket": "PROJ-1",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing status")
-	}
-	if !strings.Contains(err.Error(), "ticket and status are required") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
 
-func TestToolJiraTransition_APIError_TransitionNotFound(t *testing.T) {
+func TestToolJiraTransitionWrite_APIError_TransitionNotFound(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/rest/api/3/issue/PROJ-1/transitions", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -689,7 +660,7 @@ func TestToolJiraTransition_APIError_TransitionNotFound(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	_, err := callTool(t, s, "rick_jira_transition", map[string]any{
+	_, err := callTool(t, s, "rick_jira_write", map[string]any{
 		"ticket": "PROJ-1",
 		"status": "NONEXISTENT STATUS",
 	})
@@ -703,12 +674,12 @@ func TestToolJiraTransition_APIError_TransitionNotFound(t *testing.T) {
 
 // --- toolJiraComment ---
 
-func TestToolJiraComment_InvalidJSON(t *testing.T) {
+func TestToolJiraCommentWrite_InvalidJSON(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	tool := s.tools["rick_jira_comment"]
-	_, err := tool.Handler(t.Context(), json.RawMessage(`{bad json`))
+	tool := s.tools["rick_jira_write"]
+	_, err := tool.Handler(context.Background(), json.RawMessage(`{bad json`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -717,23 +688,9 @@ func TestToolJiraComment_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestToolJiraComment_MissingFields(t *testing.T) {
-	s, cleanup := testServer(t)
-	defer cleanup()
 
-	// Missing comment.
-	_, err := callTool(t, s, "rick_jira_comment", map[string]any{
-		"ticket": "PROJ-1",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing comment")
-	}
-	if !strings.Contains(err.Error(), "ticket and comment are required") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
 
-func TestToolJiraComment_APIError(t *testing.T) {
+func TestToolJiraCommentWrite_APIError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/rest/api/3/issue/PROJ-ERR/comment", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -749,7 +706,7 @@ func TestToolJiraComment_APIError(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	_, err := callTool(t, s, "rick_jira_comment", map[string]any{
+	_, err := callTool(t, s, "rick_jira_write", map[string]any{
 		"ticket":  "PROJ-ERR",
 		"comment": "test comment",
 	})
@@ -767,8 +724,8 @@ func TestToolJiraEpicIssues_InvalidJSON(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	tool := s.tools["rick_jira_epic_issues"]
-	_, err := tool.Handler(t.Context(), json.RawMessage(`not json at all`))
+	tool := s.tools["rick_jira_read"]
+	_, err := tool.Handler(context.Background(), json.RawMessage(`not json at all`))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -777,87 +734,11 @@ func TestToolJiraEpicIssues_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestToolJiraEpicIssues_MissingEpic(t *testing.T) {
-	s, cleanup := testServer(t)
-	defer cleanup()
 
-	_, err := callTool(t, s, "rick_jira_epic_issues", map[string]any{})
-	if err == nil {
-		t.Fatal("expected error for missing epic")
-	}
-	if !strings.Contains(err.Error(), "epic is required") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
 
-func TestToolJiraEpicIssues_APIError(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/rest/api/3/search/jql", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"errorMessages":["Invalid JQL"]}`))
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
 
-	client := jira.NewClient(srv.URL, "test", "tok")
-	deps, cleanup := testDeps(t)
-	defer cleanup()
-	deps.Jira = client
-	s := NewServer(deps, testLogger())
-	defer s.Close()
 
-	_, err := callTool(t, s, "rick_jira_epic_issues", map[string]any{
-		"epic": "PROJ-EPIC",
-	})
-	if err == nil {
-		t.Fatal("expected error for API 400")
-	}
-	if !strings.Contains(err.Error(), "fetch epic children") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
 
-func TestToolJiraEpicIssues_ExcludeClosed(t *testing.T) {
-	mux := http.NewServeMux()
-	var capturedBody []byte
-	mux.HandleFunc("/rest/api/3/search/jql", func(w http.ResponseWriter, r *http.Request) {
-		var buf [4096]byte
-		n, _ := r.Body.Read(buf[:])
-		capturedBody = buf[:n]
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"total":  0,
-			"issues": []any{},
-		})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	client := jira.NewClient(srv.URL, "test", "tok")
-	deps, cleanup := testDeps(t)
-	defer cleanup()
-	deps.Jira = client
-	s := NewServer(deps, testLogger())
-	defer s.Close()
-
-	falseVal := false
-	result, err := callTool(t, s, "rick_jira_epic_issues", map[string]any{
-		"epic":          "PROJ-EPIC",
-		"include_closed": &falseVal,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	rm := result.(map[string]any)
-	if rm["count"] != 0 {
-		t.Errorf("expected count=0, got %v", rm["count"])
-	}
-	// JQL should exclude closed statuses.
-	if !strings.Contains(string(capturedBody), "Done") {
-		t.Errorf("expected 'Done' exclusion in JQL, got: %s", capturedBody)
-	}
-}
 
 // --- toolJiraSearch ---
 
@@ -958,308 +839,3 @@ func TestToolJiraSearch_APIError(t *testing.T) {
 
 // --- toolJiraLink ---
 
-func TestToolJiraLink_InvalidJSON(t *testing.T) {
-	s, cleanup := testServer(t)
-	defer cleanup()
-
-	tool := s.tools["rick_jira_link"]
-	_, err := tool.Handler(t.Context(), json.RawMessage(`not valid`))
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-	if !strings.Contains(err.Error(), "invalid arguments") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestToolJiraLink_MissingFields(t *testing.T) {
-	s, cleanup := testServer(t)
-	defer cleanup()
-
-	// Missing to_ticket.
-	_, err := callTool(t, s, "rick_jira_link", map[string]any{
-		"from_ticket": "PROJ-1",
-	})
-	if err == nil {
-		t.Fatal("expected error for missing to_ticket")
-	}
-	if !strings.Contains(err.Error(), "from_ticket and to_ticket are required") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestToolJiraLink_DefaultLinkType(t *testing.T) {
-	// When link_type is omitted, should default to "Blocks".
-	mux := http.NewServeMux()
-	var capturedBody []byte
-	mux.HandleFunc("/rest/api/3/issueLink", func(w http.ResponseWriter, r *http.Request) {
-		var buf [4096]byte
-		n, _ := r.Body.Read(buf[:])
-		capturedBody = buf[:n]
-		w.WriteHeader(http.StatusCreated)
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	client := jira.NewClient(srv.URL, "test", "tok")
-	deps, cleanup := testDeps(t)
-	defer cleanup()
-	deps.Jira = client
-	s := NewServer(deps, testLogger())
-	defer s.Close()
-
-	result, err := callTool(t, s, "rick_jira_link", map[string]any{
-		"from_ticket": "PROJ-1",
-		"to_ticket":   "PROJ-2",
-		// link_type omitted — should default to "Blocks"
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	rm := result.(map[string]any)
-	if rm["linked"] != true {
-		t.Errorf("expected linked=true")
-	}
-	if rm["type"] != "Blocks" {
-		t.Errorf("expected type='Blocks', got %v", rm["type"])
-	}
-	if !strings.Contains(string(capturedBody), "Blocks") {
-		t.Errorf("expected 'Blocks' in request body, got: %s", capturedBody)
-	}
-}
-
-// --- toolJiraPRLinks ---
-
-func TestToolJiraPRLinks_Success(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/rest/api/3/issue/PROJ-100", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":  "10100",
-			"key": "PROJ-100",
-			"fields": map[string]any{
-				"summary": "Test issue",
-				"status":  map[string]any{"name": "IN DEVELOPMENT"},
-			},
-		})
-	})
-	mux.HandleFunc("/rest/dev-status/latest/issue/detail", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("issueId") != "10100" {
-			t.Errorf("unexpected issueId: %s", r.URL.Query().Get("issueId"))
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"detail": []map[string]any{
-				{
-					"pullRequests": []map[string]any{
-						{
-							"id":     "pr-1",
-							"name":   "feat: add login",
-							"url":    "https://github.com/org/repo/pull/42",
-							"status": "OPEN",
-							"source": map[string]any{"url": "https://github.com/org/repo"},
-						},
-						{
-							"id":     "pr-2",
-							"name":   "fix: session",
-							"url":    "https://github.com/org/repo/pull/43",
-							"status": "MERGED",
-							"source": map[string]any{"url": "https://github.com/org/repo"},
-						},
-					},
-				},
-			},
-		})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	client := jira.NewClient(srv.URL, "test", "tok")
-	deps, cleanup := testDeps(t)
-	defer cleanup()
-	deps.Jira = client
-	s := NewServer(deps, testLogger())
-	defer s.Close()
-
-	result, err := callTool(t, s, "rick_jira_pr_links", map[string]any{"ticket": "PROJ-100"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	m, ok := result.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map, got %T", result)
-	}
-	if m["ticket"] != "PROJ-100" {
-		t.Errorf("unexpected ticket: %v", m["ticket"])
-	}
-	if m["count"] != 2 {
-		t.Errorf("expected 2 PRs, got %v", m["count"])
-	}
-}
-
-func TestToolJiraPRLinks_NoPRs(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/rest/api/3/issue/PROJ-200", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":  "10200",
-			"key": "PROJ-200",
-			"fields": map[string]any{
-				"summary": "No PRs",
-				"status":  map[string]any{"name": "TO DO"},
-			},
-		})
-	})
-	mux.HandleFunc("/rest/dev-status/latest/issue/detail", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"detail": []map[string]any{}})
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	client := jira.NewClient(srv.URL, "test", "tok")
-	deps, cleanup := testDeps(t)
-	defer cleanup()
-	deps.Jira = client
-	s := NewServer(deps, testLogger())
-	defer s.Close()
-
-	result, err := callTool(t, s, "rick_jira_pr_links", map[string]any{"ticket": "PROJ-200"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	m := result.(map[string]any)
-	if m["count"] != 0 {
-		t.Errorf("expected 0 PRs, got %v", m["count"])
-	}
-}
-
-func TestToolJiraPRLinks_NoClient(t *testing.T) {
-	s, cleanup := testServer(t)
-	defer cleanup()
-
-	_, err := callTool(t, s, "rick_jira_pr_links", map[string]any{"ticket": "PROJ-1"})
-	if err == nil {
-		t.Fatal("expected error when Jira not configured")
-	}
-	if !strings.Contains(err.Error(), "jira client not configured") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestToolJiraLink_APIError(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/rest/api/3/issueLink", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"errorMessages":["Invalid link type"]}`))
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	client := jira.NewClient(srv.URL, "test", "tok")
-	deps, cleanup := testDeps(t)
-	defer cleanup()
-	deps.Jira = client
-	s := NewServer(deps, testLogger())
-	defer s.Close()
-
-	_, err := callTool(t, s, "rick_jira_link", map[string]any{
-		"from_ticket": "PROJ-1",
-		"to_ticket":   "PROJ-2",
-		"link_type":   "Relates to",
-	})
-	if err == nil {
-		t.Fatal("expected error for API 400")
-	}
-	if !strings.Contains(err.Error(), "link issues") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestToolJiraDeleteLink_Success(t *testing.T) {
-	mock, client := newMockJiraServer(t)
-	mock.mux.HandleFunc("/rest/api/3/issueLink/12345", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			t.Errorf("method=%s, want DELETE", r.Method)
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
-
-	deps, cleanup := testDeps(t)
-	defer cleanup()
-	deps.Jira = client
-	s := NewServer(deps, testLogger())
-	defer s.Close()
-
-	result, err := callTool(t, s, "rick_jira_delete_link", map[string]any{"link_id": "12345"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	m := result.(map[string]any)
-	if m["deleted"] != true {
-		t.Errorf("expected deleted=true, got %v", m["deleted"])
-	}
-	if m["link_id"] != "12345" {
-		t.Errorf("expected link_id=12345, got %v", m["link_id"])
-	}
-}
-
-func TestToolJiraDeleteLink_NoClient(t *testing.T) {
-	s, cleanup := testServer(t)
-	defer cleanup()
-
-	_, err := callTool(t, s, "rick_jira_delete_link", map[string]any{"link_id": "12345"})
-	if err == nil {
-		t.Fatal("expected error when Jira not configured")
-	}
-	if !strings.Contains(err.Error(), "jira client not configured") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestToolJiraDeleteLink_MissingLinkID(t *testing.T) {
-	mock, client := newMockJiraServer(t)
-	_ = mock
-
-	deps, cleanup := testDeps(t)
-	defer cleanup()
-	deps.Jira = client
-	s := NewServer(deps, testLogger())
-	defer s.Close()
-
-	_, err := callTool(t, s, "rick_jira_delete_link", map[string]any{})
-	if err == nil {
-		t.Fatal("expected error for missing link_id")
-	}
-	if !strings.Contains(err.Error(), "link_id is required") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestToolJiraDeleteLink_APIError(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/rest/api/3/issueLink/99999", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"errorMessages":["Link not found"]}`))
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	client := jira.NewClient(srv.URL, "test", "tok")
-	deps, cleanup := testDeps(t)
-	defer cleanup()
-	deps.Jira = client
-	s := NewServer(deps, testLogger())
-	defer s.Close()
-
-	_, err := callTool(t, s, "rick_jira_delete_link", map[string]any{"link_id": "99999"})
-	if err == nil {
-		t.Fatal("expected error for API 404")
-	}
-	if !strings.Contains(err.Error(), "delete link") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}

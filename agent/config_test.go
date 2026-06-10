@@ -114,7 +114,7 @@ func TestEnvOr(t *testing.T) {
 	key := "TEST_ENV_OR_" + t.Name()
 
 	// Unset — should return fallback.
-	os.Unsetenv(key)
+	_ = os.Unsetenv(key)
 	if got := envOr(key, "default"); got != "default" {
 		t.Errorf("expected default, got %s", got)
 	}
@@ -145,7 +145,7 @@ func TestLoadEnvFileKeyValueLines(t *testing.T) {
 	t.Setenv("HOME", dir)
 	writeEnvFile(t, dir, "MY_TEST_KEY_ABC=myvalue\n")
 
-	os.Unsetenv("MY_TEST_KEY_ABC")
+	_ = os.Unsetenv("MY_TEST_KEY_ABC")
 	loadEnvFile()
 
 	if got := os.Getenv("MY_TEST_KEY_ABC"); got != "myvalue" {
@@ -158,7 +158,7 @@ func TestLoadEnvFileSkipsComments(t *testing.T) {
 	t.Setenv("HOME", dir)
 	writeEnvFile(t, dir, "# this is a comment\nMY_TEST_NOT_COMMENT=real\n")
 
-	os.Unsetenv("MY_TEST_NOT_COMMENT")
+	_ = os.Unsetenv("MY_TEST_NOT_COMMENT")
 	loadEnvFile()
 
 	if got := os.Getenv("MY_TEST_NOT_COMMENT"); got != "real" {
@@ -171,7 +171,7 @@ func TestLoadEnvFileSkipsEmptyLines(t *testing.T) {
 	t.Setenv("HOME", dir)
 	writeEnvFile(t, dir, "\n\nMY_TEST_AFTER_EMPTY=after\n\n")
 
-	os.Unsetenv("MY_TEST_AFTER_EMPTY")
+	_ = os.Unsetenv("MY_TEST_AFTER_EMPTY")
 	loadEnvFile()
 
 	if got := os.Getenv("MY_TEST_AFTER_EMPTY"); got != "after" {
@@ -185,8 +185,8 @@ func TestLoadEnvFileSkipsLinesWithoutEquals(t *testing.T) {
 	// "JUSTKEY" has no '=' — should be silently ignored.
 	writeEnvFile(t, dir, "JUSTKEY\nMY_TEST_VALID_PAIR=yes\n")
 
-	os.Unsetenv("JUSTKEY")
-	os.Unsetenv("MY_TEST_VALID_PAIR")
+	_ = os.Unsetenv("JUSTKEY")
+	_ = os.Unsetenv("MY_TEST_VALID_PAIR")
 	loadEnvFile()
 
 	// JUSTKEY must NOT be set (no '=' to split on).
@@ -203,7 +203,7 @@ func TestLoadEnvFileTrimWhitespace(t *testing.T) {
 	t.Setenv("HOME", dir)
 	writeEnvFile(t, dir, "  MY_TEST_TRIMMED  =  trimmedvalue  \n")
 
-	os.Unsetenv("MY_TEST_TRIMMED")
+	_ = os.Unsetenv("MY_TEST_TRIMMED")
 	loadEnvFile()
 
 	if got := os.Getenv("MY_TEST_TRIMMED"); got != "trimmedvalue" {
@@ -242,10 +242,10 @@ func TestDefaultConfigReadsEnvFile(t *testing.T) {
 	)
 
 	// Clear the env vars so loadEnvFile can set them.
-	os.Unsetenv("RICK_SERVER_URL")
-	os.Unsetenv("RICK_MODEL")
-	os.Unsetenv("GOOGLE_API_KEY")
-	os.Unsetenv("GOOGLE_GENAI_API_KEY")
+	_ = os.Unsetenv("RICK_SERVER_URL")
+	_ = os.Unsetenv("RICK_MODEL")
+	_ = os.Unsetenv("GOOGLE_API_KEY")
+	_ = os.Unsetenv("GOOGLE_GENAI_API_KEY")
 
 	cfg := DefaultConfig()
 

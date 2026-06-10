@@ -188,10 +188,10 @@ func TestIntegrationToolsList(t *testing.T) {
 	}
 
 	required := []string{
-		"rick_run_workflow", "rick_workflow_status", "rick_list_workflows",
-		"rick_list_events", "rick_token_usage", "rick_phase_timeline",
-		"rick_list_dead_letters", "rick_cancel_workflow", "rick_pause_workflow",
-		"rick_resume_workflow", "rick_inject_guidance",
+		"rick_run_workflow", "rick_workflow_inspect", "rick_list_workflows",
+		"rick_list_events", "rick_workflow_control", "rick_diff_viewer",
+		"rick_job_inspect", "rick_wave_manager",
+		"rick_list_dead_letters", "rick_inject_guidance",
 	}
 	for _, name := range required {
 		if !toolNames[name] {
@@ -257,7 +257,7 @@ func TestIntegrationWorkflowLifecycle(t *testing.T) {
 
 	// 2. Check status.
 	statusResp := rpcPost(t, baseURL, "tools/call", map[string]any{
-		"name":      "rick_workflow_status",
+		"name":      "rick_workflow_inspect",
 		"arguments": map[string]any{"workflow_id": wfID},
 	})
 	if statusResp.Error != nil {
@@ -266,8 +266,8 @@ func TestIntegrationWorkflowLifecycle(t *testing.T) {
 
 	// 3. Pause workflow.
 	pauseResp := rpcPost(t, baseURL, "tools/call", map[string]any{
-		"name":      "rick_pause_workflow",
-		"arguments": map[string]any{"workflow_id": wfID, "reason": "testing"},
+		"name":      "rick_workflow_control",
+		"arguments": map[string]any{"workflow_id": wfID, "action": "pause", "reason": "testing"},
 	})
 	data, _ = json.Marshal(pauseResp.Result)
 	var pauseResult toolsCallResult
@@ -306,8 +306,8 @@ func TestIntegrationWorkflowLifecycle(t *testing.T) {
 
 	// 5. Cancel workflow.
 	cancelResp := rpcPost(t, baseURL, "tools/call", map[string]any{
-		"name":      "rick_cancel_workflow",
-		"arguments": map[string]any{"workflow_id": wfID, "reason": "test done"},
+		"name":      "rick_workflow_control",
+		"arguments": map[string]any{"workflow_id": wfID, "action": "cancel", "reason": "test done"},
 	})
 	data, _ = json.Marshal(cancelResp.Result)
 	var cancelResult toolsCallResult
@@ -419,8 +419,8 @@ func TestIntegrationTokenUsageAndTimeline(t *testing.T) {
 
 	// Token usage (no data yet — should return zero).
 	tokenResp := rpcPost(t, baseURL, "tools/call", map[string]any{
-		"name":      "rick_token_usage",
-		"arguments": map[string]any{"workflow_id": run.WorkflowID},
+		"name":      "rick_workflow_inspect",
+		"arguments": map[string]any{"workflow_id": run.WorkflowID, "include": []string{"tokens"}},
 	})
 	data, _ = json.Marshal(tokenResp.Result)
 	var tokenResult toolsCallResult
@@ -431,8 +431,8 @@ func TestIntegrationTokenUsageAndTimeline(t *testing.T) {
 
 	// Phase timeline (no data yet).
 	timelineResp := rpcPost(t, baseURL, "tools/call", map[string]any{
-		"name":      "rick_phase_timeline",
-		"arguments": map[string]any{"workflow_id": run.WorkflowID},
+		"name":      "rick_workflow_inspect",
+		"arguments": map[string]any{"workflow_id": run.WorkflowID, "include": []string{"timeline"}},
 	})
 	data, _ = json.Marshal(timelineResp.Result)
 	var timelineResult toolsCallResult
@@ -506,14 +506,23 @@ func TestIntegrationWorkflowStatusNotFound(t *testing.T) {
 	defer cleanup()
 
 	resp := rpcPost(t, baseURL, "tools/call", map[string]any{
-		"name":      "rick_workflow_status",
+		"name":      "rick_workflow_inspect",
 		"arguments": map[string]any{"workflow_id": "nonexistent-id"},
 	})
 	data, _ := json.Marshal(resp.Result)
 	var result toolsCallResult
 	_ = json.Unmarshal(data, &result)
-	if !result.IsError {
-		t.Error("expected error for nonexistent workflow")
+	// rick_workflow_inspect does not raise a tool-level error for a missing
+	// workflow; the failed panel is reported under result["errors"][<panel>].
+	if result.IsError {
+		t.Fatalf("inspect should not be a tool error, got: %s", result.Content[0].Text)
+	}
+	var inspect struct {
+		Errors map[string]string `json:"errors"`
+	}
+	_ = json.Unmarshal([]byte(result.Content[0].Text), &inspect)
+	if inspect.Errors["status"] == "" {
+		t.Error("expected status panel error for nonexistent workflow")
 	}
 }
 

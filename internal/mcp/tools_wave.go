@@ -16,122 +16,15 @@ import (
 
 func (s *Server) registerWaveTools() {
 
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_wave_plan",
-			Description: "Compute development waves from a parent work item. Supports a Jira epic (source.type=jira), a GitHub parent issue with sub-issues (source.type=github, source.parent='owner/repo#N'), or a GitHub Projects V2 board (source.type=github, source.project='owner/N'). Reads children and dependency links, performs topological sort, returns a wave schedule showing which items can be developed in parallel. Back-compat: passing 'epic' alone is equivalent to {source:{type:'jira',epic:<value>}}.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"epic": map[string]any{
-						"type":        "string",
-						"description": "Jira epic key (back-compat shorthand for source.type='jira').",
-					},
-					"source": map[string]any{
-						"type":        "object",
-						"description": "Structured source descriptor. Use this for GitHub waves.",
-						"properties": map[string]any{
-							"type": map[string]any{
-								"type": "string",
-								"enum": []string{"jira", "github"},
-							},
-							"epic": map[string]any{
-								"type":        "string",
-								"description": "Jira epic key (when type='jira').",
-							},
-							"parent": map[string]any{
-								"type":        "string",
-								"description": "GitHub parent issue as 'owner/repo#N' (when type='github'). Mutually exclusive with source.project.",
-							},
-							"project": map[string]any{
-								"type":        "string",
-								"description": "GitHub Projects V2 board (when type='github'). Format 'owner/N' (owner is org or user). Mutually exclusive with source.parent. Requires token scope 'read:project'.",
-							},
-							"child_discovery": map[string]any{
-								"type":        "string",
-								"enum":        []string{"sub_issues", "task_list", "body_refs", "auto"},
-								"default":     "sub_issues",
-								"description": "How to discover children. 'auto' tries sub_issues → task_list → body_refs and records the winner in diagnostics.discovery_path.",
-							},
-							"dependency_source": map[string]any{
-								"type":        "string",
-								"enum":        []string{"table", "body_refs", "labels", "none", "project_field"},
-								"default":     "table",
-								"description": "Dependency source. For parent-issue sources (source.parent): 'table' (Depends-on column in parent body), 'body_refs' (scan each child body for Depends-on / Blocks / Blocked-by keywords), 'labels' (depends:<number>), or 'none'. For Projects V2 (source.project): 'project_field' (read a 'Depends on' custom text field, default), plus body_refs / labels / none.",
-							},
-							"dag_options": map[string]any{
-								"type":        "object",
-								"description": "Per-child DAG selection rules. Omit to keep default routing.",
-								"properties": map[string]any{
-									"dag_map": map[string]any{
-										"type":                 "object",
-										"description":          "Label → DAG mapping. Use 'default' key for fallback. rick:* labels absent from the map are reported in diagnostics.skipped as 'unknown_dag_label'.",
-										"additionalProperties": map[string]any{"type": "string"},
-									},
-								},
-							},
-							"allow_cross_repo": map[string]any{
-								"type":        "boolean",
-								"default":     false,
-								"description": "When true, keeps cross-repo children (sub-issues or body refs pointing at a different owner/repo than the parent) instead of filtering them with 'cross_repo_not_supported'. Each cross-repo child is planned against its own repo. Requires token scope on every referenced repo.",
-							},
-						},
-					},
-				},
-			},
-		},
-		Handler: s.toolWavePlan,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_wave_launch",
-			Description: "Launch a wave of parallel development jobs. Accepts the same source shape as rick_wave_plan (Jira epic or GitHub parent). For each child: starts the configured workflow with the appropriate source tag for later status lookup.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"epic":   map[string]any{"type": "string", "description": "Jira epic key (back-compat shorthand)."},
-					"source": waveSourceSchema(),
-					"wave": map[string]any{
-						"type":        "integer",
-						"description": "Wave number to launch (from rick_wave_plan). Omit for next ready wave.",
-					},
-					"dag": map[string]any{
-						"type":        "string",
-						"description": "Workflow DAG to use for each child. Default: 'jira-dev' for Jira sources, 'github-dev' for GitHub sources (fetches issue context + branches as issue-<N>).",
-					},
-					"tickets": map[string]any{
-						"type":        "array",
-						"items":       map[string]any{"type": "string"},
-						"description": "Override: specific child IDs to launch (subset of wave). For Jira: 'PROJ-123'. For GitHub: 'owner/repo#N'.",
-					},
-					"dry_run": map[string]any{"type": "boolean", "default": false},
-				},
-			},
-		},
-		Handler: s.toolWaveLaunch,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_wave_status",
-			Description: "Monitor the progress of a launched wave. Shows workflow status for each child plus aggregate view. Supports Jira and GitHub sources.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"epic":   map[string]any{"type": "string", "description": "Jira epic key (back-compat shorthand)."},
-					"source": waveSourceSchema(),
-					"wave":   map[string]any{"type": "integer", "description": "Wave number (optional, shows all waves if omitted)."},
-				},
-			},
-		},
-		Handler: s.toolWaveStatus,
-	})
+	// rick_wave_plan / rick_wave_launch / rick_wave_status / rick_wave_cleanup
+	// are folded into rick_wave_manager (see tools_consolidated.go); their
+	// handlers remain below as the implementation the facade dispatches to.
+	// rick_github_pr_links stays standalone — it is not a wave lifecycle verb.
 
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_github_pr_links",
-			Description: "Get GitHub pull request links for an issue or every child of a wave. Symmetrical to rick_jira_pr_links. Accepts either 'issue' (single owner/repo#N) or a wave source (same shape as rick_wave_plan). For each issue, resolves the workflow correlation via the 'source' tag and inspects the GitHub timeline for cross-referenced PRs.",
+			Description: "Get GitHub pull request links for an issue or every child of a wave. Mirrors rick_jira_read's pr_links join for GitHub. Accepts either 'issue' (single owner/repo#N) or a wave source (same shape as rick_wave_manager). For each issue, resolves the workflow correlation via the 'source' tag and inspects the GitHub timeline for cross-referenced PRs.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -143,23 +36,6 @@ func (s *Server) registerWaveTools() {
 			},
 		},
 		Handler: s.toolGitHubPRLinks,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_wave_cleanup",
-			Description: "Remove all isolated workspaces for a wave. Supports Jira and GitHub sources.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"epic":   map[string]any{"type": "string", "description": "Jira epic key (back-compat shorthand)."},
-					"source": waveSourceSchema(),
-					"wave":   map[string]any{"type": "integer", "description": "Wave number to clean up."},
-					"force":  map[string]any{"type": "boolean", "default": false},
-				},
-			},
-		},
-		Handler: s.toolWaveCleanup,
 	})
 }
 
@@ -237,7 +113,7 @@ type wavePlanResult struct {
 	Diagnostics wavePlanDiagnostics `json:"diagnostics"`
 }
 
-// wavePlanArgs is the parsed form of a rick_wave_plan call. We accept both the
+// wavePlanArgs is the parsed form of a rick_wave_manager action=plan call. We accept both the
 // legacy `epic` shorthand and the structured `source` discriminator.
 type wavePlanArgs struct {
 	Epic   string           `json:"epic"`
@@ -636,7 +512,7 @@ func (s *Server) computeJiraWavePlan(ctx context.Context, epic string) (wavePlan
 // independently swappable per spec §4/§5.1.
 func (s *Server) computeGithubWavePlan(ctx context.Context, src resolvedWaveSource) (wavePlanResult, error) {
 	if s.deps.GitHub == nil {
-		return wavePlanResult{}, fmt.Errorf("GITHUB_TOKEN is not set — rick_wave_plan with source.type='github' requires a configured GitHub client")
+		return wavePlanResult{}, fmt.Errorf("GITHUB_TOKEN is not set — rick_wave_manager (action=plan) with source.type='github' requires a configured GitHub client")
 	}
 
 	// Opt-in GraphQL fast path (spec §8). Collapses parent + sub-issues +
@@ -1219,7 +1095,7 @@ func canonicalizeEdgeRef(r gh.IssueRef, parentRepo string) string {
 // produces the same shape as the parent-issue path.
 func (s *Server) computeProjectsV2WavePlan(ctx context.Context, src resolvedWaveSource) (wavePlanResult, error) {
 	if s.deps.GitHub == nil {
-		return wavePlanResult{}, fmt.Errorf("GITHUB_TOKEN is not set — rick_wave_plan with source.project requires a configured GitHub client")
+		return wavePlanResult{}, fmt.Errorf("GITHUB_TOKEN is not set — rick_wave_manager (action=plan) with source.project requires a configured GitHub client")
 	}
 
 	board, err := s.deps.GitHub.FetchProjectV2Items(ctx, src.ProjectLogin, src.ProjectNumber)
@@ -1653,7 +1529,7 @@ func (s *Server) toolWaveLaunch(ctx context.Context, raw json.RawMessage) (any, 
 }
 
 // buildLaunchParams shapes the rick_run_workflow input for a single wave
-// child. GitHub children pass a source tag so rick_wave_status can look them
+// child. GitHub children pass a source tag so rick_wave_manager action=status can look them
 // up by tag; Jira children keep the legacy ticket-based path. When the plan
 // already resolved a per-child DAG (via dag_map or PR linkage), it takes
 // precedence over the caller-wide default.
@@ -1868,7 +1744,7 @@ func (s *Server) toolWaveStatus(ctx context.Context, raw json.RawMessage) (any, 
 // returns the first PR whose state is closed AND whose merged flag is true.
 // Returns nil when no merged PR exists (either no PRs reference the issue or
 // all linked PRs are still open / closed-without-merge). All errors are
-// swallowed — this is best-effort enrichment for rick_wave_status and must not
+// swallowed — this is best-effort enrichment for rick_wave_manager action=status and must not
 // break status lookups when GitHub is rate-limiting.
 func (s *Server) findMergedPR(ctx context.Context, owner, repo string, number int) *gh.PullRequest {
 	events, err := s.deps.GitHub.GetIssueTimeline(ctx, owner, repo, number)
@@ -2175,7 +2051,7 @@ func extractRepo(labels []string, summary string) string {
 	return ""
 }
 
-// issueCache dedupes GetIssue calls within a single rick_wave_plan invocation.
+// issueCache dedupes GetIssue calls within a single rick_wave_manager action=plan invocation.
 // body_refs and task_list discovery modes can reference the same issue multiple
 // times across discovery + dependency passes; the cache turns those repeated
 // calls into a single fetch. Not safe for concurrent use — the planner is

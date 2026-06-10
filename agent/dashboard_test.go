@@ -39,32 +39,28 @@ func fakeMCPDashboard(t *testing.T) http.HandlerFunc {
 			t.Fatalf("unmarshal params: %v", err)
 		}
 
+		// The consolidated facades multiplex on these arg fields: rick_workflow_inspect
+		// selects panels via include, rick_workflow_control selects the verb via action.
+		var args struct {
+			Include []string `json:"include"`
+			Action  string   `json:"action"`
+		}
+		_ = json.Unmarshal(params.Arguments, &args)
+
 		var resultText string
 		switch params.Name {
 		case "rick_list_workflows":
 			resultText = `{"workflows":[{"aggregate_id":"wf-1","workflow_id":"workspace-dev","status":"running","started_at":"2026-03-16T10:00:00Z"}]}`
 		case "rick_list_events":
 			resultText = `{"events":[{"id":"evt-1","type":"workflow.started","version":1,"timestamp":"2026-03-16T10:00:00Z","source":"mcp"}],"count":1}`
-		case "rick_workflow_status":
-			resultText = `{"id":"wf-1","status":"running","workflow_id":"workspace-dev","version":5,"tokens_used":1000,"completed_personas":{"researcher":true},"feedback_count":{"developer":2}}`
-		case "rick_phase_timeline":
-			resultText = `{"workflow_id":"wf-1","phases":[{"phase":"researcher","status":"completed","iterations":1,"started_at":"2026-03-16T10:00:00Z","completed_at":"2026-03-16T10:00:30Z","duration_ms":30000}]}`
-		case "rick_token_usage":
-			resultText = `{"workflow_id":"wf-1","total":1000,"by_phase":{"researcher":500,"architect":500},"by_backend":{"claude":1000}}`
+		case "rick_workflow_inspect":
+			resultText = inspectPanelResult(args.Include)
 		case "rick_list_dead_letters":
 			resultText = `{"dead_letters":[],"count":0}`
-		case "rick_pause_workflow":
-			resultText = `{"workflow_id":"wf-1","action":"paused","status":"paused"}`
-		case "rick_cancel_workflow":
-			resultText = `{"workflow_id":"wf-1","action":"cancelled","status":"cancelled"}`
-		case "rick_resume_workflow":
-			resultText = `{"workflow_id":"wf-1","action":"resumed","status":"running"}`
+		case "rick_workflow_control":
+			resultText = controlResult(args.Action)
 		case "rick_inject_guidance":
 			resultText = `{"workflow_id":"wf-1","action":"guidance_injected","resumed":true}`
-		case "rick_workflow_verdicts":
-			resultText = `{"workflow_id":"wf-1","verdicts":[{"phase":"developer","source_phase":"reviewer","outcome":"fail","summary":"Missing error handling","issues":[{"severity":"major","category":"correctness","description":"Nil pointer dereference possible","file":"main.go","line":42}]}],"count":1}`
-		case "rick_persona_output":
-			resultText = `{"workflow_id":"wf-1","persona":"developer","output":"Generated code output...","truncated":false,"backend":"claude","tokens_used":2500,"duration_ms":8000}`
 		case "rick_approve_hint":
 			resultText = `{"workflow_id":"wf-1","action":"hint_approved","status":"running"}`
 		case "rick_reject_hint":
@@ -83,6 +79,44 @@ func fakeMCPDashboard(t *testing.T) http.HandlerFunc {
 		resp.Result = result
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp) //nolint:errcheck
+	}
+}
+
+// inspectPanelResult mimics rick_workflow_inspect: each requested panel's payload
+// is wrapped under its own key in the result object. The dashboard requests one
+// panel at a time, so we key off the first include entry (defaulting to status).
+func inspectPanelResult(include []string) string {
+	panel := "status"
+	if len(include) > 0 {
+		panel = include[0]
+	}
+	switch panel {
+	case "status":
+		return `{"workflow_id":"wf-1","status":{"id":"wf-1","status":"running","workflow_id":"workspace-dev","version":5,"tokens_used":1000,"completed_personas":{"researcher":true},"feedback_count":{"developer":2}}}`
+	case "timeline":
+		return `{"workflow_id":"wf-1","timeline":{"workflow_id":"wf-1","phases":[{"phase":"researcher","status":"completed","iterations":1,"started_at":"2026-03-16T10:00:00Z","completed_at":"2026-03-16T10:00:30Z","duration_ms":30000}]}}`
+	case "tokens":
+		return `{"workflow_id":"wf-1","tokens":{"workflow_id":"wf-1","total":1000,"by_phase":{"researcher":500,"architect":500},"by_backend":{"claude":1000}}}`
+	case "verdicts":
+		return `{"workflow_id":"wf-1","verdicts":{"workflow_id":"wf-1","verdicts":[{"phase":"developer","source_phase":"reviewer","outcome":"fail","summary":"Missing error handling","issues":[{"severity":"major","category":"correctness","description":"Nil pointer dereference possible","file":"main.go","line":42}]}]}}`
+	case "persona_output":
+		return `{"workflow_id":"wf-1","persona_output":{"workflow_id":"wf-1","persona":"developer","output":"Generated code output...","truncated":false,"backend":"claude","tokens_used":2500,"duration_ms":8000}}`
+	default:
+		return `{"workflow_id":"wf-1","errors":{"` + panel + `":"unknown include panel"}}`
+	}
+}
+
+// controlResult mimics rick_workflow_control routing on the action verb.
+func controlResult(action string) string {
+	switch action {
+	case "pause":
+		return `{"workflow_id":"wf-1","action":"paused","status":"paused"}`
+	case "cancel":
+		return `{"workflow_id":"wf-1","action":"cancelled","status":"cancelled"}`
+	case "resume":
+		return `{"workflow_id":"wf-1","action":"resumed","status":"running"}`
+	default:
+		return `"unknown action"`
 	}
 }
 

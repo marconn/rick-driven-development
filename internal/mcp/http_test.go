@@ -87,7 +87,7 @@ func TestHTTPToolCall(t *testing.T) {
 	}
 
 	params, _ := json.Marshal(toolsCallParams{
-		Name:      "rick_workflow_status",
+		Name:      "rick_workflow_inspect",
 		Arguments: json.RawMessage(fmt.Sprintf(`{"workflow_id":"%s"}`, aggregateID)),
 	})
 	w := postMCP(t, h, jsonRPCRequest{
@@ -113,12 +113,14 @@ func TestHTTPToolCall(t *testing.T) {
 		t.Fatalf("tool error: %s", result.Content[0].Text)
 	}
 
-	var status workflowStatusResult
-	if err := json.Unmarshal([]byte(result.Content[0].Text), &status); err != nil {
+	var inspect struct {
+		Status workflowStatusResult `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &inspect); err != nil {
 		t.Fatal(err)
 	}
-	if status.Status != "requested" {
-		t.Errorf("expected status requested, got %s", status.Status)
+	if inspect.Status.Status != "requested" {
+		t.Errorf("expected status requested, got %s", inspect.Status.Status)
 	}
 }
 

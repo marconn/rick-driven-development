@@ -113,7 +113,7 @@ func TestMCPClient_CallTool_ToolError(t *testing.T) {
 	})
 
 	client := NewMCPClient(srv.URL)
-	_, err := client.CallTool(context.Background(), "rick_workflow_status", map[string]any{"workflow_id": "nonexistent"})
+	_, err := client.CallTool(context.Background(), "rick_workflow_inspect", map[string]any{"workflow_id": "nonexistent"})
 	if err == nil {
 		t.Fatal("expected error for tool error")
 	}

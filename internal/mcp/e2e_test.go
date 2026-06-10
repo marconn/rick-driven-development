@@ -307,7 +307,7 @@ func TestE2EAgentFullWorkflowJourney(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	// Step 3: "What's the status?" → workflow_status
-	text, isErr, err = client.callTool(ctx, "rick_workflow_status", map[string]any{
+	text, isErr, err = client.callTool(ctx, "rick_workflow_inspect", map[string]any{
 		"workflow_id": wfID,
 	})
 	if err != nil {
@@ -316,15 +316,18 @@ func TestE2EAgentFullWorkflowJourney(t *testing.T) {
 	if isErr {
 		t.Fatalf("status error: %s", text)
 	}
-	var status workflowStatusResult
-	_ = json.Unmarshal([]byte(text), &status)
-	if status.Status != "running" && status.Status != "requested" {
-		t.Errorf("expected running or requested, got %s", status.Status)
+	var inspectStatus struct {
+		Status workflowStatusResult `json:"status"`
+	}
+	_ = json.Unmarshal([]byte(text), &inspectStatus)
+	if inspectStatus.Status.Status != "running" && inspectStatus.Status.Status != "requested" {
+		t.Errorf("expected running or requested, got %s", inspectStatus.Status.Status)
 	}
 
-	// Step 4: "Show me the timeline" → phase_timeline
-	text, isErr, err = client.callTool(ctx, "rick_phase_timeline", map[string]any{
+	// Step 4: "Show me the timeline" → workflow_inspect timeline panel
+	text, isErr, err = client.callTool(ctx, "rick_workflow_inspect", map[string]any{
 		"workflow_id": wfID,
+		"include":     []string{"timeline"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -333,9 +336,10 @@ func TestE2EAgentFullWorkflowJourney(t *testing.T) {
 		t.Fatalf("timeline error: %s", text)
 	}
 
-	// Step 5: "How many tokens used?" → token_usage
-	text, isErr, err = client.callTool(ctx, "rick_token_usage", map[string]any{
+	// Step 5: "How many tokens used?" → workflow_inspect tokens panel
+	text, isErr, err = client.callTool(ctx, "rick_workflow_inspect", map[string]any{
 		"workflow_id": wfID,
+		"include":     []string{"tokens"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -361,9 +365,10 @@ func TestE2EAgentFullWorkflowJourney(t *testing.T) {
 		t.Error("expected at least 1 event")
 	}
 
-	// Step 7: "Pause it" → pause_workflow
-	text, isErr, err = client.callTool(ctx, "rick_pause_workflow", map[string]any{
+	// Step 7: "Pause it" → workflow_control pause
+	text, isErr, err = client.callTool(ctx, "rick_workflow_control", map[string]any{
 		"workflow_id": wfID,
+		"action":      "pause",
 		"reason":      "operator investigating",
 	})
 	if err != nil {
@@ -397,9 +402,10 @@ func TestE2EAgentFullWorkflowJourney(t *testing.T) {
 		t.Error("expected auto-resume")
 	}
 
-	// Step 9: "Cancel it" → cancel_workflow
-	text, isErr, err = client.callTool(ctx, "rick_cancel_workflow", map[string]any{
+	// Step 9: "Cancel it" → workflow_control cancel
+	text, isErr, err = client.callTool(ctx, "rick_workflow_control", map[string]any{
 		"workflow_id": wfID,
+		"action":      "cancel",
 		"reason":      "test complete",
 	})
 	if err != nil {
@@ -490,7 +496,7 @@ func TestE2EAgentMultipleWorkflows(t *testing.T) {
 
 	// Check status of each.
 	for _, id := range ids {
-		text, isErr, err := client.callTool(ctx, "rick_workflow_status", map[string]any{"workflow_id": id})
+		text, isErr, err := client.callTool(ctx, "rick_workflow_inspect", map[string]any{"include": []string{"status"}, "workflow_id": id})
 		if err != nil {
 			t.Errorf("status error for %s: %v", id[:8], err)
 			continue
@@ -508,20 +514,30 @@ func TestE2EAgentErrorCases(t *testing.T) {
 
 	client := newMCPClient(baseURL)
 
-	// Invalid workflow ID.
-	_, isErr, err := client.callTool(ctx, "rick_workflow_status", map[string]any{
+	// Invalid workflow ID. rick_workflow_inspect does not surface a JSON-RPC
+	// error for a missing workflow; instead the failed panel is reported under
+	// result["errors"][<panel>]. Assert the status panel failed.
+	text, isErr, err := client.callTool(ctx, "rick_workflow_inspect", map[string]any{
 		"workflow_id": "nonexistent-workflow-id",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !isErr {
-		t.Error("expected error for nonexistent workflow")
+	if isErr {
+		t.Fatalf("inspect should not be a tool error, got: %s", text)
+	}
+	var inspect struct {
+		Errors map[string]string `json:"errors"`
+	}
+	_ = json.Unmarshal([]byte(text), &inspect)
+	if inspect.Errors["status"] == "" {
+		t.Error("expected status panel error for nonexistent workflow")
 	}
 
-	// Cancel nonexistent.
-	_, isErr, err = client.callTool(ctx, "rick_cancel_workflow", map[string]any{
+	// Cancel nonexistent. rick_workflow_control propagates the underlying error.
+	_, isErr, err = client.callTool(ctx, "rick_workflow_control", map[string]any{
 		"workflow_id": "nonexistent-workflow-id",
+		"action":      "cancel",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -531,8 +547,9 @@ func TestE2EAgentErrorCases(t *testing.T) {
 	}
 
 	// Pause nonexistent.
-	_, isErr, err = client.callTool(ctx, "rick_pause_workflow", map[string]any{
+	_, isErr, err = client.callTool(ctx, "rick_workflow_control", map[string]any{
 		"workflow_id": "nonexistent-workflow-id",
+		"action":      "pause",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -595,8 +612,9 @@ func TestE2EAgentResumeAlreadyRunning(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Try to resume an already running workflow.
-	_, isErr, err := client.callTool(ctx, "rick_resume_workflow", map[string]any{
+	_, isErr, err := client.callTool(ctx, "rick_workflow_control", map[string]any{
 		"workflow_id": run.WorkflowID,
+		"action":      "resume",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -619,16 +637,18 @@ func TestE2EAgentDoubleCancel(t *testing.T) {
 	_ = json.Unmarshal([]byte(text), &run)
 	time.Sleep(100 * time.Millisecond)
 
-	_, isErr, _ := client.callTool(ctx, "rick_cancel_workflow", map[string]any{
+	_, isErr, _ := client.callTool(ctx, "rick_workflow_control", map[string]any{
 		"workflow_id": run.WorkflowID,
+		"action":      "cancel",
 	})
 	if isErr {
 		t.Fatal("first cancel should succeed")
 	}
 
 	// Second cancel should fail.
-	_, isErr, _ = client.callTool(ctx, "rick_cancel_workflow", map[string]any{
+	_, isErr, _ = client.callTool(ctx, "rick_workflow_control", map[string]any{
 		"workflow_id": run.WorkflowID,
+		"action":      "cancel",
 	})
 	if !isErr {
 		t.Error("expected error on double cancel")
@@ -688,7 +708,7 @@ func TestE2EHintApproveReject(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// 3. Verify workflow status shows paused + pending hints.
-	text, isErr, err = client.callTool(ctx, "rick_workflow_status", map[string]any{
+	text, isErr, err = client.callTool(ctx, "rick_workflow_inspect", map[string]any{
 		"workflow_id": wfID,
 	})
 	if err != nil {
@@ -698,8 +718,11 @@ func TestE2EHintApproveReject(t *testing.T) {
 		t.Fatalf("status error: %s", text)
 	}
 
-	var status workflowStatusResult
-	_ = json.Unmarshal([]byte(text), &status)
+	var statusWrap struct {
+		Status workflowStatusResult `json:"status"`
+	}
+	_ = json.Unmarshal([]byte(text), &statusWrap)
+	status := statusWrap.Status
 	if status.Status != "paused" {
 		t.Fatalf("expected paused, got %s", status.Status)
 	}
@@ -747,11 +770,14 @@ func TestE2EHintApproveReject(t *testing.T) {
 
 	// 5. Verify pending hints are cleared.
 	time.Sleep(100 * time.Millisecond)
-	text, _, _ = client.callTool(ctx, "rick_workflow_status", map[string]any{
+	text, _, _ = client.callTool(ctx, "rick_workflow_inspect", map[string]any{
 		"workflow_id": wfID,
 	})
-	var statusAfter workflowStatusResult
-	_ = json.Unmarshal([]byte(text), &statusAfter)
+	var statusAfterWrap struct {
+		Status workflowStatusResult `json:"status"`
+	}
+	_ = json.Unmarshal([]byte(text), &statusAfterWrap)
+	statusAfter := statusAfterWrap.Status
 	// After approval the workflow is running, so pending_hints is only populated when paused.
 	if statusAfter.Status != "running" {
 		t.Errorf("expected running after approve, got %s", statusAfter.Status)
@@ -761,8 +787,9 @@ func TestE2EHintApproveReject(t *testing.T) {
 	}
 
 	// Cleanup: cancel the workflow.
-	_, _, _ = client.callTool(ctx, "rick_cancel_workflow", map[string]any{
+	_, _, _ = client.callTool(ctx, "rick_workflow_control", map[string]any{
 		"workflow_id": wfID,
+		"action":      "cancel",
 	})
 }
 
@@ -829,18 +856,21 @@ func TestE2EHintRejectSkip(t *testing.T) {
 
 	// Verify workflow resumed.
 	time.Sleep(100 * time.Millisecond)
-	text, _, _ = client.callTool(ctx, "rick_workflow_status", map[string]any{
+	text, _, _ = client.callTool(ctx, "rick_workflow_inspect", map[string]any{
 		"workflow_id": wfID,
 	})
-	var status workflowStatusResult
-	_ = json.Unmarshal([]byte(text), &status)
-	if status.Status != "running" {
-		t.Errorf("expected running after reject-skip, got %s", status.Status)
+	var statusWrap struct {
+		Status workflowStatusResult `json:"status"`
+	}
+	_ = json.Unmarshal([]byte(text), &statusWrap)
+	if statusWrap.Status.Status != "running" {
+		t.Errorf("expected running after reject-skip, got %s", statusWrap.Status.Status)
 	}
 
 	// Cleanup.
-	_, _, _ = client.callTool(ctx, "rick_cancel_workflow", map[string]any{
+	_, _, _ = client.callTool(ctx, "rick_workflow_control", map[string]any{
 		"workflow_id": wfID,
+		"action":      "cancel",
 	})
 }
 
@@ -909,7 +939,7 @@ func TestE2ECancelRequestedWorkflow(t *testing.T) {
 	_ = json.Unmarshal([]byte(text), &run)
 
 	// Verify status is "requested" (Engine not processing).
-	text, isErr, err = client.callTool(ctx, "rick_workflow_status", map[string]any{
+	text, isErr, err = client.callTool(ctx, "rick_workflow_inspect", map[string]any{
 		"workflow_id": run.WorkflowID,
 	})
 	if err != nil {
@@ -918,15 +948,18 @@ func TestE2ECancelRequestedWorkflow(t *testing.T) {
 	if isErr {
 		t.Fatalf("status error: %s", text)
 	}
-	var status workflowStatusResult
-	_ = json.Unmarshal([]byte(text), &status)
-	if status.Status != "requested" {
-		t.Fatalf("expected requested, got %s", status.Status)
+	var statusWrap struct {
+		Status workflowStatusResult `json:"status"`
+	}
+	_ = json.Unmarshal([]byte(text), &statusWrap)
+	if statusWrap.Status.Status != "requested" {
+		t.Fatalf("expected requested, got %s", statusWrap.Status.Status)
 	}
 
 	// Cancel the "requested" workflow — this must succeed.
-	text, isErr, err = client.callTool(ctx, "rick_cancel_workflow", map[string]any{
+	text, isErr, err = client.callTool(ctx, "rick_workflow_control", map[string]any{
 		"workflow_id": run.WorkflowID,
+		"action":      "cancel",
 		"reason":      "cancelled before engine processed",
 	})
 	if err != nil {
@@ -942,8 +975,9 @@ func TestE2ECancelRequestedWorkflow(t *testing.T) {
 	}
 
 	// Double-cancel should fail.
-	_, isErr, _ = client.callTool(ctx, "rick_cancel_workflow", map[string]any{
+	_, isErr, _ = client.callTool(ctx, "rick_workflow_control", map[string]any{
 		"workflow_id": run.WorkflowID,
+		"action":      "cancel",
 	})
 	if !isErr {
 		t.Error("expected error on double cancel")

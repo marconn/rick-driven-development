@@ -93,9 +93,9 @@ rick serve --addr :58077 --grpc-addr :59077 --db rick.db --backend gemini
 Workflows are triggered via the MCP interface. Connect any MCP-compatible client (Claude Desktop, Cursor, or the agent UI) to `http://localhost:58077` and use tools like:
 
 - `rick_run_workflow` — Start a workflow (`dag=workspace-dev`, `dag=jira-dev`, etc.)
-- `rick_workflow_status` — Check progress
+- `rick_workflow_inspect` — Check progress (`include=["status","timeline","tokens","verdicts","output"]`)
 - `rick_list_workflows` — List all workflows
-- `rick_cancel_workflow` — Cancel a running workflow
+- `rick_workflow_control` — Pause, resume, or cancel a running workflow (`action=pause|resume|cancel`)
 
 ### Agent UI
 

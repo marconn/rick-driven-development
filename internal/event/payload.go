@@ -91,7 +91,7 @@ type WorkflowCompletedPayload struct {
 // WorkflowFailedPayload is emitted when a workflow fails.
 //
 // FailureKind, Backend, and Stderr are populated when the failure originated
-// from a PersonaFailed event. They let `rick_workflow_status` return an
+// from a PersonaFailed event. They let `rick_workflow_inspect` (status panel) return an
 // actionable signal (idle_timeout / wall_timeout / handler_error / ...) and
 // the subprocess stderr tail without forcing operators to replay the raw
 // event chain. All three fields are optional for back-compat with events
@@ -155,7 +155,7 @@ type WorkflowPausedPayload struct {
 	// RateLimitResetHint is a best-effort, human-readable parse of the reset
 	// time the provider surfaced in stderr (e.g. "4:50pm (America/Costa_Rica)"
 	// from claude). Empty when the stderr line did not carry a reset hint.
-	// Surfaced verbatim in rick_workflow_status so operators know when to
+	// Surfaced verbatim in rick_workflow_inspect so operators know when to
 	// resume; the engine does not parse this further.
 	RateLimitResetHint string `json:"rate_limit_reset_hint,omitempty"`
 	// RateLimitBackend names the backend driver that hit the limit

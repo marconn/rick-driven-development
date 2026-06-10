@@ -597,12 +597,9 @@ func TestJiraTools_NoClientConfigured(t *testing.T) {
 	}{
 		{"rick_jira_read", map[string]any{"ticket": "PROJ-1"}},
 		{"rick_jira_write", map[string]any{"ticket": "PROJ-1", "field_name": "description", "value": "x"}},
-		{"rick_jira_transition", map[string]any{"ticket": "PROJ-1", "status": "Done"}},
-		{"rick_jira_comment", map[string]any{"ticket": "PROJ-1", "comment": "test"}},
-		{"rick_jira_epic_issues", map[string]any{"epic": "PROJ-EPIC"}},
+		{"rick_jira_manage_links", map[string]any{"ticket": "PROJ-1", "status": "Done"}},
 		{"rick_jira_search", map[string]any{"jql": "project = PROJ"}},
-		{"rick_jira_link", map[string]any{"from_ticket": "PROJ-1", "to_ticket": "PROJ-2"}},
-	}
+		}
 
 	for _, tc := range jiraTools {
 		t.Run(tc.name, func(t *testing.T) {
@@ -654,14 +651,14 @@ func TestWaveTools_NoJiraClient(t *testing.T) {
 		name string
 		args any
 	}{
-		{"rick_wave_plan", map[string]any{"epic": "PROJ-EPIC"}},
-		{"rick_wave_launch", map[string]any{"epic": "PROJ-EPIC"}},
-		{"rick_wave_status", map[string]any{"epic": "PROJ-EPIC"}},
+		{"plan", map[string]any{"action": "plan", "epic": "PROJ-EPIC"}},
+		{"launch", map[string]any{"action": "launch", "epic": "PROJ-EPIC"}},
+		{"status", map[string]any{"action": "status", "epic": "PROJ-EPIC"}},
 	}
 
 	for _, tc := range waveTools {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := callTool(t, s, tc.name, tc.args)
+			_, err := callTool(t, s, "rick_wave_manager", tc.args)
 			if err == nil {
 				t.Fatal("expected error when Jira client not configured")
 			}
@@ -689,7 +686,7 @@ func TestToolWavePlan_MissingEpic(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_wave_plan", map[string]any{})
+	_, err := callTool(t, s, "rick_wave_manager", map[string]any{"action": "plan"})
 	if err == nil {
 		t.Fatal("expected error for missing epic")
 	}
@@ -716,12 +713,19 @@ func TestToolJobStatus_NotFound(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_job_status", map[string]any{"job_id": "nonexistent"})
-	if err == nil {
-		t.Fatal("expected error for nonexistent job")
+	// rick_job_inspect reports a missing job under result["errors"][<panel>]
+	// rather than as a Go error.
+	res, err := callTool(t, s, "rick_job_inspect", map[string]any{"job_id": "nonexistent"})
+	if err != nil {
+		t.Fatalf("inspect should not return a Go error, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "not found") {
-		t.Errorf("expected 'not found', got: %v", err)
+	resMap, ok := res.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", res)
+	}
+	errs, _ := resMap["errors"].(map[string]string)
+	if errs["status"] == "" || !strings.Contains(errs["status"], "not found") {
+		t.Errorf("expected status panel 'not found' error, got: %v", resMap["errors"])
 	}
 }
 
@@ -729,7 +733,7 @@ func TestToolJobStatus_MissingJobID(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_job_status", map[string]any{})
+	_, err := callTool(t, s, "rick_job_inspect", map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for missing job_id")
 	}
@@ -784,7 +788,7 @@ func TestToolWorkflowOutput_MissingID(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	_, err := callTool(t, s, "rick_workflow_output", map[string]any{})
+	_, err := callTool(t, s, "rick_workflow_inspect", map[string]any{"include": []string{"output"}})
 	if err == nil {
 		t.Fatal("expected error for missing workflow_id")
 	}
@@ -1022,9 +1026,10 @@ func TestToolWaveLaunch_RepoPassedToWorkflow(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_wave_launch", map[string]any{
-		"epic": "WAVE-EPIC",
-		"dag":  "jira-dev",
+	result, err := callTool(t, s, "rick_wave_manager", map[string]any{
+		"action": "launch",
+		"epic":   "WAVE-EPIC",
+		"dag":    "jira-dev",
 	})
 	if err != nil {
 		t.Fatalf("toolWaveLaunch: %v", err)

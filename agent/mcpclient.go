@@ -95,7 +95,7 @@ func (c *MCPClient) CallTool(ctx context.Context, name string, args any) (json.R
 	if err != nil {
 		return nil, fmt.Errorf("mcpclient: http request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("mcpclient: unexpected status %d", resp.StatusCode)
@@ -139,6 +139,6 @@ func (c *MCPClient) Ping(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode == http.StatusOK
 }

@@ -78,23 +78,16 @@ Rick (the system you built, named after yourself because obviously) executes dev
 
 ### Workflow Lifecycle
 - rick_run_workflow: Start a workflow (prompt + dag + optional source/ticket/repo)
-- rick_workflow_status: Real-time workflow state, phase progress, pending hints
 - rick_list_workflows: All tracked workflows with status + all registered DAG definitions
-- rick_cancel_workflow: Terminate a running workflow
-- rick_pause_workflow: Pause a running workflow
-- rick_resume_workflow: Resume a paused workflow
+- rick_workflow_control: Pause, resume, or cancel a running workflow (action=pause|resume|cancel)
 - rick_inject_guidance: Send operator guidance into a workflow (auto-resumes by default)
 - rick_approve_hint: Approve a pending hint for a persona (triggers full execution)
 - rick_reject_hint: Reject a pending hint (skip persona or fail workflow)
 - rick_plan_btu: Start BTU planning from a Confluence page (shortcut for dag=plan-btu)
 
 ### Workflow Inspection
+- rick_workflow_inspect: One call for a workflow's observability data. Pass include=[...] to pick panels: "status" (state, phases, pending hints), "timeline" (phase timing/iterations), "tokens" (usage by phase/backend), "verdicts" (reviewer/QA pass-fail + issues), "output" (all persona outputs), "persona_output" (one persona's raw output — also pass persona). Omitting include returns status.
 - rick_list_events: Event stream for a workflow or globally (type, timestamp, source, payload)
-- rick_token_usage: Token consumption breakdown by phase and backend
-- rick_phase_timeline: Phase timing, duration, and iteration details
-- rick_workflow_verdicts: Review verdicts — pass/fail outcomes, summaries, issues from reviewer/QA
-- rick_persona_output: Raw AI output for a specific persona in a workflow
-- rick_workflow_output: Consolidated output from ALL personas in one call (saves N calls to persona_output)
 - rick_list_dead_letters: Failed event deliveries with handler, error, and attempt count
 
 ### Search & Recovery
@@ -102,16 +95,14 @@ Rick (the system you built, named after yourself because obviously) executes dev
 - rick_retry_workflow: Restart a failed/cancelled workflow with same parameters
 
 ### Code & PR Operations
-- rick_diff: Git diff from a workflow's workspace (full or stat-only)
-- rick_pr_diff: Fetch a GitHub PR diff by repo + PR number via gh (no workflow/workspace needed; supports stat-only mode)
+- rick_diff_viewer: Fetch a diff. Pass workflow_id for a workspace git diff, or repo + pr_number for a GitHub PR diff via gh (no workflow needed). Supports stat-only mode.
 - rick_create_pr: Push branch + create GitHub PR from a completed workflow's workspace
 - rick_project_sync: Generate Mermaid dependency diagram + status table from a Jira epic
 
 ### Ad-Hoc AI Jobs (no workflow, no events)
 - rick_consult: One-shot AI advisory — spawn a persona (architect/reviewer/qa/researcher/developer) for a quick question. Returns job ID for async polling. Use this for quick questions instead of full workflows.
 - rick_run: Direct AI execution with full tool access (file editing, terminal). For implementation/debugging/refactoring outside a workflow. Returns job ID.
-- rick_job_status: Check async job status
-- rick_job_output: Get job output (supports incremental reads for large outputs)
+- rick_job_inspect: Inspect an async job. Returns status and output by default; pass include=["status"] or ["output"] to narrow. Output supports incremental reads via offset.
 - rick_job_cancel: Cancel a running job
 - rick_jobs: List all tracked jobs
 
@@ -121,19 +112,13 @@ Rick (the system you built, named after yourself because obviously) executes dev
 - rick_workspace_list: List all isolated workspaces with git branch and dirty status
 
 ### Jira
-- rick_jira_read: Read ticket fields (summary, description, status, assignee, points, AC, labels, links)
-- rick_jira_write: Update a ticket field (description, story_points, labels, custom fields)
-- rick_jira_transition: Move ticket to a new status (TO DO → IN DEVELOPMENT → WF PEER REVIEW)
-- rick_jira_comment: Add a comment to a ticket
-- rick_jira_epic_issues: List all children of an epic with status/assignee/points
+- rick_jira_read: Read ticket fields (summary, description, status, assignee, points, AC, labels, links). Pass include flags to join qa_steps, pr_links, or epic_issues (children of an epic).
+- rick_jira_write: Update a ticket — fields (description, story_points, labels, microservice/custom fields), add a comment, or transition status (TO DO → IN DEVELOPMENT → WF PEER REVIEW), all in one tool.
+- rick_jira_manage_links: Create or delete issue links (Blocks, Relates to, etc.) via an action arg.
 - rick_jira_search: Run a JQL query
-- rick_jira_link: Create issue links (Blocks, Relates to, etc.)
 
 ### Wave Development (parallel epic execution)
-- rick_wave_plan: Compute development waves from a Jira epic via topological sort of dependencies
-- rick_wave_launch: Launch a wave — starts jira-dev workflows for each ticket in parallel
-- rick_wave_status: Monitor wave progress (workflow status per ticket + aggregate)
-- rick_wave_cleanup: Remove isolated workspaces for a completed wave
+- rick_wave_manager: Manage parallel epic waves. action=plan (topological-sort dependencies into waves), launch (start workflows for a wave), status (monitor per-ticket + aggregate), cleanup (remove a wave's workspaces).
 
 ### Confluence
 - rick_confluence_read: Read a Confluence page (by ID or URL)
@@ -142,16 +127,16 @@ Rick (the system you built, named after yourself because obviously) executes dev
 ## Multi-Tool Patterns
 
 **Investigate a failure:**
-rick_search_workflows (find by ticket) → rick_workflow_verdicts (see what failed) → rick_persona_output (read failing phase output) → rick_retry_workflow (restart)
+rick_search_workflows (find by ticket) → rick_workflow_inspect include=["verdicts","persona_output"] (see what failed + read the failing phase output) → rick_retry_workflow (restart)
 
 **Wave development for an epic:**
-rick_wave_plan (compute waves) → rick_wave_launch (start wave) → rick_wave_status (monitor) → rick_create_pr (for each completed workflow) → rick_wave_cleanup (remove workspaces)
+rick_wave_manager action=plan (compute waves) → action=launch (start wave) → action=status (monitor) → rick_create_pr (for each completed workflow) → action=cleanup (remove workspaces)
 
 **Ad-hoc code task:**
-rick_workspace_setup (isolated clone) → rick_run (AI executes task) → rick_diff (review changes) → rick_create_pr (ship it)
+rick_workspace_setup (isolated clone) → rick_run (AI executes task) → rick_diff_viewer (review changes) → rick_create_pr (ship it)
 
 **Deep workflow inspection:**
-rick_workflow_status (overview) → rick_phase_timeline (timing) → rick_workflow_verdicts (review results) → rick_workflow_output (all phase outputs)
+rick_workflow_inspect include=["status","timeline","verdicts","output"] (state, timing, review results, and all phase outputs in one call)
 
 ## Memory
 You have a persistent memory system that survives across sessions. Saved memories appear at the start of each conversation as "[Operator Memory]" blocks. Slash commands (/remember, /memories, /forget) are handled client-side — they don't reach you.
@@ -425,6 +410,6 @@ func (o *Operator) Connected(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode == http.StatusOK
 }

@@ -31,7 +31,7 @@ export interface PhaseEntry {
   duration_ms?: number
   // Populated only when status === "failed". Let the operator diagnose a
   // silent watchdog kill (idle_timeout) directly from the timeline instead
-  // of clicking through to rick_persona_output.
+  // of clicking through to the persona_output panel of rick_workflow_inspect.
   error?: string
   failure_kind?: string
   stderr?: string

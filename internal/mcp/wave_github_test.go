@@ -79,7 +79,8 @@ func TestComputeGithubWavePlan_Spec641(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_wave_plan", map[string]any{
+	result, err := callTool(t, s, "rick_wave_manager", map[string]any{
+		"action": "plan",
 		"source": map[string]any{
 			"type":              "github",
 			"parent":            "hulilabs/huli#641",
@@ -156,7 +157,8 @@ func TestComputeGithubWavePlan_ClosedParentFails(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	_, err := callTool(t, s, "rick_wave_plan", map[string]any{
+	_, err := callTool(t, s, "rick_wave_manager", map[string]any{
+		"action": "plan",
 		"source": map[string]any{"type": "github", "parent": "o/r#99"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "is closed") {
@@ -180,7 +182,8 @@ func TestComputeGithubWavePlan_NoChildrenEmitsDiagnostic(t *testing.T) {
 	s := NewServer(deps, testLogger())
 	defer s.Close()
 
-	result, err := callTool(t, s, "rick_wave_plan", map[string]any{
+	result, err := callTool(t, s, "rick_wave_manager", map[string]any{
+		"action": "plan",
 		"source": map[string]any{"type": "github", "parent": "o/r#10"},
 	})
 	if err != nil {
@@ -224,8 +227,8 @@ func TestWavePlan_JiraEpicBackCompat(t *testing.T) {
 	s, cleanup := testServer(t)
 	defer cleanup()
 
-	raw, _ := json.Marshal(map[string]any{"epic": "PROJ-1"})
-	_, err := s.tools["rick_wave_plan"].Handler(context.Background(), raw)
+	raw, _ := json.Marshal(map[string]any{"action": "plan", "epic": "PROJ-1"})
+	_, err := s.tools["rick_wave_manager"].Handler(context.Background(), raw)
 	if err == nil {
 		t.Fatalf("expected error when Jira is unconfigured")
 	}

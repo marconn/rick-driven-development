@@ -77,8 +77,9 @@ By default, auto-resumes a paused workflow.`,
 // --- Pause ---
 
 func runPause(ctx context.Context, serverURL, dbPath, aggregateID, reason string) error {
-	_, err := mcpCall(ctx, serverURL, "rick_pause_workflow", map[string]any{
+	_, err := mcpCall(ctx, serverURL, "rick_workflow_control", map[string]any{
 		"workflow_id": aggregateID,
+		"action":      "pause",
 		"reason":      reason,
 	})
 	if err == nil {
@@ -124,8 +125,9 @@ func runPauseDirect(ctx context.Context, dbPath, aggregateID, reason string) err
 // --- Resume ---
 
 func runResume(ctx context.Context, serverURL, dbPath, aggregateID, reason string) error {
-	_, err := mcpCall(ctx, serverURL, "rick_resume_workflow", map[string]any{
+	_, err := mcpCall(ctx, serverURL, "rick_workflow_control", map[string]any{
 		"workflow_id": aggregateID,
+		"action":      "resume",
 		"reason":      reason,
 	})
 	if err == nil {

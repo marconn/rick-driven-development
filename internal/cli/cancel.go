@@ -35,8 +35,9 @@ database access when the server is unreachable.`,
 
 func runCancel(ctx context.Context, serverURL, dbPath, aggregateID, reason string) error {
 	// Try MCP server first — keeps projections and bus in sync.
-	_, err := mcpCall(ctx, serverURL, "rick_cancel_workflow", map[string]any{
+	_, err := mcpCall(ctx, serverURL, "rick_workflow_control", map[string]any{
 		"workflow_id": aggregateID,
+		"action":      "cancel",
 		"reason":      reason,
 	})
 	if err == nil {

@@ -340,7 +340,7 @@ func (w *WorkflowAggregate) decideWorkflowRequested(env event.Envelope) ([]event
 		// at status=requested forever — no terminal event, no projection
 		// update, no notification, no throttle-slot release. Emit
 		// WorkflowFailed instead so the workflow reaches a terminal state
-		// operators can see in rick_workflow_status and downstream
+		// operators can see in rick_workflow_inspect and downstream
 		// consumers (NotificationBroker, projections, throttle) handle
 		// uniformly. The reason string is grep-friendly so a misconfigured
 		// deploy (plugin not loaded, env-var drift) is distinguishable from
@@ -473,7 +473,7 @@ func (w *WorkflowAggregate) decidePersonaFailed(env event.Envelope) ([]event.Env
 
 	// Surface FailureKind / Backend / Stderr from the PersonaFailed payload so
 	// operators can tell idle_timeout from handler_error (and attribute to a
-	// specific CLI) directly from rick_workflow_status / the WorkflowFailed
+	// specific CLI) directly from rick_workflow_inspect / the WorkflowFailed
 	// event — without replaying the persona-scoped aggregate. Prior to this,
 	// WorkflowFailed carried only a reason string shaped like
 	// "persona developer failed: handler developer: backend: claude: backend:

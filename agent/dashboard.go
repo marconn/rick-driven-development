@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 )
 
 // --- Query Types ---
@@ -40,7 +41,7 @@ type PendingHint struct {
 	EventID       string   `json:"event_id"`
 }
 
-// WorkflowDetail mirrors the rick_workflow_status tool response.
+// WorkflowDetail mirrors the rick_workflow_inspect "status" panel.
 type WorkflowDetail struct {
 	ID                string          `json:"id"`
 	Status            string          `json:"status"`
@@ -52,7 +53,7 @@ type WorkflowDetail struct {
 	PendingHints      []PendingHint   `json:"pending_hints,omitempty"`
 }
 
-// PhaseEntry mirrors the rick_phase_timeline tool response.
+// PhaseEntry mirrors an entry in the rick_workflow_inspect "timeline" panel.
 // Failure fields are populated only when Status == "failed"; they carry the
 // watchdog-kill telemetry the backend captured (FailureKind classifies the
 // failure shape, Stderr holds a bounded tail of subprocess stderr) so the
@@ -69,7 +70,7 @@ type PhaseEntry struct {
 	Stderr      string `json:"stderr,omitempty"`
 }
 
-// TokenUsage mirrors the rick_token_usage tool response.
+// TokenUsage mirrors the rick_workflow_inspect "tokens" panel.
 type TokenUsage struct {
 	WorkflowID string         `json:"workflow_id"`
 	Total      int            `json:"total"`
@@ -166,11 +167,45 @@ func (a *App) ListEvents(workflowID string, limit int) ([]EventEntry, error) {
 	return result.Events, nil
 }
 
+// inspectPanel calls rick_workflow_inspect for a single panel and returns that
+// panel's raw JSON. The consolidated tool wraps each requested panel under its
+// own key and records per-panel failures under "errors" (it does not return a
+// transport-level error when one panel fails), so we surface a missing panel as
+// a real error rather than handing back a zero-valued struct. `extra` carries
+// panel-specific args such as the persona name for "persona_output".
+func (a *App) inspectPanel(workflowID, panel string, extra map[string]any) (json.RawMessage, error) {
+	args := map[string]any{
+		"workflow_id": workflowID,
+		"include":     []string{panel},
+	}
+	maps.Copy(args, extra)
+
+	raw, err := a.mcpClient.CallTool(a.ctx, "rick_workflow_inspect", args)
+	if err != nil {
+		return nil, err
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, fmt.Errorf("inspect %s: unmarshal: %w", panel, err)
+	}
+	if payload, ok := fields[panel]; ok {
+		return payload, nil
+	}
+	if errsRaw, ok := fields["errors"]; ok {
+		var errs map[string]string
+		if json.Unmarshal(errsRaw, &errs) == nil {
+			if msg := errs[panel]; msg != "" {
+				return nil, fmt.Errorf("inspect %s: %s", panel, msg)
+			}
+		}
+	}
+	return nil, fmt.Errorf("inspect %s: panel not returned", panel)
+}
+
 // WorkflowStatus returns detailed status for a single workflow.
 func (a *App) WorkflowStatus(workflowID string) (*WorkflowDetail, error) {
-	raw, err := a.mcpClient.CallTool(a.ctx, "rick_workflow_status", map[string]any{
-		"workflow_id": workflowID,
-	})
+	raw, err := a.inspectPanel(workflowID, "status", nil)
 	if err != nil {
 		return nil, fmt.Errorf("workflow status: %w", err)
 	}
@@ -184,9 +219,7 @@ func (a *App) WorkflowStatus(workflowID string) (*WorkflowDetail, error) {
 
 // PhaseTimeline returns phase timing for a workflow.
 func (a *App) PhaseTimeline(workflowID string) ([]PhaseEntry, error) {
-	raw, err := a.mcpClient.CallTool(a.ctx, "rick_phase_timeline", map[string]any{
-		"workflow_id": workflowID,
-	})
+	raw, err := a.inspectPanel(workflowID, "timeline", nil)
 	if err != nil {
 		return nil, fmt.Errorf("phase timeline: %w", err)
 	}
@@ -202,9 +235,7 @@ func (a *App) PhaseTimeline(workflowID string) ([]PhaseEntry, error) {
 
 // TokenUsageForWorkflow returns token consumption for a workflow.
 func (a *App) TokenUsageForWorkflow(workflowID string) (*TokenUsage, error) {
-	raw, err := a.mcpClient.CallTool(a.ctx, "rick_token_usage", map[string]any{
-		"workflow_id": workflowID,
-	})
+	raw, err := a.inspectPanel(workflowID, "tokens", nil)
 	if err != nil {
 		return nil, fmt.Errorf("token usage: %w", err)
 	}
@@ -236,35 +267,39 @@ func (a *App) ListDeadLetters() ([]DeadLetterEntry, error) {
 
 // PauseWorkflow pauses a running workflow.
 func (a *App) PauseWorkflow(workflowID string, reason string) (*ActionResult, error) {
-	return a.intervention(a.ctx, "rick_pause_workflow", workflowID, reason, "paused")
+	return a.control(a.ctx, "pause", workflowID, reason, "paused")
 }
 
 // CancelWorkflow cancels a running workflow.
 func (a *App) CancelWorkflow(workflowID string, reason string) (*ActionResult, error) {
-	return a.intervention(a.ctx, "rick_cancel_workflow", workflowID, reason, "cancelled")
+	return a.control(a.ctx, "cancel", workflowID, reason, "cancelled")
 }
 
 // ResumeWorkflow resumes a paused workflow.
 func (a *App) ResumeWorkflow(workflowID string, reason string) (*ActionResult, error) {
-	return a.intervention(a.ctx, "rick_resume_workflow", workflowID, reason, "resumed")
+	return a.control(a.ctx, "resume", workflowID, reason, "resumed")
 }
 
-func (a *App) intervention(ctx context.Context, tool, workflowID, reason, action string) (*ActionResult, error) {
+// control drives the consolidated rick_workflow_control tool. `action` is the
+// tool's pause/resume/cancel verb; `label` is the human phrasing used in error
+// wrapping so a failure reads naturally to the operator.
+func (a *App) control(ctx context.Context, action, workflowID, reason, label string) (*ActionResult, error) {
 	args := map[string]any{
 		"workflow_id": workflowID,
+		"action":      action,
 	}
 	if reason != "" {
 		args["reason"] = reason
 	}
 
-	raw, err := a.mcpClient.CallTool(ctx, tool, args)
+	raw, err := a.mcpClient.CallTool(ctx, "rick_workflow_control", args)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", action, err)
+		return nil, fmt.Errorf("%s: %w", label, err)
 	}
 
 	var result ActionResult
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return nil, fmt.Errorf("%s: unmarshal: %w", action, err)
+		return nil, fmt.Errorf("%s: unmarshal: %w", label, err)
 	}
 	return &result, nil
 }
@@ -318,9 +353,7 @@ func (a *App) RejectHint(workflowID string, persona string, reason string, actio
 
 // WorkflowVerdicts returns review verdicts for a workflow.
 func (a *App) WorkflowVerdicts(workflowID string) ([]VerdictRecord, error) {
-	raw, err := a.mcpClient.CallTool(a.ctx, "rick_workflow_verdicts", map[string]any{
-		"workflow_id": workflowID,
-	})
+	raw, err := a.inspectPanel(workflowID, "verdicts", nil)
 	if err != nil {
 		return nil, fmt.Errorf("workflow verdicts: %w", err)
 	}
@@ -336,10 +369,7 @@ func (a *App) WorkflowVerdicts(workflowID string) ([]VerdictRecord, error) {
 
 // PersonaOutput returns the AI response output for a specific persona.
 func (a *App) PersonaOutput(workflowID, persona string) (*PersonaOutput, error) {
-	raw, err := a.mcpClient.CallTool(a.ctx, "rick_persona_output", map[string]any{
-		"workflow_id": workflowID,
-		"persona":     persona,
-	})
+	raw, err := a.inspectPanel(workflowID, "persona_output", map[string]any{"persona": persona})
 	if err != nil {
 		return nil, fmt.Errorf("persona output: %w", err)
 	}

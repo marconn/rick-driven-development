@@ -20,7 +20,7 @@ func (s *Server) registerJiraTools() {
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_jira_read",
-			Description: "Read a Jira ticket's key fields: summary, description, status, assignee, story points, acceptance criteria, labels, components, linked issues.",
+			Description: "Read a Jira ticket's key fields: summary, description, status, assignee, story points, acceptance criteria, labels, components, linked issues. Optionally fetch qa_steps, pr_links, and epic_issues in the same call.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -33,6 +33,21 @@ func (s *Server) registerJiraTools() {
 						"items":       map[string]any{"type": "string"},
 						"description": "Specific fields to return. Omit for all.",
 					},
+					"include_qa_steps": map[string]any{
+						"type":        "boolean",
+						"default":     false,
+						"description": "If true, fetches the QA Steps custom field.",
+					},
+					"include_pr_links": map[string]any{
+						"type":        "boolean",
+						"default":     false,
+						"description": "If true, fetches associated GitHub pull request links.",
+					},
+					"include_epic_issues": map[string]any{
+						"type":        "boolean",
+						"default":     false,
+						"description": "If the ticket is an Epic, fetches its child issues.",
+					},
 				},
 				"required": []string{"ticket"},
 			},
@@ -42,30 +57,8 @@ func (s *Server) registerJiraTools() {
 
 	s.register(Tool{
 		Definition: ToolDefinition{
-			Name:        "rick_jira_read_qa_steps",
-			Description: "Read the QA Steps custom field from a Jira ticket. Defaults to customfield_10037 (override with JIRA_QA_STEPS_FIELD env or the field_id arg). Use this because rick_jira_read does not return custom fields.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"ticket": map[string]any{
-						"type":        "string",
-						"description": "Jira issue key (e.g., PROJ-12345).",
-					},
-					"field_id": map[string]any{
-						"type":        "string",
-						"description": "Custom field ID for QA Steps. Optional; defaults to JIRA_QA_STEPS_FIELD env or customfield_10037.",
-					},
-				},
-				"required": []string{"ticket"},
-			},
-		},
-		Handler: s.toolJiraReadQASteps,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
 			Name:        "rick_jira_write",
-			Description: "Update a field on a Jira ticket (description, story_points, labels, custom fields).",
+			Description: "Update fields, add comments, or transition a Jira ticket. For fields use field_name/value. For comments use comment. For status transitions use status. For setting microservice use microservice.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -80,77 +73,23 @@ func (s *Server) registerJiraTools() {
 					"value": map[string]any{
 						"description": "New value for the field.",
 					},
-				},
-				"required": []string{"ticket", "field_name", "value"},
-			},
-		},
-		Handler: s.toolJiraWrite,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_jira_transition",
-			Description: "Transition a Jira ticket to a new status (e.g., TO DO -> IN DEVELOPMENT -> WF PEER REVIEW).",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"ticket": map[string]any{
+					"comment": map[string]any{
 						"type":        "string",
-						"description": "Jira issue key.",
+						"description": "Comment body in Markdown to add.",
 					},
 					"status": map[string]any{
 						"type":        "string",
-						"description": "Target status name (e.g., 'IN DEVELOPMENT', 'WF PEER REVIEW').",
+						"description": "Target status name to transition to.",
+					},
+					"microservice": map[string]any{
+						"type":        "string",
+						"description": "Microservice/repo name to set.",
 					},
 				},
-				"required": []string{"ticket", "status"},
+				"required": []string{"ticket"},
 			},
 		},
-		Handler: s.toolJiraTransition,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_jira_comment",
-			Description: "Add a comment to a Jira ticket. The body is parsed as Markdown and converted to ADF, so headings, lists, tables, code blocks, links, and emphasis render natively in Jira.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"ticket": map[string]any{
-						"type":        "string",
-						"description": "Jira issue key.",
-					},
-					"comment": map[string]any{
-						"type":        "string",
-						"description": "Comment body in Markdown (GFM). Supports headings, bullet/ordered lists, tables, fenced code blocks, links, bold/italic, and inline code.",
-					},
-				},
-				"required": []string{"ticket", "comment"},
-			},
-		},
-		Handler: s.toolJiraComment,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_jira_epic_issues",
-			Description: "List all child issues of a Jira epic with status, assignee, story points, and labels.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"epic": map[string]any{
-						"type":        "string",
-						"description": "Epic issue key.",
-					},
-					"include_closed": map[string]any{
-						"type":    "boolean",
-						"default": true,
-					},
-				},
-				"required": []string{"epic"},
-			},
-		},
-		Handler: s.toolJiraEpicIssues,
+		Handler: s.toolJiraWrite,
 	})
 
 	s.register(Tool{
@@ -182,99 +121,49 @@ func (s *Server) registerJiraTools() {
 
 	s.register(Tool{
 		Definition: ToolDefinition{
-			Name:        "rick_jira_set_microservice",
-			Description: "Set the Microservice field on a Jira ticket. Falls back to adding a repo:<name> label if the microservice option does not exist.",
+			Name:        "rick_jira_manage_links",
+			Description: "Create or delete issue links. To create: provide from_ticket, to_ticket, and link_type. To delete: provide link_id.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"ticket": map[string]any{
-						"type":        "string",
-						"description": "Jira issue key.",
+					"action": map[string]any{
+						"type": "string",
+						"enum": []string{"create", "delete"},
 					},
-					"microservice": map[string]any{
-						"type":        "string",
-						"description": "Microservice/repo name (e.g., 'backend', 'frontend').",
-					},
-				},
-				"required": []string{"ticket", "microservice"},
-			},
-		},
-		Handler: s.toolJiraSetMicroservice,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_jira_pr_links",
-			Description: "Get GitHub pull request links associated with a Jira issue via the GitHub integration.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"ticket": map[string]any{
-						"type":        "string",
-						"description": "Jira issue key (e.g., PROJ-12345).",
-					},
-				},
-				"required": []string{"ticket"},
-			},
-		},
-		Handler: s.toolJiraPRLinks,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_jira_link",
-			Description: "Create an issue link between two Jira tickets. For directional links like Blocks: from_ticket=A, to_ticket=B means 'A blocks B'.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
 					"from_ticket": map[string]any{
 						"type":        "string",
-						"description": "Active side of the link. For Blocks: the issue that BLOCKS.",
+						"description": "Active side of the link (for create).",
 					},
 					"to_ticket": map[string]any{
 						"type":        "string",
-						"description": "Passive side of the link. For Blocks: the issue that IS BLOCKED.",
+						"description": "Passive side of the link (for create).",
 					},
 					"link_type": map[string]any{
 						"type":        "string",
 						"default":     "Blocks",
-						"description": "Link type name.",
+						"description": "Link type name (for create).",
 					},
-				},
-				"required": []string{"from_ticket", "to_ticket"},
-			},
-		},
-		Handler: s.toolJiraLink,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_jira_delete_link",
-			Description: "Delete an issue link between two Jira tickets by link ID. Use rick_jira_read to find link IDs first.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
 					"link_id": map[string]any{
 						"type":        "string",
-						"description": "The issue link ID to delete.",
+						"description": "ID of the link to delete.",
 					},
 				},
-				"required": []string{"link_id"},
+				"required": []string{"action"},
 			},
 		},
-		Handler: s.toolJiraDeleteLink,
+		Handler: s.toolJiraManageLinks,
 	})
 
 	s.register(Tool{
 		Definition: ToolDefinition{
 			Name:        "rick_jira_create",
-			Description: "Create a new Jira issue (Task, Bug, Story, Epic, Sub-task).",
+			Description: "Create a new Jira issue (Task, Bug, Story, Epic, etc). Returns the new key.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"summary": map[string]any{
 						"type":        "string",
-						"description": "Issue summary / title.",
+						"description": "Issue summary/title.",
 					},
 					"issue_type": map[string]any{
 						"type":        "string",
@@ -333,8 +222,11 @@ func (s *Server) requireJira() error {
 }
 
 type jiraReadArgs struct {
-	Ticket string   `json:"ticket"`
-	Fields []string `json:"fields"`
+	Ticket            string   `json:"ticket"`
+	Fields            []string `json:"fields"`
+	IncludeQASteps    bool     `json:"include_qa_steps"`
+	IncludePRLinks    bool     `json:"include_pr_links"`
+	IncludeEpicIssues bool     `json:"include_epic_issues"`
 }
 
 func (s *Server) toolJiraRead(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -393,59 +285,37 @@ func (s *Server) toolJiraRead(ctx context.Context, raw json.RawMessage) (any, er
 		result["links"] = links
 	}
 
-	return result, nil
-}
-
-type jiraReadQAStepsArgs struct {
-	Ticket  string `json:"ticket"`
-	FieldID string `json:"field_id"`
-}
-
-func (s *Server) toolJiraReadQASteps(ctx context.Context, raw json.RawMessage) (any, error) {
-	var args jiraReadQAStepsArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	if args.Ticket == "" {
-		return nil, fmt.Errorf("ticket is required")
-	}
-	if err := s.requireJira(); err != nil {
-		return nil, err
+	if args.IncludeQASteps {
+		fieldID := os.Getenv("JIRA_QA_STEPS_FIELD")
+		if fieldID == "" {
+			fieldID = defaultQAStepsField
+		}
+		rawIssue, err := s.deps.Jira.FetchRawIssue(ctx, args.Ticket)
+		if err == nil {
+			rawField, present := rawIssue.Fields[fieldID]
+			if present && len(rawField) > 0 && string(rawField) != "null" {
+				result["qa_steps"] = jira.ExtractTextField(rawField)
+			} else {
+				result["qa_steps"] = ""
+			}
+		}
 	}
 
-	fieldID := args.FieldID
-	if fieldID == "" {
-		fieldID = os.Getenv("JIRA_QA_STEPS_FIELD")
-	}
-	if fieldID == "" {
-		fieldID = defaultQAStepsField
-	}
-
-	issue, err := s.deps.Jira.FetchRawIssue(ctx, args.Ticket)
-	if err != nil {
-		return nil, fmt.Errorf("fetch issue: %w", err)
+	if args.IncludePRLinks {
+		links, err := s.deps.Jira.FetchPRLinks(ctx, args.Ticket)
+		if err == nil {
+			result["pr_links"] = links
+		}
 	}
 
-	rawField, present := issue.Fields[fieldID]
-	result := map[string]any{
-		"ticket":   args.Ticket,
-		"field_id": fieldID,
-		"present":  present && len(rawField) > 0 && string(rawField) != "null",
-	}
-
-	if result["present"].(bool) {
-		result["qa_steps"] = jira.ExtractTextField(rawField)
-	} else {
-		result["qa_steps"] = ""
+	if args.IncludeEpicIssues {
+		children, err := s.deps.Jira.FetchEpicChildren(ctx, args.Ticket, true)
+		if err == nil {
+			result["epic_issues"] = children
+		}
 	}
 
 	return result, nil
-}
-
-type jiraWriteArgs struct {
-	Ticket    string `json:"ticket"`
-	FieldName string `json:"field_name"`
-	Value     any    `json:"value"`
 }
 
 // knownFieldMap maps friendly names to Jira field IDs.
@@ -467,180 +337,93 @@ var numberFields = map[string]bool{
 	"customfield_10004": true, // Story Points
 }
 
+type jiraWriteArgs struct {
+	Ticket       string `json:"ticket"`
+	FieldName    string `json:"field_name"`
+	Value        any    `json:"value"`
+	Comment      string `json:"comment"`
+	Status       string `json:"status"`
+	Microservice string `json:"microservice"`
+}
+
 func (s *Server) toolJiraWrite(ctx context.Context, raw json.RawMessage) (any, error) {
 	var args jiraWriteArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
-	if args.Ticket == "" || args.FieldName == "" {
-		return nil, fmt.Errorf("ticket and field_name are required")
-	}
-	if args.Value == nil {
-		return nil, fmt.Errorf("value is required")
+	if args.Ticket == "" {
+		return nil, fmt.Errorf("ticket is required")
 	}
 	if err := s.requireJira(); err != nil {
 		return nil, err
 	}
 
-	fieldID := args.FieldName
-	if mapped, ok := knownFieldMap[args.FieldName]; ok {
-		fieldID = mapped
+	result := map[string]any{
+		"ticket": args.Ticket,
 	}
 
-	// For description, convert markdown to ADF.
-	value := args.Value
-	if fieldID == "description" {
-		if str, ok := value.(string); ok {
-			value = jira.MarkdownToADF(str)
+	if args.FieldName != "" && args.Value != nil {
+		fieldID := args.FieldName
+		if mapped, ok := knownFieldMap[args.FieldName]; ok {
+			fieldID = mapped
 		}
-	}
 
-	// Select fields need {"value": "..."} wrapping.
-	if selectFields[fieldID] {
-		if str, ok := value.(string); ok {
-			value = map[string]any{"value": str}
-		}
-	}
-
-	// Number fields must be numeric — coerce string to float64.
-	if numberFields[fieldID] {
-		if str, ok := value.(string); ok {
-			n, err := strconv.ParseFloat(str, 64)
-			if err != nil {
-				return nil, fmt.Errorf("field %s requires a number, got %q", args.FieldName, str)
+		// For description, convert markdown to ADF.
+		value := args.Value
+		if fieldID == "description" {
+			if str, ok := value.(string); ok {
+				value = jira.MarkdownToADF(str)
 			}
-			value = n
 		}
+
+		// Select fields need {"value": "..."} wrapping.
+		if selectFields[fieldID] {
+			if str, ok := value.(string); ok {
+				value = map[string]any{"value": str}
+			}
+		}
+
+		// Number fields must be numeric — coerce string to float64.
+		if numberFields[fieldID] {
+			if str, ok := value.(string); ok {
+				n, err := strconv.ParseFloat(str, 64)
+				if err != nil {
+					return nil, fmt.Errorf("field %s requires a number, got %q", args.FieldName, str)
+				}
+				value = n
+			}
+		}
+
+		if err := s.deps.Jira.UpdateField(ctx, args.Ticket, fieldID, value); err != nil {
+			return nil, fmt.Errorf("update field: %w", err)
+		}
+		result["field_updated"] = args.FieldName
 	}
 
-	if err := s.deps.Jira.UpdateField(ctx, args.Ticket, fieldID, value); err != nil {
-		return nil, fmt.Errorf("update field: %w", err)
+	if args.Comment != "" {
+		if err := s.deps.Jira.AddComment(ctx, args.Ticket, args.Comment); err != nil {
+			return nil, fmt.Errorf("add comment: %w", err)
+		}
+		result["commented"] = true
 	}
 
-	return map[string]any{
-		"ticket":  args.Ticket,
-		"field":   args.FieldName,
-		"updated": true,
-	}, nil
-}
-
-type jiraTransitionArgs struct {
-	Ticket string `json:"ticket"`
-	Status string `json:"status"`
-}
-
-func (s *Server) toolJiraTransition(ctx context.Context, raw json.RawMessage) (any, error) {
-	var args jiraTransitionArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	if args.Ticket == "" || args.Status == "" {
-		return nil, fmt.Errorf("ticket and status are required")
-	}
-	if err := s.requireJira(); err != nil {
-		return nil, err
+	if args.Status != "" {
+		if err := s.deps.Jira.TransitionIssue(ctx, args.Ticket, args.Status); err != nil {
+			return nil, fmt.Errorf("transition: %w", err)
+		}
+		result["transitioned"] = args.Status
 	}
 
-	if err := s.deps.Jira.TransitionIssue(ctx, args.Ticket, args.Status); err != nil {
-		return nil, fmt.Errorf("transition: %w", err)
+	if args.Microservice != "" {
+		method, err := s.deps.Jira.SetMicroservice(ctx, args.Ticket, args.Microservice)
+		if err != nil {
+			return nil, fmt.Errorf("set microservice: %w", err)
+		}
+		result["microservice_set"] = args.Microservice
+		result["microservice_method"] = method
 	}
 
-	return map[string]any{
-		"ticket":       args.Ticket,
-		"status":       args.Status,
-		"transitioned": true,
-	}, nil
-}
-
-type jiraCommentArgs struct {
-	Ticket  string `json:"ticket"`
-	Comment string `json:"comment"`
-}
-
-func (s *Server) toolJiraComment(ctx context.Context, raw json.RawMessage) (any, error) {
-	var args jiraCommentArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	if args.Ticket == "" || args.Comment == "" {
-		return nil, fmt.Errorf("ticket and comment are required")
-	}
-	if err := s.requireJira(); err != nil {
-		return nil, err
-	}
-
-	if err := s.deps.Jira.AddComment(ctx, args.Ticket, args.Comment); err != nil {
-		return nil, fmt.Errorf("add comment: %w", err)
-	}
-
-	return map[string]any{
-		"ticket":  args.Ticket,
-		"commented": true,
-	}, nil
-}
-
-type jiraSetMicroserviceArgs struct {
-	Ticket       string `json:"ticket"`
-	Microservice string `json:"microservice"`
-}
-
-func (s *Server) toolJiraSetMicroservice(ctx context.Context, raw json.RawMessage) (any, error) {
-	var args jiraSetMicroserviceArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	if args.Ticket == "" || args.Microservice == "" {
-		return nil, fmt.Errorf("ticket and microservice are required")
-	}
-	if err := s.requireJira(); err != nil {
-		return nil, err
-	}
-
-	method, err := s.deps.Jira.SetMicroservice(ctx, args.Ticket, args.Microservice)
-	if err != nil {
-		return nil, fmt.Errorf("set microservice: %w", err)
-	}
-
-	return map[string]any{
-		"ticket":       args.Ticket,
-		"microservice": args.Microservice,
-		"method":       method,
-		"updated":      true,
-	}, nil
-}
-
-type jiraEpicArgs struct {
-	Epic          string `json:"epic"`
-	IncludeClosed *bool  `json:"include_closed"`
-}
-
-func (s *Server) toolJiraEpicIssues(ctx context.Context, raw json.RawMessage) (any, error) {
-	var args jiraEpicArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	if args.Epic == "" {
-		return nil, fmt.Errorf("epic is required")
-	}
-	if err := s.requireJira(); err != nil {
-		return nil, err
-	}
-
-	includeClosed := true
-	if args.IncludeClosed != nil {
-		includeClosed = *args.IncludeClosed
-	}
-
-	children, err := s.deps.Jira.FetchEpicChildren(ctx, args.Epic, includeClosed)
-	if err != nil {
-		return nil, fmt.Errorf("fetch epic children: %w", err)
-	}
-
-	return map[string]any{
-		"epic":   args.Epic,
-		"issues": children,
-		"count":  len(children),
-	}, nil
+	return result, nil
 }
 
 type jiraSearchArgs struct {
@@ -684,91 +467,56 @@ func (s *Server) toolJiraSearch(ctx context.Context, raw json.RawMessage) (any, 
 	}, nil
 }
 
-type jiraLinkArgs struct {
+type jiraManageLinksArgs struct {
+	Action     string `json:"action"`
 	FromTicket string `json:"from_ticket"`
 	ToTicket   string `json:"to_ticket"`
 	LinkType   string `json:"link_type"`
+	LinkID     string `json:"link_id"`
 }
 
-func (s *Server) toolJiraLink(ctx context.Context, raw json.RawMessage) (any, error) {
-	var args jiraLinkArgs
+func (s *Server) toolJiraManageLinks(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args jiraManageLinksArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	if args.FromTicket == "" || args.ToTicket == "" {
-		return nil, fmt.Errorf("from_ticket and to_ticket are required")
-	}
-	if err := s.requireJira(); err != nil {
-		return nil, err
-	}
-	if args.LinkType == "" {
-		args.LinkType = "Blocks"
-	}
-
-	if err := s.deps.Jira.LinkIssuesWithType(ctx, args.FromTicket, args.ToTicket, args.LinkType); err != nil {
-		return nil, fmt.Errorf("link issues: %w", err)
-	}
-
-	return map[string]any{
-		"from":    args.FromTicket,
-		"to":      args.ToTicket,
-		"type":    args.LinkType,
-		"linked":  true,
-	}, nil
-}
-
-type jiraDeleteLinkArgs struct {
-	LinkID string `json:"link_id"`
-}
-
-func (s *Server) toolJiraDeleteLink(ctx context.Context, raw json.RawMessage) (any, error) {
-	var args jiraDeleteLinkArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	if args.LinkID == "" {
-		return nil, fmt.Errorf("link_id is required")
 	}
 	if err := s.requireJira(); err != nil {
 		return nil, err
 	}
 
-	if err := s.deps.Jira.DeleteIssueLink(ctx, args.LinkID); err != nil {
-		return nil, fmt.Errorf("delete link: %w", err)
+	switch args.Action {
+	case "create":
+		if args.FromTicket == "" || args.ToTicket == "" {
+			return nil, fmt.Errorf("from_ticket and to_ticket are required for create action")
+		}
+		if args.LinkType == "" {
+			args.LinkType = "Blocks"
+		}
+		if err := s.deps.Jira.LinkIssuesWithType(ctx, args.FromTicket, args.ToTicket, args.LinkType); err != nil {
+			return nil, fmt.Errorf("link issues: %w", err)
+		}
+		return map[string]any{
+			"action":  "create",
+			"from":    args.FromTicket,
+			"to":      args.ToTicket,
+			"type":    args.LinkType,
+			"created": true,
+		}, nil
+	case "delete":
+		if args.LinkID == "" {
+			return nil, fmt.Errorf("link_id is required for delete action")
+		}
+		if err := s.deps.Jira.DeleteIssueLink(ctx, args.LinkID); err != nil {
+			return nil, fmt.Errorf("delete link: %w", err)
+		}
+		return map[string]any{
+			"action":  "delete",
+			"link_id": args.LinkID,
+			"deleted": true,
+		}, nil
+	default:
+		return nil, fmt.Errorf("invalid action: %q", args.Action)
 	}
-
-	return map[string]any{
-		"link_id": args.LinkID,
-		"deleted": true,
-	}, nil
-}
-
-type jiraPRLinksArgs struct {
-	Ticket string `json:"ticket"`
-}
-
-func (s *Server) toolJiraPRLinks(ctx context.Context, raw json.RawMessage) (any, error) {
-	var args jiraPRLinksArgs
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
-	}
-	if args.Ticket == "" {
-		return nil, fmt.Errorf("ticket is required")
-	}
-	if err := s.requireJira(); err != nil {
-		return nil, err
-	}
-
-	links, err := s.deps.Jira.FetchPRLinks(ctx, args.Ticket)
-	if err != nil {
-		return nil, fmt.Errorf("fetch PR links: %w", err)
-	}
-
-	return map[string]any{
-		"ticket": args.Ticket,
-		"prs":    links,
-		"count":  len(links),
-	}, nil
 }
 
 type jiraCreateArgs struct {

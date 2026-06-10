@@ -39,7 +39,7 @@ func loadEnvFile() {
 	if err != nil {
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -55,7 +55,7 @@ func loadEnvFile() {
 		value = strings.TrimSpace(value)
 		// Don't overwrite — explicit env vars win (even if set to empty).
 		if _, exists := os.LookupEnv(key); !exists {
-			os.Setenv(key, value)
+			_ = os.Setenv(key, value)
 		}
 	}
 }

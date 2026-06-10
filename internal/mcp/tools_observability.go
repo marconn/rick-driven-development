@@ -74,79 +74,6 @@ func (s *Server) registerObservabilityTools() {
 
 	s.register(Tool{
 		Definition: ToolDefinition{
-			Name:        "rick_workflow_output",
-			Description: "Get consolidated output from all personas in a workflow. Saves N calls to rick_persona_output.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID.",
-					},
-					"phases": map[string]any{
-						"type":        "array",
-						"items":       map[string]any{"type": "string"},
-						"description": "Filter to specific phases (optional).",
-					},
-				},
-				"required": []string{"workflow_id"},
-			},
-		},
-		Handler: s.toolWorkflowOutput,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_diff",
-			Description: "Show the git diff of code changes from a workflow's workspace. Requires the workspace to still exist.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID.",
-					},
-					"stat_only": map[string]any{
-						"type":    "boolean",
-						"default": false,
-						"description": "Show only diffstat, not full diff.",
-					},
-				},
-				"required": []string{"workflow_id"},
-			},
-		},
-		Handler: s.toolDiff,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_pr_diff",
-			Description: "Fetch the diff of a GitHub pull request by repo and PR number. Does not require a workflow or workspace — calls GitHub directly via `gh` CLI.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"repo": map[string]any{
-						"type":        "string",
-						"description": "Repository in owner/repo format (e.g. 'hulilabs/hulihealth-web').",
-					},
-					"pr_number": map[string]any{
-						"type":        "integer",
-						"description": "Pull request number.",
-					},
-					"stat_only": map[string]any{
-						"type":    "boolean",
-						"default": false,
-						"description": "Show only diffstat, not full diff.",
-					},
-				},
-				"required": []string{"repo", "pr_number"},
-			},
-		},
-		Handler: s.toolPRDiff,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
 			Name:        "rick_create_pr",
 			Description: "Create a GitHub PR from a completed workflow's workspace. Extracts ticket reference from correlation tags, builds PR title/body from workflow context.",
 			InputSchema: map[string]any{
@@ -865,4 +792,3 @@ func (s *Server) toolProjectSync(ctx context.Context, raw json.RawMessage) (any,
 		"points":   totalPoints,
 	}, nil
 }
-

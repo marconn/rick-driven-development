@@ -1,10 +1,10 @@
 # package github
 
-GitHub REST API client and event-driven adapters for fetching PR feedback and driving the `rick_wave_plan` / `rick_create_pr` surface — used by `pr-feedback` / `pr-review` workflows and the MCP wave/observability tools.
+GitHub REST API client and event-driven adapters for fetching PR feedback and driving the `rick_wave_manager` (action=plan) / `rick_create_pr` surface — used by `pr-feedback` / `pr-review` workflows and the MCP wave/observability tools.
 
 ## Files
 - `client.go` — Pure-Go HTTP client for GitHub REST v3 (no `gh` CLI shell-out). Pagination, custom Accept headers, bearer auth. Exposes `GetIssue`, `GetSubIssues` (sub-issues endpoint, GA 2025), `GetIssueTimeline` (cross-referenced PRs), plus PR / review / diff / check-run helpers used by the PR-review pipeline.
-- `depstable.go` — Markdown-table dependency parser. Scans a parent issue body for a GitHub-flavored pipe table with an Issue/Depends-on (or "Blocked by") column pair and returns `DependencyEdge{From, On}`. Tolerates both `#N` and `owner/repo#N` references. Used by `rick_wave_plan` when `dependency_source=table`.
+- `depstable.go` — Markdown-table dependency parser. Scans a parent issue body for a GitHub-flavored pipe table with an Issue/Depends-on (or "Blocked by") column pair and returns `DependencyEdge{From, On}`. Tolerates both `#N` and `owner/repo#N` references. Used by `rick_wave_manager` (action=plan) when `dependency_source=table`.
 - `discovery.go` — Body-driven discovery + dependency helpers. `ParseTaskList` pulls unchecked `- [ ] #N` rows, `ParseBodyRefs` scrapes every `#N` / `owner/repo#N` in a body, `ParseBodyDependencies` extracts edges from `Depends on` / `Blocked by` / `Blocks` keyword phrases (Closes/Fixes/Resolves excluded — they invert direction).
 - `graphql.go` — Opt-in GraphQL client used by the wave planner's fast path. `GraphQLQuery` is the generic entry; `FetchWaveParent` runs the pre-canned parent + sub-issues + timeline query in one round-trip and normalizes GraphQL's uppercase states to lowercase for REST-path parity.
 - `fetcher.go` — `FetcherHandler` (`handler.Handler`) — DAG-dispatched persona that fetches PR reviews/comments/diff and emits `ContextEnrichment` for downstream personas.

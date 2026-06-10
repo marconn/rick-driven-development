@@ -103,6 +103,7 @@ func (s *Server) registerBuiltinTools() { //nolint:funlen // tool registration i
 	s.registerJiraTools()
 	s.registerWaveTools()
 	s.registerObservabilityTools()
+	s.registerConsolidatedTools()
 	s.registerConfluenceTools()
 
 	s.register(Tool{
@@ -150,24 +151,6 @@ func (s *Server) registerBuiltinTools() { //nolint:funlen // tool registration i
 
 	s.register(Tool{
 		Definition: ToolDefinition{
-			Name:        "rick_workflow_status",
-			Description: "Get the current status of a workflow by replaying its events into the aggregate state machine. Shows workflow status, phase states, iterations, and token usage.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID.",
-					},
-				},
-				"required": []string{"workflow_id"},
-			},
-		},
-		Handler: s.toolWorkflowStatus,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
 			Name:        "rick_list_workflows",
 			Description: "List available workflow DAGs (definitions) and all tracked workflow runs with their current status.",
 			InputSchema: map[string]any{
@@ -202,87 +185,6 @@ func (s *Server) registerBuiltinTools() { //nolint:funlen // tool registration i
 
 	s.register(Tool{
 		Definition: ToolDefinition{
-			Name:        "rick_token_usage",
-			Description: "Get token consumption for a workflow, broken down by phase and AI backend.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID.",
-					},
-				},
-				"required": []string{"workflow_id"},
-			},
-		},
-		Handler: s.toolTokenUsage,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_phase_timeline",
-			Description: "Get timing and iteration details for each phase in a workflow. Shows start/end times, duration, and iteration count.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID.",
-					},
-				},
-				"required": []string{"workflow_id"},
-			},
-		},
-		Handler: s.toolPhaseTimeline,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_workflow_verdicts",
-			Description: "Get review verdicts for a workflow. Shows pass/fail outcomes, summaries, and detailed issues from reviewer and QA phases.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID.",
-					},
-				},
-				"required": []string{"workflow_id"},
-			},
-		},
-		Handler: s.toolWorkflowVerdicts,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_persona_output",
-			Description: "Get the AI response output for a specific persona in a workflow. Returns the raw LLM output text, optionally truncated.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID.",
-					},
-					"persona": map[string]any{
-						"type":        "string",
-						"description": "The persona name (e.g. 'developer', 'reviewer').",
-					},
-					"max_length": map[string]any{
-						"type":        "integer",
-						"description": "Maximum characters to return. Defaults to 10000.",
-						"default":     10000,
-					},
-				},
-				"required": []string{"workflow_id", "persona"},
-			},
-		},
-		Handler: s.toolPersonaOutput,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
 			Name:        "rick_list_dead_letters",
 			Description: "List all dead letter entries (events that failed delivery). Shows event ID, handler, error, and attempt count.",
 			InputSchema: map[string]any{
@@ -294,74 +196,6 @@ func (s *Server) registerBuiltinTools() { //nolint:funlen // tool registration i
 	})
 
 	// --- Operator Intervention Tools ---
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_cancel_workflow",
-			Description: "Cancel a running workflow. In-flight personas complete but no new personas are dispatched.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID to cancel.",
-					},
-					"reason": map[string]any{
-						"type":        "string",
-						"description": "Reason for cancellation.",
-						"default":     "operator requested",
-					},
-				},
-				"required": []string{"workflow_id"},
-			},
-		},
-		Handler: s.toolCancelWorkflow,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_pause_workflow",
-			Description: "Pause a running workflow. In-flight personas complete but new dispatches are blocked until resumed.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID to pause.",
-					},
-					"reason": map[string]any{
-						"type":        "string",
-						"description": "Reason for pausing.",
-						"default":     "operator requested",
-					},
-				},
-				"required": []string{"workflow_id"},
-			},
-		},
-		Handler: s.toolPauseWorkflow,
-	})
-
-	s.register(Tool{
-		Definition: ToolDefinition{
-			Name:        "rick_resume_workflow",
-			Description: "Resume a paused workflow. Blocked persona dispatches are replayed.",
-			InputSchema: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"workflow_id": map[string]any{
-						"type":        "string",
-						"description": "The workflow aggregate ID to resume.",
-					},
-					"reason": map[string]any{
-						"type":        "string",
-						"description": "Reason for resuming.",
-					},
-				},
-				"required": []string{"workflow_id"},
-			},
-		},
-		Handler: s.toolResumeWorkflow,
-	})
 
 	s.register(Tool{
 		Definition: ToolDefinition{
@@ -677,20 +511,20 @@ type runningPhaseSummary struct {
 }
 
 type workflowStatusResult struct {
-	ID                string               `json:"id"`
-	Status            string               `json:"status"`
-	WorkflowID        string               `json:"workflow_id"`
-	Version           int                  `json:"version"`
-	TokensUsed        int                  `json:"tokens_used"`
-	CompletedPersonas map[string]bool      `json:"completed_personas"`
-	FeedbackCount     map[string]int       `json:"feedback_count"`
-	PendingHints      []pendingHintSummary `json:"pending_hints,omitempty"`
-	RunningPhases     []runningPhaseSummary `json:"running_phases,omitempty"`
+	ID                string                 `json:"id"`
+	Status            string                 `json:"status"`
+	WorkflowID        string                 `json:"workflow_id"`
+	Version           int                    `json:"version"`
+	TokensUsed        int                    `json:"tokens_used"`
+	CompletedPersonas map[string]bool        `json:"completed_personas"`
+	FeedbackCount     map[string]int         `json:"feedback_count"`
+	PendingHints      []pendingHintSummary   `json:"pending_hints,omitempty"`
+	RunningPhases     []runningPhaseSummary  `json:"running_phases,omitempty"`
 	Failure           *workflowFailureDetail `json:"failure,omitempty"`
 }
 
 // workflowFailureDetail surfaces the cause of a WorkflowFailed event directly
-// on the rick_workflow_status response, so operators do not have to replay
+// on the rick_workflow_inspect status panel, so operators do not have to replay
 // the event chain to figure out why a workflow failed. FailureKind / Backend
 // are the machine-readable classifiers that should drive operator runbooks;
 // Reason / Stderr are human-readable context. Only populated when status ==

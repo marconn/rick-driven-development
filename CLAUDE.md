@@ -98,7 +98,7 @@ External handlers register via bidirectional gRPC streams — stream lifecycle I
 
 ## MCP + agent UI
 
-`internal/mcp/` exposes 52 tools over JSON-RPC 2.0 (stdio/HTTP) in 7 categories: workflow (16), jobs (7), workspace (3), jira (12), wave (5), observability (7), confluence (2). Used by Claude Desktop/Cursor and the `agent/` Wails desktop UI. Full tool catalog: `internal/mcp/CLAUDE.md`. Agent UI architecture + slash commands: `agent/CLAUDE.md`.
+`internal/mcp/` exposes 33 tools over JSON-RPC 2.0 (stdio/HTTP) in 7 categories: workflow (10), jobs (6), workspace (3), jira (5), wave (2), observability (5), confluence (2). The surface is deliberately consolidated — facade tools multiplex over fine-grained handlers to keep the LLM's tool-selection context small: `rick_workflow_inspect` (status/timeline/tokens/verdicts/output/persona_output via an `include` list), `rick_workflow_control` (pause/resume/cancel via an `action`), `rick_diff_viewer` (workspace vs PR diff), `rick_job_inspect` (job status+output), `rick_wave_manager` (plan/launch/status/cleanup via an `action`), and the Jira trio `rick_jira_read`/`rick_jira_write`/`rick_jira_manage_links`. Used by Claude Desktop/Cursor and the `agent/` Wails desktop UI. Full tool catalog: `internal/mcp/CLAUDE.md`. Agent UI architecture + slash commands: `agent/CLAUDE.md`.
 
 **Execution mode**: `rick serve --addr :58077 --grpc-addr :59077 --db rick.db --backend claude` starts HTTP (MCP) + gRPC. This is the primary mode — `rick run` is deprecated. Serve defaults `--yolo=true` (headless auto-approve).
 
