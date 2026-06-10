@@ -221,6 +221,44 @@ func TestHTTPGetHealthCheck_ReportsInjectedBackend(t *testing.T) {
 	}
 }
 
+func TestHTTPInitializeNegotiatesProtocolVersion(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+	h := httpHandler(s)
+
+	// The operator-facing failure is on the HTTP POST path: a recent Claude Code
+	// client initializes over POST /mcp asking for 2025-06-18. The server must
+	// echo that version, not the hardcoded 2024-11-05, or the client drops every
+	// rick tool. Assert negotiation at the real transport boundary.
+	params, _ := json.Marshal(initializeParams{
+		ProtocolVersion: "2025-06-18",
+		ClientInfo:      entityInfo{Name: "claude-code", Version: "1.0"},
+	})
+	w := postMCP(t, h, jsonRPCRequest{
+		JSONRPC: jsonRPCVersion,
+		ID:      json.RawMessage("1"),
+		Method:  methodInitialize,
+		Params:  params,
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	resp := parseHTTPResponse(t, w)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+	data, _ := json.Marshal(resp.Result)
+	var result initializeResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ProtocolVersion != "2025-06-18" {
+		t.Errorf("expected negotiated 2025-06-18, got %q", result.ProtocolVersion)
+	}
+}
+
 func TestHTTPGetEventStreamReturns405(t *testing.T) {
 	deps, cleanup := testDeps(t)
 	defer cleanup()

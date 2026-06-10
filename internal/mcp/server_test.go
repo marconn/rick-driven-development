@@ -158,6 +158,56 @@ func TestInitialize(t *testing.T) {
 	}
 }
 
+// TestInitializeNegotiatesProtocolVersion pins the MCP spec rule (Lifecycle
+// §Version Negotiation): when the client requests a version the server
+// supports, the server MUST echo that exact version — not a hardcoded older
+// one. A modern Claude Code client that asks for 2025-06-18 and gets 2024-11-05
+// back treats it as an unrequested downgrade, disconnects, and drops every
+// rick_* tool — the silent no-op an operator sees as "the server is dark".
+func TestInitializeNegotiatesProtocolVersion(t *testing.T) {
+	deps, cleanup := testDeps(t)
+	defer cleanup()
+	s := NewServer(deps, testLogger())
+
+	cases := []struct {
+		name      string
+		requested string
+		want      string
+	}{
+		{"current spec version echoed", "2025-06-18", "2025-06-18"},
+		{"intermediate version echoed", "2025-03-26", "2025-03-26"},
+		{"legacy version echoed", "2024-11-05", "2024-11-05"},
+		{"unsupported newer falls back to latest", "9999-99-99", latestProtocolVersion},
+		{"empty falls back to latest", "", latestProtocolVersion},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := serveLines(t, s,
+				sendRequest(1, methodInitialize, initializeParams{
+					ProtocolVersion: tc.requested,
+					ClientInfo:      entityInfo{Name: "test", Version: "1.0"},
+				}),
+			)
+			if len(lines) != 1 {
+				t.Fatalf("expected 1 response, got %d", len(lines))
+			}
+			resp := parseResponse(t, lines[0])
+			if resp.Error != nil {
+				t.Fatalf("unexpected error: %s", resp.Error.Message)
+			}
+			data, _ := json.Marshal(resp.Result)
+			var result initializeResult
+			if err := json.Unmarshal(data, &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.ProtocolVersion != tc.want {
+				t.Errorf("requested %q: expected echoed %q, got %q", tc.requested, tc.want, result.ProtocolVersion)
+			}
+		})
+	}
+}
+
 func TestInitializedNotification(t *testing.T) {
 	deps, cleanup := testDeps(t)
 	defer cleanup()

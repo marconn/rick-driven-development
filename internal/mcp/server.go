@@ -13,7 +13,16 @@ import (
 // Protocol constants.
 const (
 	jsonRPCVersion = "2.0"
+	// protocolVersion is the legacy/minimum MCP revision rick implements and the
+	// fallback echoed to clients that don't negotiate. Kept as the spec floor;
+	// the version actually returned is negotiated per-request, see
+	// negotiateProtocolVersion.
 	protocolVersion = "2024-11-05"
+	// latestProtocolVersion is the newest MCP revision rick advertises when a
+	// client requests a version we don't recognize. Rick's tool-call surface
+	// (tools/list + tools/call returning text content) is identical across every
+	// revision in supportedProtocolVersions, so echoing any of them is safe.
+	latestProtocolVersion = "2025-06-18"
 
 	methodInitialize       = "initialize"
 	methodInitialized      = "notifications/initialized"
@@ -208,12 +217,41 @@ func (s *Server) handleRequest(ctx context.Context, req jsonRPCRequest) *jsonRPC
 	}
 }
 
+// supportedProtocolVersions is the set of MCP revisions rick can speak. Rick's
+// only capability is tools (tools/list + tools/call returning text content
+// blocks), which is wire-identical across these revisions — the 2025-* deltas
+// (structured output, elicitation, removed JSON-RPC batching) don't touch the
+// subset rick uses — so it can honestly echo any of them.
+var supportedProtocolVersions = map[string]bool{
+	"2024-11-05": true,
+	"2025-03-26": true,
+	"2025-06-18": true,
+}
+
+// negotiateProtocolVersion implements the MCP spec rule (Lifecycle §Version
+// Negotiation): if the client's requested version is one we support, we MUST
+// echo it back unchanged; otherwise we return the latest version we support.
+// Echoing the requested version is what keeps a strict client (recent Claude
+// Code) from seeing an unrequested downgrade, disconnecting, and dropping every
+// rick tool from the model's callable set.
+func negotiateProtocolVersion(requested string) string {
+	if supportedProtocolVersions[requested] {
+		return requested
+	}
+	return latestProtocolVersion
+}
+
 func (s *Server) handleInitialize(req jsonRPCRequest) *jsonRPCResponse {
+	// Best-effort parse: a malformed/absent params block yields an empty
+	// requested version, which negotiateProtocolVersion maps to the latest.
+	var params initializeParams
+	_ = json.Unmarshal(req.Params, &params)
+
 	return &jsonRPCResponse{
 		JSONRPC: jsonRPCVersion,
 		ID:      req.ID,
 		Result: initializeResult{
-			ProtocolVersion: protocolVersion,
+			ProtocolVersion: negotiateProtocolVersion(params.ProtocolVersion),
 			ServerInfo:      entityInfo{Name: "rick", Version: "2.0.0"},
 			Capabilities: capabilities{
 				Tools: &toolsCapability{},
