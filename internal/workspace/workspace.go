@@ -55,7 +55,7 @@ func resolveBasePath() (string, error) {
 // (APFS clonefile(2) on macOS, cp -r elsewhere — see clone_darwin.go).
 // correlationID is recorded in the .rick/workspace.yaml marker so future
 // post-checks can correlate a workspace back to its workflow; pass "" for
-// manual setups (e.g., MCP rick_workspace_setup) that have no workflow.
+// manual setups (e.g., MCP rick_workspace action=setup) that have no workflow.
 // Returns the workspace result or an error.
 func SetupWorkspace(repo, ticket, branch, base, suffix, correlationID string, isolate bool, prParams ...string) (*WorkspaceResult, error) {
 	if repo == "" {
@@ -95,8 +95,8 @@ found:
 
 	if isolate {
 		// Build destination directory name: <repo>-rick-ws-<id>
-		// The "-rick-ws-" infix is the canonical marker that rick_workspace_list
-		// and rick_workspace_cleanup use to identify Rick-owned directories
+		// The "-rick-ws-" infix is the canonical marker that the rick_workspace
+		// tool (list / cleanup actions) uses to identify Rick-owned directories
 		// (see internal/mcp/tools_workspace.go safeWorkspacePath). Every caller
 		// — workflow-driven or manual MCP — produces the same structure so the
 		// pattern guard works uniformly and operators see a consistent layout.

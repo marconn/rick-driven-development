@@ -18,7 +18,7 @@ rick_run_workflow(
 )
 ```
 
-Returns `{ workflow_id: <uuid>, status: "started" }` (acknowledgement only). 7+ minutes later, `rick_workflow_status` still reports:
+Returns `{ workflow_id: <uuid>, status: "started" }` (acknowledgement only). 7+ minutes later, `rick_workflow_inspect` (status panel) still reports:
 
 ```json
 {
@@ -100,10 +100,10 @@ grep -rn 'jira.*context\|resolve.*repo' internal/handler/ internal/persona/
 
 ## Workaround for users
 
-None reliable. `rick_retry_workflow` cannot help — the workflow never started, so there is no failed phase to resume from. Users must `rick_cancel_workflow` and either:
+None reliable. `rick_workflow_control action=retry` cannot help — the workflow never started, so there is no failed phase to resume from. Users must `rick_workflow_control action=cancel` and either:
 
 - Switch to `dag=workspace-dev` (loses ticket-context auto-fetch and repo resolution).
-- Manually provision a workspace via `rick_workspace_setup` and use `rick_run` instead.
+- Manually provision a workspace via `rick_workspace action=setup` and use `rick_run` instead.
 
 ## Why this matters
 
