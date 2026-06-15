@@ -477,6 +477,201 @@ func TestReviewHandlerEmptyAIResponseDefaultsToPass(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ReviewHandler — retry on default_optimistic (no VERDICT line)
+// ---------------------------------------------------------------------------
+
+// sequenceBackend returns a different response on each successive Run call,
+// so a test can model a reviewer that omits the VERDICT line on the first
+// attempt and emits it on the reinforced retry. It also counts calls so the
+// retry is provably bounded.
+type sequenceBackend struct {
+	name      string
+	responses []*backend.Response
+	calls     int
+}
+
+func (b *sequenceBackend) Name() string                       { return b.name }
+func (b *sequenceBackend) Capabilities() backend.Capabilities { return backend.Capabilities{} }
+
+func (b *sequenceBackend) Run(_ context.Context, _ backend.Request) (*backend.Response, error) {
+	idx := b.calls
+	b.calls++
+	if idx >= len(b.responses) {
+		idx = len(b.responses) - 1 // saturate on the last response
+	}
+	return b.responses[idx], nil
+}
+
+// A reviewer whose first response carries real findings in prose but no
+// VERDICT line (the antigravity failure mode) must be re-prompted once; the
+// reinforced retry that emits VERDICT: FAIL becomes the authoritative verdict
+// instead of the silent default_optimistic PASS.
+func TestReviewHandlerRetriesOnDefaultOptimistic(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-review-retry"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "Build API",
+		})).WithCorrelation(corrID),
+	}
+
+	sb := &sequenceBackend{
+		name: "antigravity",
+		responses: []*backend.Response{
+			// Attempt 1: real concern, but no VERDICT line → default_optimistic.
+			{Output: "This handler reads a shared map without a lock.\n\nPASS.", Duration: time.Second},
+			// Attempt 2 (reinforced): explicit FAIL preserving the finding.
+			{Output: "Shared map read without a lock.\n\nVERDICT: FAIL\n\n1. data race on cache", Duration: time.Second},
+		},
+	}
+
+	h := NewReviewHandler(ReviewHandlerConfig{
+		AIConfig: AIHandlerConfig{
+			Name:     "reviewer",
+			Persona:  persona.Reviewer,
+			Backend:  sb,
+			Store:    store,
+			Personas: persona.DefaultRegistry(),
+			Builder:  persona.NewPromptBuilder(),
+		},
+		TargetPersona: "developer",
+	})
+
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation(corrID)
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	if sb.calls != 2 {
+		t.Fatalf("want backend invoked twice (initial + reinforced retry), got %d", sb.calls)
+	}
+
+	verdict := lastVerdict(t, results)
+	if verdict.Outcome != event.VerdictFail {
+		t.Errorf("want fail from the reinforced retry, got %s", verdict.Outcome)
+	}
+	if verdict.Source != event.VerdictSourceExplicitFail {
+		t.Errorf("want explicit_fail source, got %s", verdict.Source)
+	}
+}
+
+// When the retry ALSO omits the VERDICT line, the handler must stop after
+// exactly one retry (bounded, no loop) and fall back to the documented
+// default_optimistic signal rather than spin.
+func TestReviewHandlerRetryStillNoVerdictIsBounded(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-review-retry-fail"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "Build API",
+		})).WithCorrelation(corrID),
+	}
+
+	sb := &sequenceBackend{
+		name: "antigravity",
+		responses: []*backend.Response{
+			{Output: "Looks fine to me.", Duration: time.Second},
+			{Output: "Still looks fine.", Duration: time.Second},
+		},
+	}
+
+	h := NewReviewHandler(ReviewHandlerConfig{
+		AIConfig: AIHandlerConfig{
+			Name:     "reviewer",
+			Persona:  persona.Reviewer,
+			Backend:  sb,
+			Store:    store,
+			Personas: persona.DefaultRegistry(),
+			Builder:  persona.NewPromptBuilder(),
+		},
+		TargetPersona: "developer",
+	})
+
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation(corrID)
+
+	results, err := h.Handle(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	if sb.calls != 2 {
+		t.Fatalf("want exactly one bounded retry (2 calls), got %d", sb.calls)
+	}
+
+	verdict := lastVerdict(t, results)
+	if verdict.Source != event.VerdictSourceDefaultOptimistic {
+		t.Errorf("want default_optimistic after a failed retry, got %s", verdict.Source)
+	}
+}
+
+// An explicit verdict on the first attempt must NOT trigger a retry — the
+// retry is reserved for the unparseable (default_optimistic) path so the
+// common case pays no extra backend call.
+func TestReviewHandlerNoRetryOnExplicitVerdict(t *testing.T) {
+	store := newMockStore()
+	corrID := "corr-review-no-retry"
+	store.correlationEvents[corrID] = []event.Envelope{
+		event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+			Prompt: "Build API",
+		})).WithCorrelation(corrID),
+	}
+
+	sb := &sequenceBackend{
+		name: "claude",
+		responses: []*backend.Response{
+			{Output: "All good.\n\nVERDICT: PASS", Duration: time.Second},
+		},
+	}
+
+	h := NewReviewHandler(ReviewHandlerConfig{
+		AIConfig: AIHandlerConfig{
+			Name:     "reviewer",
+			Persona:  persona.Reviewer,
+			Backend:  sb,
+			Store:    store,
+			Personas: persona.DefaultRegistry(),
+			Builder:  persona.NewPromptBuilder(),
+		},
+		TargetPersona: "developer",
+	})
+
+	env := event.New(event.PersonaCompleted, 1, event.MustMarshal(event.PersonaCompletedPayload{
+		Persona: "developer",
+	})).WithCorrelation(corrID)
+
+	if _, err := h.Handle(context.Background(), env); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if sb.calls != 1 {
+		t.Fatalf("explicit verdict must not retry; want 1 call, got %d", sb.calls)
+	}
+}
+
+// lastVerdict returns the VerdictPayload from the (single) VerdictRendered
+// event in a ReviewHandler result slice.
+func lastVerdict(t *testing.T, results []event.Envelope) event.VerdictPayload {
+	t.Helper()
+	for _, e := range results {
+		if e.Type != event.VerdictRendered {
+			continue
+		}
+		var v event.VerdictPayload
+		if err := json.Unmarshal(e.Payload, &v); err != nil {
+			t.Fatalf("unmarshal verdict: %v", err)
+		}
+		return v
+	}
+	t.Fatalf("no VerdictRendered event in results")
+	return event.VerdictPayload{}
+}
+
+// ---------------------------------------------------------------------------
 // ParseVerdict
 // ---------------------------------------------------------------------------
 

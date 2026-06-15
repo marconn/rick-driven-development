@@ -16,6 +16,32 @@ import (
 	"github.com/marconn/rick-event-driven-development/internal/persona"
 )
 
+// promptReinforcementKey carries an optional instruction appended to the built
+// user prompt for a single Handle invocation. It is the mechanism ReviewHandler
+// uses to re-prompt a reviewer whose first response omitted the required
+// VERDICT line (the default_optimistic path) — the reinforcement text is added
+// only on the retry, leaving the common first-attempt path byte-for-byte
+// unchanged. Dormant unless WithPromptReinforcement plants a value.
+type promptReinforcementKey struct{}
+
+// WithPromptReinforcement returns a context whose AIHandler.Handle appends text
+// to the built user prompt. Empty text is a no-op.
+func WithPromptReinforcement(ctx context.Context, text string) context.Context {
+	if text == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, promptReinforcementKey{}, text)
+}
+
+// promptReinforcementFromContext returns the reinforcement instruction planted
+// by WithPromptReinforcement, or "" when none is set (the common path).
+func promptReinforcementFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(promptReinforcementKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
 // AIHandler is the base handler for AI-powered workflow phases.
 // It loads context from the event store, builds prompts via the persona system,
 // calls an AI backend, and emits AIRequestSent + AIResponseReceived events.
@@ -185,6 +211,13 @@ func (h *AIHandler) Handle(ctx context.Context, env event.Envelope) ([]event.Env
 		if err != nil {
 			return nil, fmt.Errorf("handler %s: build prompt: %w", h.name, err)
 		}
+	}
+
+	// Optional per-invocation reinforcement (e.g. ReviewHandler re-prompting a
+	// reviewer that omitted the VERDICT line). Appended after the built prompt
+	// so it is the model's last instruction; "" on the common path.
+	if reinforcement := promptReinforcementFromContext(ctx); reinforcement != "" {
+		userPrompt = userPrompt + "\n\n" + reinforcement
 	}
 
 	// Establish the dispatch context up front. The sticky key pins this

@@ -62,13 +62,30 @@ func (h *ReviewHandler) Handle(ctx context.Context, env event.Envelope) ([]event
 		return nil, err
 	}
 
-	// Extract AI response text from the AIResponseReceived event. rawText is
-	// captured here, before grounding may rewrite responseText to the canned
-	// "no grounded issues" string — preserved for post-mortem via OutputRaw.
 	responseText := h.extractResponseText(aiEvents)
-	rawText := responseText
-
 	verdict := ParseVerdict(responseText)
+
+	// Retry-on-default_optimistic: some backends (notably antigravity) ignore
+	// the prompt's "end with VERDICT: PASS/FAIL" contract and emit a bare
+	// "PASS." or pure prose, so ParseVerdict falls through to
+	// VerdictSourceDefaultOptimistic and silently PASSes — dropping any real
+	// findings the prose contained. Re-prompt exactly once with a reinforcement
+	// instruction that demands the verdict line AND preservation of findings.
+	// Bounded to a single retry: the second attempt is authoritative whether or
+	// not it parses, so a persistently malformed reviewer still surfaces as
+	// default_optimistic (the documented forensic signal) rather than looping.
+	if verdict.Source == event.VerdictSourceDefaultOptimistic {
+		rctx := WithPromptReinforcement(ctx, verdictReinforcement)
+		if retryEvents, rerr := h.ai.Handle(rctx, env); rerr == nil {
+			aiEvents = retryEvents
+			responseText = h.extractResponseText(retryEvents)
+			verdict = ParseVerdict(responseText)
+		}
+	}
+
+	// rawText is the post-retry response before grounding may rewrite it to the
+	// canned "no grounded issues" string — preserved for post-mortem via OutputRaw.
+	rawText := responseText
 	issues := ParseIssues(responseText, verdict.Outcome)
 	var summaryEvt *event.Envelope
 	if h.isPRCategoryReviewer() {
@@ -125,6 +142,20 @@ type prDiffGroundingScope struct {
 	changedFiles map[string]struct{}
 	changedLines map[string]map[int]string
 }
+
+// verdictReinforcement is appended to a reviewer's prompt on the single retry
+// triggered when the first response produced no parseable VERDICT line. It
+// restates the contract and, critically, instructs the model to PRESERVE any
+// findings from the first pass — so a clean retry does not silently downgrade a
+// real concern to PASS just to satisfy the format.
+const verdictReinforcement = `Your previous response did not end with the required verdict line, so it could not be scored and was discarded.
+Re-output your review now. Do NOT soften or drop any issue you already identified.
+If you found ANY issue in your domain, the final line MUST be exactly:
+VERDICT: FAIL
+followed by the numbered grounded findings.
+Otherwise the final line MUST be exactly:
+VERDICT: PASS
+Nothing may follow the verdict line.`
 
 // ParseVerdict extracts VERDICT: PASS or VERDICT: FAIL from AI output.
 // Defaults to VerdictPass if no verdict line is found, and stamps Source with
