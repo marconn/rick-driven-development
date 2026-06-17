@@ -1,5 +1,7 @@
-# Claude Code
-.claude/
+# Claude Code — ignore local config but share the committed agent team
+.claude/*
+!.claude/agents/
+!.claude/TEAM.md
 .codex
 
 # Workflow output (generated artifacts)
