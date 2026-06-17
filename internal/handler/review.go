@@ -771,10 +771,9 @@ var fileLineTokenRe = regexp.MustCompile(`^[^/]+\.\w+:\d+$`)
 var identifierLikeTokenRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\([^)]*\))?$`)
 
 func groundingTokens(description string) []string {
-	matches := codeSpanRefRe.FindAllStringSubmatch(description, -1)
-	tokens := make([]string, 0, len(matches))
-	for _, match := range matches {
-		token := strings.TrimSpace(match[1])
+	contents := extractCodeSpanContents(description)
+	tokens := make([]string, 0, len(contents))
+	for _, token := range contents {
 		if token == "" || token == "Makefile" || strings.Contains(token, "/") {
 			continue
 		}
@@ -786,6 +785,68 @@ func groundingTokens(description string) []string {
 		tokens = append(tokens, token)
 	}
 	return tokens
+}
+
+// extractCodeSpanContents returns the trimmed content of every backtick-delimited
+// code span in s. It follows the CommonMark code-span rule: a span opens with a
+// run of N backticks and closes with the next run of EXACTLY N backticks. This is
+// the only way to recover identifiers the reviewer LLMs double-wrap as
+// `` `Sym` `` — the markdown idiom for a code span whose content itself contains
+// backticks, which the pr-category-review Grounding Contract examples render. A
+// single regexp cannot express the equal-length-run constraint in Go (RE2 has no
+// backreferences), and the prior single-backtick pattern "`([^`]+)`" mis-paired
+// the delimiters on those spans, capturing the surrounding prose and dropping the
+// real identifier — silently demoting grounded findings (incl. a critical) to a
+// canned PASS. Inner backticks left over from the double-wrap are stripped so the
+// content is the bare token, identical to the single-backtick path for that token.
+func extractCodeSpanContents(s string) []string {
+	rs := []rune(s)
+	var out []string
+	i := 0
+	for i < len(rs) {
+		if rs[i] != '`' {
+			i++
+			continue
+		}
+		// Measure the opening backtick run.
+		openStart := i
+		for i < len(rs) && rs[i] == '`' {
+			i++
+		}
+		runLen := i - openStart
+		contentStart := i
+
+		// Find a closing run of EXACTLY runLen backticks. Shorter or longer runs
+		// are part of the span content (that is how `` `x` `` nests).
+		closed := false
+		for i < len(rs) {
+			if rs[i] != '`' {
+				i++
+				continue
+			}
+			closeStart := i
+			for i < len(rs) && rs[i] == '`' {
+				i++
+			}
+			if i-closeStart == runLen {
+				content := strings.TrimSpace(string(rs[contentStart:closeStart]))
+				// Unwrap the inner backtick-wrapped token from the double-wrap
+				// idiom; a no-op for ordinary single-backtick spans.
+				content = strings.TrimSpace(strings.Trim(content, "`"))
+				if content != "" {
+					out = append(out, content)
+				}
+				closed = true
+				break
+			}
+		}
+		if !closed {
+			// Unbalanced opening run — treat it as literal text and resume
+			// scanning just past it so a stray backtick can't swallow the rest.
+			i = contentStart
+		}
+	}
+	return out
 }
 
 func buildCompactPRCategoryReviewOutput(verdict Verdict, issues []event.Issue) string {
