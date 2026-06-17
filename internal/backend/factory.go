@@ -145,6 +145,28 @@ func newRaw(name string) (Backend, error) {
 	}
 }
 
+// HasIdleWatchdog reports whether the named backend arms the idle byte
+// watchdog (WithIdleTimeout) when RICK_BACKEND_STALL_TIMEOUT > 0.
+//
+// All streaming backends (claude/gemini/codex/opencode) do — their stdout
+// emits incrementally, so a silent gap is a meaningful liveness signal that
+// the watchdog converts into FailureKindIdleTimeout. antigravity does NOT:
+// `agy -p` flushes stdout only when the model finishes (no incremental
+// stream), so the byte watchdog has nothing to reset against and false-kills
+// any healthy run — see newRaw's antigravity case. For antigravity the
+// wall-clock is the ONLY liveness deadline.
+//
+// Callers use this to set retry policy: a wall-timeout on a backend with no
+// idle watchdog is the analogue of the idle-timeout a watchdog-equipped
+// backend would have produced on a silent stall, so it warrants the same
+// retry-with-rotation treatment. Unknown / empty names return true
+// (conservative: do not auto-retry an unattributed wall-timeout).
+//
+// MUST stay in sync with newRaw's per-backend watchdog wiring.
+func HasIdleWatchdog(name string) bool {
+	return name != "antigravity"
+}
+
 // stallTimeoutFromEnv reads RICK_BACKEND_STALL_TIMEOUT. Unset → default
 // (defaultStallTimeout); "0" → disabled (idle watchdog off, only the
 // wall-clock timeout applies); unparseable → default with no noise.

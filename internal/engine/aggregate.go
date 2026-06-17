@@ -496,17 +496,19 @@ func (w *WorkflowAggregate) decidePersonaFailed(env event.Envelope) ([]event.Env
 }
 
 // maybeAutoRetry returns a WorkflowRetried envelope when the failed
-// persona's FailureKind is a transient shape AND the per-persona
+// persona's FailureKind warrants a retry-with-rotation AND the per-persona
 // auto-retry cap hasn't been hit yet. Returns (_, false) when the
 // caller should fall through to WorkflowFailed.
 //
-// Transient kinds: FailureKindIdleTimeout. WallTimeout is deliberately
-// excluded — a 20-minute wall-timeout is less likely to succeed on
-// immediate retry than a 2-minute idle stall. Cancelled and
-// HandlerError are skipped because they indicate operator intent or a
-// code-level bug, neither of which retries help.
+// The retryable shapes are decided by failureKindIsAutoRetryable: an
+// idle_timeout (silent stall), and a wall_timeout from a backend with no idle
+// watchdog (antigravity) — where the wall-clock is the only liveness deadline,
+// so its wall-timeout is the analogue of the idle-timeout a watchdog-equipped
+// backend would have emitted. Cancelled / HandlerError / a watchdog-equipped
+// backend's wall_timeout are excluded — they indicate operator intent, a
+// code-level bug, or a 15m+ active run that a retry won't help.
 func (w *WorkflowAggregate) maybeAutoRetry(env event.Envelope, p event.PersonaFailedPayload) (event.Envelope, bool) {
-	if p.FailureKind != event.FailureKindIdleTimeout {
+	if !failureKindIsAutoRetryable(p) {
 		return event.Envelope{}, false
 	}
 	if w.AutoRetries[p.Persona] >= MaxAutoRetriesPerPersona {

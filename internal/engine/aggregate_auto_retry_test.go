@@ -102,8 +102,11 @@ func TestAggregate_AutoRetry_CappedAtOne(t *testing.T) {
 // TestAggregate_AutoRetry_SkipsDeterministicFailureKinds enumerates every
 // non-transient FailureKind and confirms we don't burn an auto-retry on
 // them. HandlerError, BackendError, and Cancelled all indicate a retry
-// won't help; WallTimeout is excluded pragmatically (20min timeouts are
-// unlikely to succeed in another 20min).
+// won't help; WallTimeout (with no backend attribution here) is excluded
+// pragmatically — a 15m+ active run is unlikely to finish on immediate
+// retry. The one exception, a wall_timeout from a watchdog-less backend
+// (antigravity), is covered by
+// TestAggregate_AutoRetry_WallTimeout_WatchdogLessBackend.
 func TestAggregate_AutoRetry_SkipsDeterministicFailureKinds(t *testing.T) {
 	cases := []event.FailureKind{
 		event.FailureKindHandlerError,
@@ -134,6 +137,88 @@ func TestAggregate_AutoRetry_SkipsDeterministicFailureKinds(t *testing.T) {
 			}
 			if len(events) != 1 || events[0].Type != event.WorkflowFailed {
 				t.Fatalf("kind=%q: want WorkflowFailed, got %+v", kind, events)
+			}
+		})
+	}
+}
+
+// TestAggregate_AutoRetry_WallTimeout_WatchdogLessBackend is the regression
+// guard for the reviewer-wedge loop (antigravity, 2026-06-17). A wall_timeout
+// from a backend with NO idle watchdog (antigravity) is the exact analogue of
+// the idle_timeout a watchdog-equipped backend would have emitted on a silent
+// stall — `agy -p` streams nothing until completion, so the wall-clock is its
+// only liveness deadline. It must auto-retry so the rotation offset increments
+// and the persona moves OFF the wedged backend on the next attempt. A
+// wall_timeout from a watchdog-equipped backend (claude) stays terminal: its
+// idle watchdog already converts a silent stall into idle_timeout (retryable)
+// long before the wall-clock, so a genuine 15m+ wall-timeout there is unlikely
+// to finish on immediate retry.
+//
+// Without this, antigravity in a review rotation could never auto-recover: its
+// sole failure mode (wall_timeout) was excluded from auto-retry, so it
+// deterministically re-landed on itself round after round until an operator
+// cancelled (production workflow 1ad8a6bc dispatched the reviewer onto
+// antigravity 6+ times in one day).
+func TestAggregate_AutoRetry_WallTimeout_WatchdogLessBackend(t *testing.T) {
+	tests := []struct {
+		name        string
+		backend     string
+		wantRetried bool
+	}{
+		{"antigravity wall-timeout retries (no idle watchdog)", "antigravity", true},
+		{"claude wall-timeout stays terminal (has idle watchdog)", "claude", false},
+		{"unattributed wall-timeout stays terminal (no backend name)", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agg := NewWorkflowAggregate("wf-wt")
+			agg.Status = StatusRunning
+			def := PRFeedbackWorkflowDef()
+			agg.WorkflowDef = &def
+
+			events, err := agg.Decide(event.Envelope{
+				Type:          event.PersonaFailed,
+				AggregateID:   "wf-wt",
+				CorrelationID: "corr-wt",
+				Payload: event.MustMarshal(event.PersonaFailedPayload{
+					Persona:     "reviewer",
+					Error:       "handler reviewer: backend: " + tt.backend + ": context deadline exceeded (after 15m0.012s)",
+					FailureKind: event.FailureKindWallTimeout,
+					Backend:     tt.backend,
+				}),
+			})
+			if err != nil {
+				t.Fatalf("Decide: %v", err)
+			}
+			if len(events) != 1 {
+				t.Fatalf("want 1 event, got %d: %+v", len(events), events)
+			}
+
+			wantType := event.WorkflowFailed
+			if tt.wantRetried {
+				wantType = event.WorkflowRetried
+			}
+			if events[0].Type != wantType {
+				t.Fatalf("backend=%q: got %s, want %s", tt.backend, events[0].Type, wantType)
+			}
+			if !tt.wantRetried {
+				return
+			}
+
+			var p event.WorkflowRetriedPayload
+			if err := json.Unmarshal(events[0].Payload, &p); err != nil {
+				t.Fatalf("unmarshal retry payload: %v", err)
+			}
+			if !p.Automatic {
+				t.Error("Automatic=false; want true so the cap is enforced and the rotation offset increments")
+			}
+			if p.FromPhase != "reviewer" {
+				t.Errorf("FromPhase=%q; want reviewer", p.FromPhase)
+			}
+			// reviewer + its sync-feedback sibling (qa) must be invalidated so
+			// the barrier re-runs cleanly on the rotated backend.
+			if !slices.Contains(p.InvalidatedPersonas, "reviewer") {
+				t.Errorf("InvalidatedPersonas %v missing reviewer itself", p.InvalidatedPersonas)
 			}
 		})
 	}

@@ -129,3 +129,31 @@ func classifyDispatchFailure(dispatchCtx context.Context, err error) (kind event
 
 	return event.FailureKindHandlerError, stderr, backendName
 }
+
+// failureKindIsAutoRetryable reports whether a PersonaFailed of this shape
+// warrants an automatic retry-with-rotation (WorkflowRetried{Automatic}).
+//
+//   - FailureKindIdleTimeout: the backend subprocess went silent — a retry on
+//     a rotated backend frequently succeeds (the developer-zero-iteration fix).
+//   - FailureKindWallTimeout: terminal for a watchdog-equipped backend (a 15m+
+//     active run is unlikely to finish on immediate retry), BUT transient for a
+//     backend with no idle watchdog (antigravity). There the wall-clock is the
+//     only liveness deadline, so a wall-timeout is the exact analogue of the
+//     idle-timeout a watchdog-equipped backend emits on a silent stall — and
+//     rotating to a different backend is the recovery. Without this, antigravity
+//     in a review rotation can never auto-recover: its sole failure mode
+//     (wall-timeout) would be unretryable and it deterministically re-lands on
+//     itself (the reviewer-wedge loop).
+//
+// Every other kind has its own path (rate-limit pause, partial-review skip,
+// terminal WorkflowFailed) and must not consume an auto-retry slot here.
+func failureKindIsAutoRetryable(p event.PersonaFailedPayload) bool {
+	switch p.FailureKind {
+	case event.FailureKindIdleTimeout:
+		return true
+	case event.FailureKindWallTimeout:
+		return !backend.HasIdleWatchdog(p.Backend)
+	default:
+		return false
+	}
+}
