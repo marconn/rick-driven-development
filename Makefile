@@ -22,7 +22,7 @@ PLANNING_BIN     := $(HOME)/.local/bin/rick-planning
 UNAME_S            := $(shell uname -s)
 RICK_LAUNCHD_LABEL := com.marconn.rick
 
-.PHONY: help build build-agent build-plugins lint test test-race check deploy deploy-agent deploy-plugins restart package clean
+.PHONY: help build build-agent build-plugins lint test test-race check team deploy deploy-agent deploy-plugins restart package clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -56,6 +56,14 @@ test-race: ## Run all tests with the race detector
 	go test -race ./...
 
 check: lint test test-race ## Pre-commit gate: lint + tests + race — always run before committing
+
+# --- Agent team ---
+
+# The committed .claude/agents/ team works in any plain `claude` session; this
+# extra gate is only needed to spawn them as parallel teammates that message
+# each other. Forward flags via ARGS, e.g. `make team ARGS="--agent reviewer"`.
+team: ## Launch Claude with experimental agent teams enabled (.claude/agents/)
+	CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 claude $(ARGS)
 
 # --- Deploy ---
 
