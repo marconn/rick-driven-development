@@ -42,7 +42,7 @@ func (c *TaskCreatorHandler) Handle(ctx context.Context, env event.Envelope) ([]
 		return nil, fmt.Errorf("jira-task-creator: no project plan in state")
 	}
 
-	return createJiraIssues(ctx, c.jira, plan, "jira-task-creator", c.logger)
+	return createJiraIssues(ctx, c.jira, plan, "jira-task-creator", env.CorrelationID, c.logger)
 }
 
 // --- task-creator (standalone workflow) ---
@@ -96,7 +96,7 @@ func (c *StandaloneCreatorHandler) Handle(ctx context.Context, env event.Envelop
 		plan.Goal = plan.EpicTitle
 	}
 
-	return createJiraIssues(ctx, c.jira, plan, "task-creator", c.logger)
+	return createJiraIssues(ctx, c.jira, plan, "task-creator", env.CorrelationID, c.logger)
 }
 
 func (c *StandaloneCreatorHandler) extractPrompt(ctx context.Context, env event.Envelope) string {
@@ -118,12 +118,70 @@ func (c *StandaloneCreatorHandler) extractPrompt(ctx context.Context, env event.
 
 // --- shared Jira issue creation ---
 
-func createJiraIssues(ctx context.Context, j *jira.Client, plan *ProjectPlan, sourceName string, logger *slog.Logger) ([]event.Envelope, error) {
+// jiraIssueWriter is the minimal slice of *jira.Client that createJiraIssues
+// needs. Declaring it as an interface keeps the dedup contract explicit and
+// lets the create path be driven by a stub without standing up an HTTP server.
+// *jira.Client satisfies it directly.
+type jiraIssueWriter interface {
+	Search(ctx context.Context, jql string, maxResults int) (*jira.SearchResult, error)
+	CreateEpic(ctx context.Context, title, description string) (string, error)
+	CreateTask(ctx context.Context, epicKey, title, description string, storyPoints float64) (string, error)
+	LinkIssues(ctx context.Context, blockerKey, blockedKey string) error
+}
+
+// correlationMarker returns the plain-text token embedded in an epic
+// description so a re-dispatch can find the already-created epic via JQL text
+// search. Both the embed (append to description) and the lookup (JQL `~`) use
+// this single helper so the token can't drift between the two sides.
+//
+// The token is a SINGLE unbroken alphanumeric string (non-alphanumerics
+// stripped from the correlation ID): Jira's JQL `~` runs through Lucene, which
+// tokenizes on `:` and `-`. A hyphenated-UUID-plus-colon form like
+// `rick-corr:<uuid>` would split into separate terms, so `description ~` could
+// miss a marker that is genuinely present. Collapsing to one term
+// (e.g. `rickcorr<hexuuid>`) makes it index and match as a single Lucene term.
+func correlationMarker(correlationID string) string {
+	var b strings.Builder
+	b.WriteString("rickcorr")
+	for _, r := range correlationID {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func createJiraIssues(ctx context.Context, j jiraIssueWriter, plan *ProjectPlan, sourceName, correlationID string, logger *slog.Logger) ([]event.Envelope, error) {
 	if j == nil {
 		return nil, fmt.Errorf("%s: JIRA_URL not configured", sourceName)
 	}
 
+	// External-truth idempotency: before creating anything, look for an epic
+	// already carrying this correlation's marker. The marker lives in the epic
+	// description (atomic with CreateEpic — no create-then-tag window), so a
+	// search hit proves a prior run already created the epic. Skipped when the
+	// correlation ID is empty (can't key the marker) or when the search errors
+	// (degrade to creating rather than wedging the workflow).
+	if correlationID != "" {
+		if existing := findExistingEpic(ctx, j, correlationID, logger); existing != "" {
+			logger.Info("epic already created for correlation, idempotent skip",
+				slog.String("key", existing), slog.String("correlation", correlationID))
+			summary := fmt.Sprintf("Épico %s ya existía para esta solicitud (idempotente, no se recreó)", existing)
+			enrichEvt := event.New(event.ContextEnrichment, 1, event.MustMarshal(event.ContextEnrichmentPayload{
+				Source:  sourceName,
+				Kind:    "jira-issues",
+				Summary: summary,
+			})).WithSource("handler:" + sourceName)
+			return []event.Envelope{enrichEvt}, nil
+		}
+	}
+
 	epicDesc := buildEpicDescription(plan)
+	if correlationID != "" {
+		// Plain-text line carrying the single-term marker so the JQL
+		// `description ~` precheck indexes and matches it as one Lucene term.
+		epicDesc = strings.TrimRight(epicDesc, "\n") + "\n\n" + correlationMarker(correlationID)
+	}
 
 	logger.Info("creating Jira epic", slog.String("title", plan.EpicTitle), slog.Int("tasks", len(plan.Tasks)))
 
@@ -185,6 +243,25 @@ func createJiraIssues(ctx context.Context, j *jira.Client, plan *ProjectPlan, so
 	})).WithSource("handler:" + sourceName)
 
 	return []event.Envelope{enrichEvt}, nil
+}
+
+// findExistingEpic searches Jira for an epic carrying the correlation marker.
+// Returns the existing epic key, or "" if none (or on search error — the caller
+// degrades to creating rather than failing the workflow). The marker is a
+// globally-unique token (rick-corr:<correlationID>), so a text match alone is
+// sufficient; project scoping is unnecessary for correctness and is omitted to
+// avoid depending on the client's unexported default project.
+func findExistingEpic(ctx context.Context, j jiraIssueWriter, correlationID string, logger *slog.Logger) string {
+	jql := fmt.Sprintf(`issuetype = Epic AND description ~ %q`, correlationMarker(correlationID))
+	res, err := j.Search(ctx, jql, 1)
+	if err != nil {
+		logger.Warn("idempotency search failed, proceeding to create", slog.Any("error", err))
+		return ""
+	}
+	if res == nil || len(res.Issues) == 0 {
+		return ""
+	}
+	return res.Issues[0].Key
 }
 
 func buildEpicDescription(plan *ProjectPlan) string {

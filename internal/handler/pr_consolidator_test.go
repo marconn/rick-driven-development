@@ -646,7 +646,83 @@ func newFakeHandler() (*PRConsolidatorHandler, *recordedReview) {
 		fetchHeadSHA:    func(context.Context, string, string) (string, error) { return "deadbeef", nil },
 		fetchRawDiff:    func(context.Context, string, string, string, string) string { return "" },
 		viewerDidAuthor: func(context.Context, string, string) (bool, error) { return false, nil },
+		listReviewBodies: func(context.Context, string, string) ([]string, error) {
+			return nil, nil
+		},
 	}, rec
+}
+
+// Idempotency precheck: an existing review already carries the marker for the
+// current head SHA → skip posting entirely.
+func TestPostConsolidatedReview_Idempotent_SkipsWhenMarkerPresent(t *testing.T) {
+	h, rec := newFakeHandler()
+	h.fetchHeadSHA = func(context.Context, string, string) (string, error) { return "deadbeef", nil }
+	h.listReviewBodies = func(context.Context, string, string) ([]string, error) {
+		return []string{"some earlier review\n" + consolidatorReviewMarker("deadbeef")}, nil
+	}
+
+	summary, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", "", approveReviewJSON())
+	if err != nil {
+		t.Fatalf("postConsolidatedReview: %v", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Fatalf("expected zero posts (idempotent skip), got %d", len(rec.calls))
+	}
+	if !strings.Contains(summary, "idempotent skip") {
+		t.Errorf("summary should mention idempotent skip, got %q", summary)
+	}
+}
+
+// The precheck must run BEFORE the JSON-parse fallback: a prior marked review
+// plus unparseable AI output must NOT trigger the postComment fallback (that
+// would double-post over the existing review). Idempotent skip wins outright.
+func TestPostConsolidatedReview_Idempotent_SkipsBeforeJSONFallback(t *testing.T) {
+	h, rec := newFakeHandler()
+	commentCalls := 0
+	h.postComment = func(context.Context, string, string, string) error {
+		commentCalls++
+		return nil
+	}
+	h.fetchHeadSHA = func(context.Context, string, string) (string, error) { return "deadbeef", nil }
+	h.listReviewBodies = func(context.Context, string, string) ([]string, error) {
+		return []string{consolidatorReviewMarker("deadbeef")}, nil
+	}
+
+	summary, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", "", "this is not json")
+	if err != nil {
+		t.Fatalf("postConsolidatedReview: %v", err)
+	}
+	if commentCalls != 0 {
+		t.Errorf("expected zero postComment fallback calls, got %d", commentCalls)
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("expected zero postReview calls, got %d", len(rec.calls))
+	}
+	if !strings.Contains(summary, "idempotent skip") {
+		t.Errorf("summary should mention idempotent skip, got %q", summary)
+	}
+}
+
+// A marker for a DIFFERENT head SHA must not suppress a new review — the PR
+// advanced since the prior review.
+func TestPostConsolidatedReview_Idempotent_PostsWhenMarkerForDifferentSHA(t *testing.T) {
+	h, rec := newFakeHandler()
+	h.fetchHeadSHA = func(context.Context, string, string) (string, error) { return "newsha", nil }
+	h.listReviewBodies = func(context.Context, string, string) ([]string, error) {
+		return []string{consolidatorReviewMarker("oldsha")}, nil
+	}
+
+	if _, err := h.postConsolidatedReview(context.Background(), "owner/repo", "42", "", approveReviewJSON()); err != nil {
+		t.Fatalf("postConsolidatedReview: %v", err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("expected one post (stale marker), got %d", len(rec.calls))
+	}
+	// The freshly posted review must embed the marker for the new SHA so a
+	// later re-dispatch can detect it.
+	if !strings.Contains(rec.calls[0].Body, consolidatorReviewMarker("newsha")) {
+		t.Errorf("posted body should embed marker for new SHA, got %q", rec.calls[0].Body)
+	}
 }
 
 func loadFixture(t *testing.T, name string) string {
@@ -852,8 +928,13 @@ func TestPostConsolidatedReview_InlineOnly_CollapsesBody(t *testing.T) {
 	if len(rec.calls) != 1 {
 		t.Fatalf("want exactly one post, got %d", len(rec.calls))
 	}
-	if rec.calls[0].Body != inlineOnlyReviewBody {
-		t.Errorf("body: want %q (inline-only guard), got %q", inlineOnlyReviewBody, rec.calls[0].Body)
+	// The human-visible body is the inline-only canned string; the hidden
+	// idempotency marker is appended after it.
+	if !strings.HasPrefix(rec.calls[0].Body, inlineOnlyReviewBody) {
+		t.Errorf("body: want prefix %q (inline-only guard), got %q", inlineOnlyReviewBody, rec.calls[0].Body)
+	}
+	if !strings.Contains(rec.calls[0].Body, consolidatorReviewMarker("deadbeef")) {
+		t.Errorf("body should embed idempotency marker, got %q", rec.calls[0].Body)
 	}
 	if len(rec.calls[0].Comments) != 1 {
 		t.Errorf("want 1 inline comment preserved, got %d", len(rec.calls[0].Comments))

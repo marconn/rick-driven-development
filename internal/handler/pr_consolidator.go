@@ -47,6 +47,13 @@ type PRConsolidatorHandler struct {
 	fetchHeadSHA    func(ctx context.Context, fullRepo, prNumber string) (string, error)
 	fetchRawDiff    func(ctx context.Context, workspacePath, base, fullRepo, prNumber string) string
 	viewerDidAuthor func(ctx context.Context, fullRepo, prNumber string) (bool, error)
+	// listReviewBodies returns the body text of every existing review on the
+	// PR. Used for the external-truth idempotency precheck: a boot
+	// RecoveryScan re-dispatch must not double-post a review. The marker we
+	// embed in the body (consolidatorReviewMarker) travels in the POST body, so
+	// its presence on GitHub is atomic with the side effect — no create-then-tag
+	// window.
+	listReviewBodies func(ctx context.Context, fullRepo, prNumber string) ([]string, error)
 }
 
 // ConsolidatorModel is the Claude model this handler pins to. The consolidator
@@ -76,10 +83,19 @@ func NewPRConsolidator(d Deps) *PRConsolidatorHandler {
 		yolo:            d.Yolo,
 		postReview:      postPRReview,
 		postComment:     postPRComment,
-		fetchHeadSHA:    fetchPRHeadSHA,
-		fetchRawDiff:    fetchPRRawDiff,
-		viewerDidAuthor: queryViewerDidAuthor,
+		fetchHeadSHA:     fetchPRHeadSHA,
+		fetchRawDiff:     fetchPRRawDiff,
+		viewerDidAuthor:  queryViewerDidAuthor,
+		listReviewBodies: listPRReviewBodies,
 	}
+}
+
+// consolidatorReviewMarker returns the hidden HTML-comment marker embedded in a
+// posted review body, keyed by the PR head SHA. Both the post path (append) and
+// the idempotency precheck (substring match) use this single helper so the
+// encoding can never drift between the two sides.
+func consolidatorReviewMarker(headSHA string) string {
+	return "<!-- rick-pr-consolidator:" + headSHA + " -->"
 }
 
 // Name returns the unique handler identifier.
@@ -724,6 +740,31 @@ func (h *PRConsolidatorHandler) postConsolidatedReview(
 	ctx context.Context,
 	fullRepo, prNumber, diff, aiOutput string,
 ) (string, error) {
+	// External-truth idempotency precheck — FIRST, before any parse/post/
+	// fallback work. A boot RecoveryScan re-dispatch must short-circuit even
+	// when the AI output is unparseable JSON, otherwise the postComment
+	// fallback below would double-post over a review a prior run already
+	// landed. The marker travels in the review body (consolidatorReviewMarker),
+	// so its presence on GitHub is atomic with the side effect. When the head
+	// SHA is unknown we can't key the marker, so we fall through and post
+	// (accepting a duplicate-on-restart risk for that narrow window).
+	headSHA, shaErr := h.fetchHeadSHA(ctx, fullRepo, prNumber)
+	if shaErr != nil {
+		// Without a commit_id GitHub defaults to the latest commit, which is
+		// acceptable but less precise. Continue with an empty SHA.
+		headSHA = ""
+	}
+	if headSHA != "" {
+		marker := consolidatorReviewMarker(headSHA)
+		if bodies, listErr := h.listReviewBodies(ctx, fullRepo, prNumber); listErr == nil {
+			for _, b := range bodies {
+				if strings.Contains(b, marker) {
+					return fmt.Sprintf("Review already posted to %s#%s at %s (idempotent skip)", fullRepo, prNumber, headSHA), nil
+				}
+			}
+		}
+	}
+
 	review, err := parseConsolidatorJSON(aiOutput)
 	if err != nil {
 		if fbErr := h.postComment(ctx, fullRepo, prNumber, aiOutput); fbErr != nil {
@@ -749,6 +790,12 @@ func (h *PRConsolidatorHandler) postConsolidatedReview(
 	eventType := normalizeReviewEvent(review.Event)
 	originalEvent := eventType
 
+	// Embed the idempotency marker (keyed to the head SHA fetched above) so a
+	// later re-dispatch can detect this review and skip. Atomic with the POST.
+	if headSHA != "" {
+		body += "\n\n" + consolidatorReviewMarker(headSHA)
+	}
+
 	// Tier 1 (preflight): authors can't APPROVE or REQUEST_CHANGES on their
 	// own PR. Probe with GraphQL — single round-trip, server-side identity,
 	// no login-string drift across bot-suffix / SSO / case. Probe failures
@@ -758,13 +805,6 @@ func (h *PRConsolidatorHandler) postConsolidatedReview(
 		if authored, probeErr := h.viewerDidAuthor(ctx, fullRepo, prNumber); probeErr == nil && authored {
 			eventType = "COMMENT"
 		}
-	}
-
-	headSHA, shaErr := h.fetchHeadSHA(ctx, fullRepo, prNumber)
-	if shaErr != nil {
-		// Without a commit_id GitHub defaults to the latest commit, which is
-		// acceptable but less precise. Continue with an empty SHA.
-		headSHA = ""
 	}
 
 	payload := reviewPayload{
@@ -861,6 +901,24 @@ func postPRComment(ctx context.Context, fullRepo, prNumber, body string) error {
 		return fmt.Errorf("gh pr comment: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// listPRReviewBodies returns the body text of every existing review on the PR
+// via `gh api repos/<repo>/pulls/<n>/reviews`. Used for the idempotency
+// precheck. A list failure is non-fatal to the caller (it falls through to
+// posting) so a transient GitHub read error never blocks a review.
+func listPRReviewBodies(ctx context.Context, fullRepo, prNumber string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "gh", "api",
+		fmt.Sprintf("repos/%s/pulls/%s/reviews", fullRepo, prNumber),
+		"--jq", ".[].body")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh api list reviews: %w", err)
+	}
+	// --jq ".[].body" emits one body per line. Review bodies can themselves
+	// contain newlines, but the marker is a single-line HTML comment, so a
+	// substring match against each line is sufficient and robust.
+	return strings.Split(strings.TrimRight(string(out), "\n"), "\n"), nil
 }
 
 // fetchPRHeadSHA returns the head commit SHA for a PR so review comments
