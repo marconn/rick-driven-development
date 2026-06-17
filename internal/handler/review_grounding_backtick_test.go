@@ -86,3 +86,70 @@ func TestGroundIssueRescuesDoubleBacktickFinding(t *testing.T) {
 		t.Fatalf("rescued issue Line = %d; want 0 (unanchored body bullet, never an inline comment at a wrong line)", gi.Line)
 	}
 }
+
+// TestGroundIssueLineLessFinding covers the two grounding follow-ups for a
+// finding that cites an in-scope file but no line number (Line <= 0) — the shape
+// pr-integration emitted on #2082's re-review. Previously the Line<=0 guard
+// dropped these as file_not_in_scope (wrong: the file IS in scope) and never
+// reached the file-scope rescue. Now: an anchorable identifier surfaces the
+// finding as a Line=0 body bullet; an unanchorable one drops as no_line_cited;
+// a genuinely out-of-scope file still drops as file_not_in_scope.
+func TestGroundIssueLineLessFinding(t *testing.T) {
+	// resolver.go: ResolvePrimaryProvider defined on changed line 42.
+	diff := "diff --git a/resolver.go b/resolver.go\n" +
+		"--- a/resolver.go\n" +
+		"+++ b/resolver.go\n" +
+		"@@ -41,1 +41,3 @@ package auth\n" +
+		"+// provider routing\n" +
+		"+func ResolvePrimaryProvider(country string) (string, error) {\n" +
+		"+\treturn \"\", nil\n"
+	scope := buildTestScope(diff)
+
+	t.Run("in_scope_file_no_line_with_anchor_rescues", func(t *testing.T) {
+		issue := event.Issue{
+			File:        "resolver.go",
+			Line:        0, // LLM cited the file but omitted the +line
+			Description: "`major` `resolver.go` `ResolvePrimaryProvider` — routing duplicated, no contract test pins the two paths together.",
+		}
+		gi, ok, reason := scope.groundIssue(issue)
+		if !ok {
+			t.Fatalf("line-less finding naming a real changed symbol was dropped; reason=%q", reason)
+		}
+		if reason != event.GroundingRescuedFileScope {
+			t.Fatalf("reason = %q; want %q", reason, event.GroundingRescuedFileScope)
+		}
+		if gi.Line != 0 {
+			t.Fatalf("rescued issue Line = %d; want 0", gi.Line)
+		}
+	})
+
+	t.Run("in_scope_file_no_line_no_anchor_is_no_line_cited", func(t *testing.T) {
+		issue := event.Issue{
+			File:        "resolver.go",
+			Line:        0,
+			Description: "`major` `resolver.go` — the resolver lacks a contract test (no specific symbol cited).",
+		}
+		_, ok, reason := scope.groundIssue(issue)
+		if ok {
+			t.Fatalf("unanchorable line-less finding should drop, but it grounded")
+		}
+		if reason != event.GroundingDropNoLineCited {
+			t.Fatalf("reason = %q; want %q (file IS in scope — must not be mislabeled file_not_in_scope)", reason, event.GroundingDropNoLineCited)
+		}
+	})
+
+	t.Run("out_of_scope_file_still_file_not_in_scope", func(t *testing.T) {
+		issue := event.Issue{
+			File:        "nonexistent.go",
+			Line:        0,
+			Description: "`major` `nonexistent.go` `SomeSymbol` — hallucinated file.",
+		}
+		_, ok, reason := scope.groundIssue(issue)
+		if ok {
+			t.Fatalf("out-of-scope file should drop, but it grounded")
+		}
+		if reason != event.GroundingDropFileNotInScope {
+			t.Fatalf("reason = %q; want %q", reason, event.GroundingDropFileNotInScope)
+		}
+	})
+}

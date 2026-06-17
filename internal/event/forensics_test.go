@@ -144,8 +144,10 @@ func TestGroundingDropReasonEnumValues(t *testing.T) {
 	cases := map[GroundingDropReason]string{
 		GroundingDropUnspecified:      "",
 		GroundingDropFileNotInScope:   "file_not_in_scope",
+		GroundingDropNoLineCited:      "no_line_cited",
 		GroundingDropLineNotInChanged: "line_not_in_changed",
 		GroundingDropTokenNotNearLine: "token_not_near_line",
+		GroundingRescuedFileScope:     "rescued_file_scope",
 	}
 	for got, want := range cases {
 		if string(got) != want {

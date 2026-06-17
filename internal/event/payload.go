@@ -730,6 +730,14 @@ const (
 	// GroundingDropFileNotInScope means the issue cited a file not in the
 	// PR's changed-files set (after basename resolution).
 	GroundingDropFileNotInScope GroundingDropReason = "file_not_in_scope"
+	// GroundingDropNoLineCited means the cited file WAS in scope but the issue
+	// carried no usable line number (Line <= 0) and the file-scope rescue found
+	// no identifier token to anchor it. Distinct from file_not_in_scope (the
+	// file was real) — the LLM violated the contract by omitting the `+`-line
+	// citation, not by hallucinating a path. Reaches this only after rescue
+	// declines, so a line-less finding that names a real changed symbol still
+	// survives as a Line=0 body bullet instead of dropping here.
+	GroundingDropNoLineCited GroundingDropReason = "no_line_cited"
 	// GroundingDropLineNotInChanged means the cited file was in scope but the
 	// cited line was not among the lines added in the PR diff.
 	GroundingDropLineNotInChanged GroundingDropReason = "line_not_in_changed"

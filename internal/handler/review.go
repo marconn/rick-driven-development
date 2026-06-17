@@ -587,8 +587,19 @@ func (s prDiffGroundingScope) groundIssue(issue event.Issue) (event.Issue, bool,
 		issue.File, issue.Line = extractFileRef(issue.Description)
 	}
 	file := s.resolveFile(issue.File)
-	if file == "" || issue.Line <= 0 {
+	if file == "" {
 		return event.Issue{}, false, event.GroundingDropFileNotInScope
+	}
+	if issue.Line <= 0 {
+		// File is in scope but the finding cited no usable line. The file is
+		// real, so don't mislabel this as file_not_in_scope. Try the file-scope
+		// rescue: a finding that names a real changed symbol still surfaces as
+		// an unanchored body bullet (Line=0). Only when no identifier token
+		// anchors do we drop, with a reason that says the line was missing.
+		if rescued, ok := s.rescueByFileScope(issue); ok {
+			return rescued, true, event.GroundingRescuedFileScope
+		}
+		return event.Issue{}, false, event.GroundingDropNoLineCited
 	}
 	if _, hasLines := s.changedLines[file]; !hasLines {
 		return event.Issue{}, false, event.GroundingDropLineNotInChanged
