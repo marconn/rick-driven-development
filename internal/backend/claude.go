@@ -12,6 +12,17 @@ import (
 	"time"
 )
 
+// defaultClaudeModel pins the Claude CLI to the 1M-context Opus variant when
+// the caller does not specify a model. A headless `claude -p` with no --model
+// otherwise falls back to the CLI's standard model on its 200K-context window.
+// On repos that auto-load large Claude context — a single huli .claude/rules
+// file is ~60K tokens — Rick's codebase snapshot plus a resumed session
+// transcript overran 200K and the CLI aborted the developer run with "Prompt
+// is too long", a failure interactive sessions never hit because they run the
+// [1m] 1M-context variant. The [1m] suffix selects that window. An explicit
+// Request.Model (agent UI selection / RICK_MODEL) still wins.
+const defaultClaudeModel = "claude-opus-4-8[1m]"
+
 // Claude shells out to the Claude CLI binary.
 type Claude struct {
 	binaryPath   string
@@ -88,9 +99,11 @@ func (c *Claude) buildArgs(req Request) (args []string, stdinPrompt string) {
 	if req.Yolo {
 		args = append(args, "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions")
 	}
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
+	model := req.Model
+	if model == "" {
+		model = defaultClaudeModel
 	}
+	args = append(args, "--model", model)
 	if req.MCPConfig != "" {
 		args = append(args, "--mcp-config", req.MCPConfig)
 	}

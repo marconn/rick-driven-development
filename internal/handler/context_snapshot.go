@@ -43,13 +43,26 @@ var skipDirs = map[string]bool{
 type ContextSnapshotHandler struct {
 	store eventstore.Store
 	name  string
+	// developerBackend is the name of the backend that runs the developer
+	// phase (Deps.Backend.Name()). Used to skip the redundant file-tree dump
+	// only when the developer is claude — claude auto-loads the repo's own
+	// CLAUDE.md / .claude/rules and can glob the tree itself, so on repos that
+	// ship heavy Claude context the tree is pure token cost. Other backends
+	// (gemini/codex/antigravity/opencode) do not auto-load that context and
+	// still rely on the tree, so they always receive it.
+	developerBackend string
 }
 
 // NewContextSnapshot creates a context snapshot handler with canonical name.
 func NewContextSnapshot(d Deps) *ContextSnapshotHandler {
+	developerBackend := ""
+	if d.Backend != nil {
+		developerBackend = d.Backend.Name()
+	}
 	return &ContextSnapshotHandler{
-		store: d.Store,
-		name:  "context-snapshot",
+		store:            d.Store,
+		name:             "context-snapshot",
+		developerBackend: developerBackend,
 	}
 }
 
@@ -68,8 +81,14 @@ func (h *ContextSnapshotHandler) Handle(ctx context.Context, env event.Envelope)
 
 	var events []event.Envelope
 
-	// 1. Codebase snapshot
-	codebase := h.snapshotCodebase(workDir, task)
+	// 1. Codebase snapshot. The file-tree dump dominates the snapshot's size
+	// (a 500-entry tree on a large monorepo is ~100KB). When the developer is
+	// claude AND the repo already ships heavy auto-loaded Claude context, the
+	// tree is redundant — claude reads .claude/rules + globs the tree itself —
+	// so omit it to keep the prompt small. Key files + schema (small, budgeted,
+	// and genuinely ground-truth) are always included, for every backend.
+	includeTree := h.developerBackend != "claude" || !hasHeavyClaudeContext(workDir)
+	codebase := h.snapshotCodebase(workDir, task, includeTree)
 	events = append(events, event.New(event.ContextCodebase, 1, event.MustMarshal(codebase)).
 		WithSource("handler:context-snapshot"))
 
@@ -116,8 +135,11 @@ func (h *ContextSnapshotHandler) loadContext(ctx context.Context, correlationID 
 	return workDir, task, nil
 }
 
-// snapshotCodebase walks the file tree and reads key files.
-func (h *ContextSnapshotHandler) snapshotCodebase(workDir, task string) event.ContextCodebasePayload {
+// snapshotCodebase walks the file tree and reads key files. When includeTree is
+// false the file-tree listing is omitted (see hasHeavyClaudeContext) but key
+// files are still read — the walk continues until the key-file budget is spent
+// rather than stopping at the tree-entry cap.
+func (h *ContextSnapshotHandler) snapshotCodebase(workDir, task string, includeTree bool) event.ContextCodebasePayload {
 	payload := event.ContextCodebasePayload{
 		Language:  detectLanguage(workDir),
 		Framework: detectFramework(workDir),
@@ -142,7 +164,11 @@ func (h *ContextSnapshotHandler) snapshotCodebase(workDir, task string) event.Co
 			return nil
 		}
 
-		if len(payload.Tree) >= maxTreeEntries {
+		// Once both the tree (if included) and the key-file budget are
+		// exhausted there is no more work to do — stop walking. When the tree
+		// is omitted, the key-file budget alone bounds the walk.
+		treeFull := !includeTree || len(payload.Tree) >= maxTreeEntries
+		if treeFull && totalFileBytes >= maxFileBytes {
 			return fs.SkipAll
 		}
 
@@ -151,12 +177,13 @@ func (h *ContextSnapshotHandler) snapshotCodebase(workDir, task string) event.Co
 			return nil
 		}
 
-		entry := event.FileEntry{
-			Path:     rel,
-			Size:     info.Size(),
-			Language: langFromExt(filepath.Ext(rel)),
+		if includeTree && len(payload.Tree) < maxTreeEntries {
+			payload.Tree = append(payload.Tree, event.FileEntry{
+				Path:     rel,
+				Size:     info.Size(),
+				Language: langFromExt(filepath.Ext(rel)),
+			})
 		}
-		payload.Tree = append(payload.Tree, entry)
 
 		// Read key files into Files slice (budget-limited).
 		if totalFileBytes < maxFileBytes && info.Size() <= maxSingleFile && isKeyFile(rel, taskLower) {
@@ -173,6 +200,39 @@ func (h *ContextSnapshotHandler) snapshotCodebase(workDir, task string) event.Co
 	})
 
 	return payload
+}
+
+// heavyClaudeContextBytes is the size at which a workspace's auto-loaded Claude
+// context (root CLAUDE.md + .claude/rules/*.md) is substantial enough that the
+// claude CLI is already well-oriented and Rick's file-tree dump adds little but
+// token cost. ~50KB ≈ 13K tokens.
+const heavyClaudeContextBytes = 50 << 10
+
+// hasHeavyClaudeContext reports whether the workspace ships enough auto-loaded
+// Claude context that the claude CLI orients itself without Rick's file tree.
+// It sums the root CLAUDE.md and every .claude/rules/*.md — the files claude
+// injects on its own (a single huli rules file is ~200KB). Stat-only: it reads
+// sizes, never contents.
+func hasHeavyClaudeContext(workDir string) bool {
+	var total int64
+
+	if fi, err := os.Stat(filepath.Join(workDir, "CLAUDE.md")); err == nil {
+		total += fi.Size()
+	}
+
+	rulesDir := filepath.Join(workDir, ".claude", "rules")
+	if entries, err := os.ReadDir(rulesDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			if fi, err := e.Info(); err == nil {
+				total += fi.Size()
+			}
+		}
+	}
+
+	return total >= heavyClaudeContextBytes
 }
 
 // snapshotSchema finds and reads schema definition files.

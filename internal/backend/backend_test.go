@@ -207,6 +207,33 @@ func TestClaudeBuildArgs(t *testing.T) {
 		assertContains(t, args, "--allow-dangerously-skip-permissions")
 	})
 
+	// Regression: a headless `claude -p` with no --model defaults to the CLI's
+	// standard model on a 200K-context window. On repos that auto-load heavy
+	// Claude context (a huli .claude/rules file alone is ~60K tokens) plus
+	// Rick's own codebase snapshot and a resumed session transcript, the
+	// developer prompt overran 200K and the CLI aborted with "Prompt is too
+	// long" — while interactive sessions on the [1m] 1M-context variant had
+	// ample headroom. The driver pins the 1M Opus variant when the caller
+	// doesn't specify a model.
+	t.Run("defaults_to_opus_1m_when_model_unset", func(t *testing.T) {
+		args, _ := c.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+		})
+		assertArgPair(t, args, "--model", defaultClaudeModel)
+	})
+
+	// An explicit model (agent UI / RICK_MODEL) must still win over the pin.
+	t.Run("explicit_model_overrides_default", func(t *testing.T) {
+		args, _ := c.buildArgs(Request{
+			SystemPrompt: "sys",
+			UserPrompt:   "msg",
+			Model:        "claude-haiku-4-5-20251001",
+		})
+		assertArgPair(t, args, "--model", "claude-haiku-4-5-20251001")
+		assertNotContains(t, args, defaultClaudeModel)
+	})
+
 	t.Run("model_and_mcp", func(t *testing.T) {
 		args, _ := c.buildArgs(Request{
 			SystemPrompt: "sys",

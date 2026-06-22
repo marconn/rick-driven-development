@@ -142,6 +142,122 @@ func TestContextSnapshotEmitsCodebaseEvent(t *testing.T) {
 	}
 }
 
+func TestHasHeavyClaudeContext(t *testing.T) {
+	big := make([]byte, heavyClaudeContextBytes+1)
+
+	t.Run("no claude context", func(t *testing.T) {
+		tmp := t.TempDir()
+		writeFile(t, filepath.Join(tmp, "main.go"), []byte("package main\n"))
+		if hasHeavyClaudeContext(tmp) {
+			t.Error("empty repo should not have heavy claude context")
+		}
+	})
+
+	t.Run("small CLAUDE.md is not heavy", func(t *testing.T) {
+		tmp := t.TempDir()
+		writeFile(t, filepath.Join(tmp, "CLAUDE.md"), []byte("# small\n"))
+		if hasHeavyClaudeContext(tmp) {
+			t.Error("small CLAUDE.md should not count as heavy")
+		}
+	})
+
+	t.Run("large .claude/rules is heavy", func(t *testing.T) {
+		tmp := t.TempDir()
+		writeFile(t, filepath.Join(tmp, ".claude", "rules", "go-backend.md"), big)
+		if !hasHeavyClaudeContext(tmp) {
+			t.Error("large .claude/rules should be heavy")
+		}
+	})
+
+	t.Run("large root CLAUDE.md is heavy", func(t *testing.T) {
+		tmp := t.TempDir()
+		writeFile(t, filepath.Join(tmp, "CLAUDE.md"), big)
+		if !hasHeavyClaudeContext(tmp) {
+			t.Error("large CLAUDE.md should be heavy")
+		}
+	})
+
+	t.Run("non-md files under .claude/rules ignored", func(t *testing.T) {
+		tmp := t.TempDir()
+		writeFile(t, filepath.Join(tmp, ".claude", "rules", "data.bin"), big)
+		if hasHeavyClaudeContext(tmp) {
+			t.Error("non-.md files should not count toward claude context")
+		}
+	})
+}
+
+// Fix: on repos that auto-load heavy Claude context, the file-tree dump is
+// redundant for a claude developer (it reads .claude/rules and globs itself)
+// but other backends still need it. snapshotCodebase must drop the tree only
+// for claude+heavy, and always keep key files.
+func TestContextSnapshotTreeGatingByBackend(t *testing.T) {
+	// Build a workspace that ships heavy .claude/rules plus real source.
+	newWorkspace := func(t *testing.T) (store *mockStore, corr string) {
+		t.Helper()
+		tmp := t.TempDir()
+		writeFile(t, filepath.Join(tmp, ".claude", "rules", "go-backend.md"),
+			make([]byte, heavyClaudeContextBytes+1))
+		writeFile(t, filepath.Join(tmp, "go.mod"), []byte("module example.com/test\n\ngo 1.24\n"))
+		writeFile(t, filepath.Join(tmp, "main.go"), []byte("package main\nfunc main() {}\n"))
+
+		store = newMockStore()
+		store.correlationEvents["corr-tree"] = []event.Envelope{
+			event.New(event.WorkspaceReady, 1, event.MustMarshal(event.WorkspaceReadyPayload{
+				Path: tmp, Branch: "issue-1", Base: "main",
+			})).WithCorrelation("corr-tree"),
+			event.New(event.WorkflowRequested, 1, event.MustMarshal(event.WorkflowRequestedPayload{
+				Prompt: "fix bug",
+			})).WithCorrelation("corr-tree"),
+		}
+		return store, "corr-tree"
+	}
+
+	codebaseOf := func(t *testing.T, h *ContextSnapshotHandler, corr string) event.ContextCodebasePayload {
+		t.Helper()
+		env := event.New(event.PersonaCompleted, 1, nil).WithCorrelation(corr)
+		got, err := h.Handle(context.Background(), env)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) == 0 || got[0].Type != event.ContextCodebase {
+			t.Fatalf("expected ContextCodebase first, got %v", got)
+		}
+		var p event.ContextCodebasePayload
+		mustUnmarshal(t, got[0].Payload, &p)
+		return p
+	}
+
+	hasKeyFile := func(p event.ContextCodebasePayload, name string) bool {
+		for _, f := range p.Files {
+			if f.Path == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("claude + heavy context: tree omitted, key files kept", func(t *testing.T) {
+		store, corr := newWorkspace(t)
+		h := &ContextSnapshotHandler{store: store, developerBackend: "claude"}
+		p := codebaseOf(t, h, corr)
+		if len(p.Tree) != 0 {
+			t.Errorf("expected no tree entries for claude+heavy, got %d", len(p.Tree))
+		}
+		if !hasKeyFile(p, "go.mod") || !hasKeyFile(p, "main.go") {
+			t.Errorf("key files must survive tree trim, got %+v", p.Files)
+		}
+	})
+
+	t.Run("non-claude backend keeps tree even with heavy context", func(t *testing.T) {
+		store, corr := newWorkspace(t)
+		h := &ContextSnapshotHandler{store: store, developerBackend: "gemini"}
+		p := codebaseOf(t, h, corr)
+		if len(p.Tree) == 0 {
+			t.Error("non-claude backend must keep the file tree")
+		}
+	})
+}
+
 func TestContextSnapshotTaskRelevance(t *testing.T) {
 	tmp := t.TempDir()
 	writeFile(t, filepath.Join(tmp, "go.mod"), []byte("module test\n"))
