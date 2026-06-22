@@ -49,7 +49,7 @@ For **Cosmetic** items: were any addressed? (Not required for PASS, but note if 
 
 ## Required Output Format
 
-Provide your verification report, then end with EXACTLY one of these lines:
+Write your verification report, then on its own line emit EXACTLY one verdict line:
 
 ```
 VERDICT: PASS
@@ -61,4 +61,4 @@ or
 VERDICT: FAIL
 ```
 
-If FAIL, list the specific actionable items from the original feedback that were NOT properly addressed, as a numbered list after the verdict.
+If FAIL, immediately **follow that verdict line** with the specific actionable items from the original feedback that were NOT properly addressed, as a numbered list (the list comes *after* the `VERDICT: FAIL` line, not before it).

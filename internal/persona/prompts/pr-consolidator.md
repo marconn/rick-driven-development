@@ -42,10 +42,16 @@ Schema:
 
 ## Event Selection
 
-- `"REQUEST_CHANGES"` when any blocking / must-fix issue is present.
-- `"COMMENT"` for non-blocking findings only.
-- `"APPROVE"` when no grounded findings of any severity were surfaced.
-- The **Documentation Reference Check** section (if present) is **advisory and non-blocking** — it lists references to symbols this PR renamed/removed that linger in unchanged files. Surface its items under `unanchored` (the files are outside the diff, so they cannot anchor). **Never** raise the event to `REQUEST_CHANGES` on the strength of these alone; they do not block, and they must not by themselves prevent an otherwise-clean `APPROVE` (use `COMMENT` in that case).
+Map the **highest severity surfaced by the category reviewers** to the event deterministically — do not improvise blocking status:
+
+- `"REQUEST_CHANGES"` when at least one **critical or major** finding is present. These are must-fix.
+- `"COMMENT"` when the only findings are **minor**, or when the only findings come from `pr-hygiene` (hygiene never blocks a PR on its own).
+- `"APPROVE"` when no grounded findings of any severity were surfaced. The Documentation Reference Check (below) does not count as a grounded finding for this purpose — an advisory-only result still `APPROVE`s.
+
+Severity comes from the reviewer's own label on each finding (`critical` / `major` / `minor`). If a finding has no explicit severity, infer it conservatively from the wording (a correctness/security/data break → major; a style/naming note → minor) — but never escalate a minor to REQUEST_CHANGES.
+
+- `pr-hygiene` findings are **never blocking** — surface them as `COMMENT`-level inline comments, never as the reason for `REQUEST_CHANGES`.
+- The **Documentation Reference Check** section (if present) is **advisory and non-blocking** — it lists references to symbols this PR renamed/removed that linger in unchanged files. Surface its items under `unanchored` (the files are outside the diff, so they cannot anchor). It does **not** change the event: never raise to `REQUEST_CHANGES` on its strength, and never downgrade an otherwise-clean `APPROVE` to `COMMENT` for it alone. If the code findings are clean and the only thing surfaced is this advisory, the event stays `APPROVE`, with the advisory items listed under `unanchored`.
 
 ## Summary Field
 
