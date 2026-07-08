@@ -6,7 +6,7 @@ Identity layer for AI personas: name constants, the system-prompt `Registry`, an
 - `*.go` (this dir) — `Registry`, `PromptBuilder`, both `embed.FS` entrypoints, persona name constants
 - `phases/` — per-phase user-prompt `text/template` markdown -> see `phases/CLAUDE.md`
 - `prompts/` — per-persona system-prompt markdown (identity text) -> see `prompts/CLAUDE.md`. These remain the **default + rollback fallback** — they are NOT gutted by the manifest migration (F15).
-- `personas/<name>/SKILL.md` — data-driven persona manifests (the 13 `pr-*` reviewers migrated in 0009). Identity = the reviewer's domain sections; shared boilerplate referenced via `skills`. Opt-in: an operator points `RICK_PERSONA_MANIFESTS_DIR` at this tree (or a copy); unset ⇒ the embedded `prompts/pr-*.md` are used unchanged.
+- `personas/<name>/SKILL.md` — data-driven persona manifests (the 13 `pr-*` reviewers migrated in 0009, plus `pr-correctness` added later — 14 total). Identity = the reviewer's domain sections; shared boilerplate referenced via `skills`. Opt-in: an operator points `RICK_PERSONA_MANIFESTS_DIR` at this tree (or a copy); unset ⇒ the embedded `prompts/pr-*.md` are used unchanged.
 - `skills/<name>/SKILL.md` — reusable skill fragments composed into persona prompts (`diff-grounding`, `domain-boundary`). The shared reviewer boilerplate now lives here ONCE instead of copy-pasted across 13 prompts.
 
 ## Files (top level)

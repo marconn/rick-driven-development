@@ -41,6 +41,7 @@ const (
 	PRHygiene          = "pr-hygiene"
 	PRVendorResilience = "pr-vendor-resilience"
 	PRDocsConcordance  = "pr-docs-concordance"
+	PRCorrectness      = "pr-correctness"
 
 	// PR reply composer — text-only persona whose output Rick posts on its
 	// behalf. Runs with Yolo=false (no tool access) to eliminate the
@@ -104,6 +105,7 @@ func DefaultRegistry() *Registry {
 		{Name: PRHygiene, Description: "Code Hygiene Reviewer"},
 		{Name: PRVendorResilience, Description: "Vendor Resilience Reviewer"},
 		{Name: PRDocsConcordance, Description: "Docs/Code Concordance Reviewer"},
+		{Name: PRCorrectness, Description: "Behavioral Correctness Reviewer"},
 		{Name: PRReplier, Description: "PR Reply Composer"},
 	} {
 		_ = r.Register(&p)

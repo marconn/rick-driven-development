@@ -156,7 +156,7 @@ func TestPRReviewerSafetyConfigUnchanged(t *testing.T) {
 		"pr-security", "pr-concurrency", "pr-error-handling", "pr-observability",
 		"pr-api-contract", "pr-idempotency", "pr-testing", "pr-integration",
 		"pr-performance", "pr-data", "pr-hygiene", "pr-vendor-resilience",
-		"pr-docs-concordance",
+		"pr-docs-concordance", "pr-correctness",
 	}
 	for _, name := range prReviewers {
 		if !isVerdictBearingReviewer(name) {

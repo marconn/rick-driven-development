@@ -64,7 +64,7 @@ func isVerdictBearingReviewer(name string) bool {
 		"pr-observability", "pr-api-contract", "pr-idempotency",
 		"pr-testing", "pr-integration", "pr-performance",
 		"pr-data", "pr-hygiene", "pr-vendor-resilience",
-		"pr-docs-concordance":
+		"pr-docs-concordance", "pr-correctness":
 		return true
 	}
 	return false
@@ -326,6 +326,10 @@ func RegisterAll(reg *Registry, d Deps) error {
 		}),
 		NewReviewHandler(ReviewHandlerConfig{
 			AIConfig:      reviewAiCfg("pr-docs-concordance", persona.PRDocsConcordance),
+			TargetPersona: "developer",
+		}),
+		NewReviewHandler(ReviewHandlerConfig{
+			AIConfig:      reviewAiCfg("pr-correctness", persona.PRCorrectness),
 			TargetPersona: "developer",
 		}),
 
